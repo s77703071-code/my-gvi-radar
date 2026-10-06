@@ -1,5 +1,5 @@
 import sys, subprocess, os
-# 💡 智慧自我修復盾：啟動時自動偵測並安裝 xlsxwriter，徹底根除 No module named 報錯！ [3.1]
+# 💡 智慧自我修復盾：啟動時自動偵測並安裝 xlsxwriter，徹底根除 No module named 報錯！
 try:
     import xlsxwriter
 except ImportError:
@@ -11,10 +11,10 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. 網頁基本設定與密碼驗證引擎（1.3 版）
+# 1. 網頁基本設定與密碼驗證引擎（1.6 版）
 # ==========================================
-# 🧠 推進升級防線：此處自動將版號正式推進為「機構級三核心策略雷達 1.3」
-st.set_page_config(page_title="機構級三核心策略雷達 1.3", layout="wide", page_icon="📈")
+# 🧠 推進升級防線：此處自動將版號正式推進為「機構級三核心策略雷達 1.6」
+st.set_page_config(page_title="機構級三核心策略雷達 1.6", layout="wide", page_icon="📈")
 
 # 💡 雲端絕對路徑自動鎖
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,7 +37,7 @@ if input_password != "7770":
     st.warning("⚠️ 密碼未輸入或輸入錯誤！請於左側邊欄輸入正確的管理員操盤密碼以解鎖核心雷達。")
     st.stop() # 💡 密碼錯誤時強制中斷，後方所有數據與元件 100% 完全隱形！
 else:
-    st.title("📈 機構級三核心策略雷達 1.3（RWD 雙模自適應完全體）")
+    st.title("📈 機構級三核心策略雷達 1.6（RWD 雙模精緻完全體）")
     # ==========================================
     # 2. 頂部區塊：四大全球大盤即時指數看板
     # ==========================================
@@ -88,7 +88,6 @@ else:
     personal_ma_configs = []
     default_colors = ["#FF5733", "#33FF57", "#3357FF", "#F3FF33", "#FF33F3"]
 
-    # 💡 徹底消滅 default_periods 變數陣列，100% 根除任何語法錯誤地雷
     for i in range(1, 6):
         col_show, col_p, col_c = st.sidebar.columns(3)
         with col_show: is_active = st.checkbox("開", value=(i <= 3), key=f"ma_active_{i}")
@@ -179,39 +178,47 @@ else:
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"]); st.markdown("---")
                 tab1, tab2 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告"])
                 with tab1:
+                    # 💡 1.6 版黃金定位核心：精算各條均線最新數值，並將 font-size 縮小調整為 15px，完美對齊標題大小！
+                    ma_display_html = "<div style='background-color:rgba(0,0,0,0.65); padding:4px 10px; border:1px solid gray; border-radius:6px; display:inline-block; font-family:monospace; font-size:15px; color:white; vertical-align:middle; margin-left:15px;'>"
+                    for ma in personal_ma_configs:
+                        p, c = ma["period"], ma["color"]
+                        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                        if not ma_series.empty:
+                            latest_ma_val = ma_series.to_numpy().flatten()[-1]
+                            ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ MA {p}: {latest_ma_val:,.2f}</span>"
+                    ma_display_html += "</div>"
+                    
+                    # 💡 用 HTML 語法漂亮地將縮小後的精緻圖例與標題並排呈現在正上方
+                    st.markdown(f"### 📊 【{c_name}】{selected_tf} 即時報 K 線畫布 {ma_display_html}", unsafe_allow_html=True)
+                    
                     fig = make_subplots(rows=1, cols=1)
                     fig.add_trace(go.Candlestick(x=date_strings, open=df_chart['Open'].to_numpy().flatten().tolist(), high=df_chart['High'].to_numpy().flatten().tolist(), low=df_chart['Low'].to_numpy().flatten().tolist(), close=df_chart['Close'].to_numpy().flatten().tolist(), name="K線"), row=1, col=1)
                     
-                    # 💡 1.3 版動態排版核心：邊欄手動強制優化勾選，徹底釋放手機小螢幕 K 線寬度
                     st.sidebar.markdown("#### 📱 裝置視覺優化")
-                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False, help="當手機 K 線擠在一起時，勾選此項可完美釋放 K 線橫向寬度！")
+                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False, help="當手機直立或橫放 K 線擠在一起時，勾選此項可完美釋放 K 線橫向寬度！")
                     
-                    annotation_text = ""
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
                         ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
                         if not ma_series.empty:
                             ma_list = ma_series.to_numpy().flatten().tolist()
-                            latest_ma_val = ma_list[-1]
                             fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'MA {p}', line=dict(color=c, width=1.8)), row=1, col=1)
-                            annotation_text += f"<span style='color:{c}; font-weight:bold;'>■ MA {p}: {latest_ma_val:,.2f}</span>&nbsp;&nbsp;"
                     
-                    # 💡 1.3版自適應優化：手機排佈 r=40 且圖例移到下方(y=-0.2)；電腦排佈則維持大字體外側外掛懸掛
                     if force_mobile:
                         fig.update_layout(
-                            xaxis_rangeslider_visible=False, height=480, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=False,
-                            annotations=[dict(x=0.5, y=-0.2, xref="paper", yref="paper", text=annotation_text, showarrow=False, align="center", font=dict(family="Courier New, monospace", size=16, color="white"), bgcolor="rgba(0,0,0,0.65)", bordercolor="gray", borderwidth=1, borderpad=6)]
+                            xaxis_rangeslider_visible=False, height=450, margin=dict(l=10, r=10, t=10, b=10), dragmode='pan', showlegend=False,
+                            xaxis=dict(tickangle=0, maxallowedticks=5, nticks=5, showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
+                            yaxis=dict(side="right", tickfont=dict(size=10), showgrid=True, gridcolor="rgba(128,128,128,0.2)")
                         )
                     else:
                         fig.update_layout(
-                            xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=280, t=10, b=10), dragmode='pan', showlegend=False,
-                            annotations=[dict(x=1.08, y=0.5, xref="paper", yref="paper", text=annotation_text, showarrow=False, align="left", font=dict(family="Courier New, monospace", size=18, color="white"), bgcolor="rgba(0,0,0,0.65)", bordercolor="gray", borderwidth=1, borderpad=8)]
+                            xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=False,
+                            xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
                         )
                     st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'drawrect', 'drawcircle', 'eraseshape'], 'displayModeBar': True, 'scrollZoom': True})
                 with tab2:
                     st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
         except: pass
-
     def signature_save_to_db(t):
         try:
             stock = yf.Ticker(t); info = stock.info
@@ -237,6 +244,7 @@ else:
         with st.spinner("💾 系統正全自動同步下載基本面核心大池..."):
             for t in (AUTO_TW_UNIVERSE + AUTO_US_UNIVERSE): signature_save_to_db(t)
         st.sidebar.success("🎉 基本面數據已永久落地 SQLite 資料庫！")
+
     st.markdown("---")
     st.markdown("### 🚀 華爾街機構級三核心策略雷達")
     col_s1, col_s2, col_s3 = st.columns(3)
@@ -287,7 +295,7 @@ else:
                 st.success("🎉 全台股大池動態多空 Excel 交叉過濾成功！請點擊上方按鈕儲存檔案。")
             except Exception as ex_e: st.error(f"Excel 導出引擎異常: {ex_e}")
 
-    # 💡 欄位對齊安全防線：將 col_btn 的宣告精確包裹進密碼鎖解鎖大括號內部，徹底砍斷 NameError
+    # 💡 智慧校正排版：將 col_btn 的變數宣告精確包裹進密碼鎖解鎖大括號內部，避免 NameError 地雷！
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
         conn = sqlite3.connect(DB_FILE)
