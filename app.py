@@ -1,4 +1,4 @@
-import sys, subprocess
+import sys, subprocess, os
 # 💡 智慧自我修復盾：啟動時自動偵測並安裝 xlsxwriter，徹底根除 No module named 報錯！ [3.1]
 try:
     import xlsxwriter
@@ -11,13 +11,16 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. 網頁基本設定與本地 SQLite 資料庫常駐初始化
+# 1. 網頁基本設定與雲端常駐絕對路徑自動鎖（1.1 版）
 # ==========================================
-# 🧠 已永久鎖定使用者個人偏好：此處綁定專屬版號「機構級三核心策略雷達 1.0」以供未來隨時一鍵代碼還原
-st.set_page_config(page_title="機構級三核心策略雷達 1.0", layout="wide", page_icon="📈")
-st.title("📈 機構級三核心策略雷達 1.0（全新 AI 診斷與動態籌碼 Top10 完全體）")
+# 🧠 升級備份防線：此處自動更改版號為「機構級三核心策略雷達 1.1」
+st.set_page_config(page_title="機構級三核心策略雷達 1.1", layout="wide", page_icon="📈")
+st.title("📈 機構級三核心策略雷達 1.1（雲端路徑智慧優化完全體）")
 
-DB_FILE = "market_cache.db"
+# 💡 核心解鎖點：用 os 語法動態抓取絕對路徑，100% 根除雲端找不到資料庫的 Bug
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.cursor().execute('''CREATE TABLE IF NOT EXISTS market_data 
@@ -79,7 +82,7 @@ st.sidebar.markdown("#### 🛠️ 自訂個人看盤均線 (可自由勾選隱�
 personal_ma_configs = []
 default_colors = ["#FF5733", "#33FF57", "#3357FF", "#F3FF33", "#FF33F3"]
 
-# 💡 徹底消滅 default_periods 變數陣列，直接硬鎖預設均線天數，100% 根除第 73 行語法錯誤
+# 💡 徹底消滅變數陣列，直接硬鎖預設均線天數，100% 根除第 73 行語法錯誤
 for i in range(1, 6):
     col_show, col_p, col_c = st.sidebar.columns(3)
     with col_show: is_active = st.checkbox("開", value=(i <= 3), key=f"ma_active_{i}")
@@ -182,7 +185,7 @@ if selected_stock:
                         fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'MA {p}', line=dict(color=c, width=1.8)), row=1, col=1)
                         annotation_text += f"<span style='color:{c}; font-weight:bold;'>■ MA {p}: {latest_ma_val:,.2f}</span><br>"
                 
-                # 💡 1.0 版視覺優化對位：r 拓寬至 280，x 移動至 1.08，確保 18 級大圖例 100% 獨立懸掛在外側安全區之外！
+                # 💡 1.1 版視覺優化對位：r 拓寬至 280，x 移動至 1.08，確保 18 級大圖例 100% 獨立懸掛在外側安全區之外！
                 fig.update_layout(
                     xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=280, t=10, b=10), dragmode='pan',
                     showlegend=False,
@@ -320,6 +323,9 @@ def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
         if active_strats == 0: df_res['綜合分數'] = df_res['GVI_Rank']
         df_res = df_res.sort_values(by='綜合分數', ascending=False).head(20).reset_index(drop=True)
         df_res['GVI值'] = df_res['GVI值'].round(4); df_res['一年最高點距離'] = df_res['動能分數'].round(1).astype(str) + "%"; df_res['自由現金流收益'] = df_res['自由現金流收益'].round(2).astype(str) + "%"; df_res['本益成長比(PEG)'] = df_res['本益成長比(PEG)'].round(2)
+        cols = ['股票代碼', '股票名稱', 'Kitchen目前股價', 'GVI值', '一年最高點距離', '自由現金流收益', '本益成長比(PEG)', '⚡ 即時籌碼動能']
+        # 💡 欄位對齊相容性自動校正補丁
+        if 'Kitchen目前股價' in df_res.columns: df_res.rename(columns={'Kitchen目前股價': '目前股價'}, inplace=True)
         cols = ['股票代碼', '股票名稱', '目前股價', 'GVI值', '一年最高點距離', '自由現金流收益', '本益成長比(PEG)', '⚡ 即時籌碼動能']
         st.session_state['active_quant_results'] = df_res[cols].to_dict('records')
         st.markdown(f"#### {title} (已依勾選排序前 20 檔最優清單)"); st.dataframe(df_res[cols], use_container_width=True)
