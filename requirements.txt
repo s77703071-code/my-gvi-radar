@@ -1,7 +1,6 @@
-streamlit
 yfinance
 pandas
 numpy
-openai
 plotly
 xlsxwriter
+google-genai
