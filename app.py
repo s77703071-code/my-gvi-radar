@@ -1,10 +1,10 @@
 import sys, subprocess, os
 
 # ==========================================
-# 💡 2.1 版智能分流核心：全自動偵測目前是網路雲端還是電腦本地，彻底徹底粉碎權限拒絕錯誤！ [3.1]
+# 💡 2.1 版智能分流核心：偵測到是 Streamlit 雲端時，100% 關閉本地 pip 安裝，徹底根除閃退！
 # ==========================================
 if not os.environ.get("STREAMLIT_SERVER_ADDRESS"):
-    # 💻 只有在您電腦本地端運行時，才啟動 websockets 13.1 自動降級降維修復盾
+    # 💻 只有在您電腦本地 Windows 運行時，才發動 websockets 自動降級防禦盾
     try:
         import websockets
         from importlib.metadata import version as get_version
@@ -13,7 +13,6 @@ if not os.environ.get("STREAMLIT_SERVER_ADDRESS"):
     except:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets==13.1"])
     
-    # 智慧自我修復盾：本地端自動補齊必要套件
     try: import xlsxwriter
     except ImportError: subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
     try: import google.genai
@@ -24,12 +23,7 @@ from google.genai import Client
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# ==========================================
-# 1. 網頁基本設定與密碼驗證引擎（2.1 版）
-# ==========================================
-# 🧠 推進升級防線：此處正式將版號推進並鎖定為「機構級三核心策略雷達 2.1」
 st.set_page_config(page_title="機構級三核心策略雷達 2.1", layout="wide", page_icon="📈")
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
 
@@ -41,22 +35,19 @@ def init_db():
     conn.commit(); conn.close()
 init_db()
 
-# 🔐 實體密碼鎖面板：管理員操盤密碼固定為 7770
+# 🔐 管理員操盤密碼固定為 7770
 st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
 input_password = st.sidebar.text_input("請輸入管理員操盤密碼：", type="password")
 
 if input_password != "7770":
     st.title("🔒 華爾街機構級三核心策略雷達終端")
-    st.warning("⚠️ 密碼未輸入或輸入錯誤！請於左側邊欄輸入正確的管理員操盤密碼以解鎖核心雷達。")
+    st.warning("⚠️ 請於左側邊欄輸入正確的管理員操盤密碼以解鎖核心雷達。")
     st.stop()
 else:
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     selected_stock = st.sidebar.text_input("輸入台美股代碼（台股加 .TW）：", value="NVDA").strip().upper()
-    st.title("📈 機構級三核心策略雷達 2.1（雙模全自動對位分流完全體）")
-    # ==========================================
-    # 2. 頂部區塊：四大全球大盤即時指數看板
-    # ==========================================
+    st.title("📈 機構級三核心策略雷達 2.1（2026 旗艦雙模完全體）")
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
 
@@ -84,10 +75,6 @@ else:
     with col4: st.metric(label="🇺🇸 那斯達克指數 (^IXIC)", value=f"{nas_val:,.2f}" if nas_val else "載入中...", delta=f"{nas_chg:+.2f} ({nas_pct:+.2f}%)" if nas_val else "--")
 
     st.markdown("---")
-
-    # ==========================================
-    # 3. 左側邊欄：個人自訂控制面板
-    # ==========================================
     st.sidebar.markdown("### 🧠 系統 API 金鑰設定")
     api_key_input = st.sidebar.text_input("請輸入您的 Gemini API Key：", type="password")
 
@@ -115,17 +102,7 @@ else:
 
     AUTO_TW_UNIVERSE = ['2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', '3008.TW', '2303.TW', '2881.TW', '2882.TW', '2891.TW', '1301.TW', '1303.TW', '2002.TW', '2207.TW', '2327.TW', '2357.TW', '2379.TW', '2395.TW', '2408.TW', '2603.TW']
     AUTO_US_UNIVERSE = ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'TSM', 'AMD', 'AVGO', 'QCOM', 'INTC', 'NFLX', 'SMCI', 'ASML', 'COST', 'WMT', 'JPM', 'V', 'LLY']
-
-    STOCK_NAME_MAP = {
-        '2330.TW': '台積電', '2317.TW': '鴻海', '2454.TW': '聯發科', '2308.TW': '台達電', '2382.TW': '廣達',
-        '3008.TW': '大立光', '2303.TW': '聯電', '2881.TW': '富邦金', '2882.TW': '國泰金', '2891.TW': '中信金',
-        '1301.TW': '台塑', '1303.TW': '南亞', '2002.TW': '中鋼', '2207.TW': '和泰車', '2327.TW': '國巨',
-        '2357.TW': '華碩', '2379.TW': '瑞昱', '2395.TW': '研華', '2408.TW': '南亞科', '2603.TW': '長榮',
-        'AAPL': '蘋果公司', 'NVDA': '輝達', 'MSFT': '微軟', 'GOOGL': '谷歌', 'AMZN': '亞慢遜',
-        'META': '臉書META', 'TSLA': '特斯拉', 'TSM': '台積電ADR', 'AMD': '超微半導體', 'AVGO': '博通',
-        'QCOM': '高通', 'INTC': '英特爾', 'NFLX': '網飛', 'SMCI': '美超微', 'ASML': '艾司摩爾',
-        'COST': '好市多', 'WMT': '沃爾瑪', 'JPM': '摩根大通', 'V': 'VISA卡', 'LLY': '禮來藥廠'
-    }
+    STOCK_NAME_MAP = {'2330.TW': '台積電', '2317.TW': '鴻海', '2454.TW': '聯發科', '2308.TW': '台達電', '2382.TW': '廣達', '3008.TW': '大立光', '2303.TW': '聯電', '2881.TW': '富邦金', '2882.TW': '國泰金', '2891.TW': '中信金', '1301.TW': '台塑', '1303.TW': '南亞', '2002.TW': '中鋼', '2207.TW': '和泰車', '2327.TW': '國巨', '2357.TW': '華碩', '2379.TW': '瑞昱', '2395.TW': '研華', '2408.TW': '南亞科', '2603.TW': '長榮', 'AAPL': '蘋果公司', 'NVDA': '輝達', 'MSFT': '微軟', 'GOOGL': '谷歌', 'AMZN': '亞馬遜', 'META': '臉書META', 'TSLA': '特斯拉', 'TSM': '台積電ADR', 'AMD': '超微半導體', 'AVGO': '博通', 'QCOM': '高通', 'INTC': '英特爾', 'NFLX': '網飛', 'SMCI': '美超微', 'ASML': '艾司摩爾', 'COST': '好市多', 'WMT': '沃爾瑪', 'JPM': '摩根大通', 'V': 'VISA卡', 'LLY': '禮來藥廠'}
     def calculate_chip_and_backtest(ticker_name, df, timeframe_name):
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
@@ -140,8 +117,7 @@ else:
         for i in range(len(vols)):
             current_trend = 0.85 * current_trend + np.random.uniform(-0.08, 0.08)
             sim_net[i] = np.clip(current_trend * 100, -6.0, 6.0)
-        df['籌碼集中度'] = sim_net
-        df['5日差值'] = df['籌碼集中度'].diff(1)
+        df['籌碼集中度'] = sim_net; df['5日差值'] = df['籌碼集中度'].diff(1)
         diff_values = df['5日差值'].dropna().to_numpy().flatten()
         latest_val = float(df['籌碼集中度'].to_numpy().flatten()[-1])
         count = 0
@@ -150,7 +126,7 @@ else:
             for val in reversed(diff_values):
                 if (val > 0) == is_positive and val != 0: count += 1
                 else: break
-            status = f"📉 連續 {count} 日上升" if is_positive else f"📉 連續 {count} 日下降"
+            status = f"🔥 連續 {count} 日上升" if is_positive else f"📉 連續 {count} 日下降"
         else: status = "🔄 區間震盪洗盤"
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
@@ -164,49 +140,45 @@ else:
                 date_strings = df_chart.index.strftime('%Y-%m-%d %H:%M' if 'm' in cfg["i"] else '%Y-%m-%d').tolist()
                 c_name = STOCK_NAME_MAP.get(selected_stock, stock.info.get('shortName', selected_stock))
                 price = stock.info.get('currentPrice') or stock.info.get('previousClose') or float(df_chart['Close'].to_numpy().flatten()[-1])
-                book_value = stock.info.get('bookValue') or 10.0
-                roe = stock.info.get('returnOnEquity') or 0.1
-                gvi_val = (float(book_value) / float(price)) * ((1 + float(roe)) ** 5)
-                pb_val = float(price) / float(book_value)
+                book_value = stock.info.get('bookValue') or 10.0; roe = stock.info.get('returnOnEquity') or 0.1
+                gvi_val = (float(book_value) / float(price)) * ((1 + float(roe)) ** 5); pb_val = float(price) / float(book_value)
                 
                 gc1, gc2, gc3, gc4, gc5 = st.columns(5)
                 with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"${price:,.2f}" if ".TW" not in selected_stock else f"{price:,.2f} 元"); st.caption("📢 交易所即時報價")
-                with gc2: st.metric(label="👑 GVI 成長價值值", value=f"{gvi_val:.4f}"); st.caption("📢 機構核心指標，愈高代表內在價值愈肥美")
-                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=f"{float(roe)*100:.2f}%"); st.caption("📢 公司賺錢效率，大於15%為機構級績優生")
-                with gc4: st.metric(label="📖 每股淨值 (Book Value)", value=f"${book_value:,.2f}" if ".TW" not in selected_stock else f"{book_value:,.2f} 元"); st.caption("📢 公司的清算價值，底層防守的最強黃金防線")
-                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=f"{pb_val:.2f} 倍"); st.caption("📢 市場溢價程度，結合ROE評估市場情緒冷熱")
+                with gc2: st.metric(label="👑 GVI 成長價值值", value=f"{gvi_val:.4f}"); st.caption("📢 內在價值指標，愈高愈肥美")
+                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=f"{float(roe)*100:.2f}%"); st.caption("📢 賺錢效率，>15%為機構級績優生")
+                with gc4: st.metric(label="📖 每股淨值", value=f"${book_value:,.2f}" if ".TW" not in selected_stock else f"{book_value:,.2f} 元"); st.caption("📢 公司清算價值，底層防守線")
+                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=f"{pb_val:.2f} 倍"); st.caption("📢 溢價程度，結合ROE評估市場冷熱")
 
                 valuation_color, valuation_status, valuation_desc = "#ff4b4b", "判讀中", "計算中"
                 if gvi_val >= 0.35 and pb_val <= 1.5:
-                    valuation_color, valuation_status = "#00cc66", "🔥 極度便宜（具備強大安全邊際，機構瘋狂撿便宜區）"
-                    valuation_desc = "當前內在價值成長動能強勁，但市場估值極度低估！屬於下檔風險鎖死、上檔空間大開的黃金送分標的。"
+                    valuation_color, valuation_status = "#00cc66", "🔥 極度便宜（有安全邊際，機構瘋狂撿便宜區）"
+                    valuation_desc = "內在價值強勁但估值嚴重低估！屬於下檔風險鎖死、長線大送分的黃金買點。"
                 elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and float(roe) >= 0.12):
-                    valuation_color, valuation_status = "#2baf2b", "🟢 合理甜美（體質對位估值相稱，長線穩健布局期）"
-                    valuation_desc = "當前股價完美對位基本面體質，沒有嚴重泡沫 or 刻意打壓，屬於法人與長線基金最喜愛的舒適認購安全期。"
+                    valuation_color, valuation_status = "#2baf2b", "🟢 合理甜美（體質估值相稱，長線穩健布局期）"
+                    valuation_desc = "股價完美對位體質，沒有嚴重泡沫或主力刻意打壓，屬於法人與長線基金認購的安全期。"
                 elif pb_val > 3.5 and pb_val <= 7.0:
-                    valuation_color, valuation_status = "#ff9900", "⚠️ 偏貴溢價（市場樂觀情緒透支，操盤手需嚴格風控）"
-                    valuation_desc = "股價已提前預支未來 1-2 年的獲利預期。雖然公司依然賺錢，但追高性價比極低，進場必須嚴守破線短停損。"
+                    valuation_color, valuation_status = "#ff9900", "⚠️ 偏貴溢價（樂觀情緒透支，操盤手需嚴格風控）"
+                    valuation_desc = "股價已提前預支未來 1-2 年的獲利。追高性價比低，進場必須嚴守破均線短線停損。"
                 else:
-                    valuation_color, valuation_status = "#cc0000", "🚨 泡沫嚴重（全面避開提款機，估值嚴重偏離基本面）"
-                    valuation_desc = "市場投機情緒沸沸揚揚！股價淨值比極高且 ROE 賺錢效率無法支撐。法人主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
-                
-                st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達判定：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
+                    valuation_color, valuation_status = "#cc0000", "🚨 泡沫嚴重（全面避開提款機，估值嚴重偏離）"
+                    valuation_desc = "投機情緒沸騰！PB極高且ROE無法支撐，主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
+                st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
                 if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
                     if not api_key_input: st.error("⚠️ 請先在左側邊欄輸入您的 Gemini API Key！")
                     else:
-                        with st.spinner(f"🤖 2026 旗艦級 Gemini 3.8 核心正在連線機房，精算 {c_name} 報告中..."):
+                        with st.spinner(f"🤖 最新 Gemini 3.8 核心正在連線機房，精算 {c_name} 報告中..."):
                             try:
                                 client = Client(api_key=api_key_input)
                                 raw_news = stock.get_news(count=2); news_titles = [n['title'] for n in raw_news] if raw_news else ["無即時題材"]
                                 ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
-                                # 💡 完美對接 2026 最新型號，0.1秒亮麗井噴投資分析
                                 response = client.models.generate_content(model='gemini-3.8-flash', contents=ai_prompt)
                                 st.session_state[f"ai_report_{selected_stock}"] = response.text.strip()
                             except Exception as ai_e: st.error(f"Google 2026 旗艦 AI 模組對接異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資分析報告已安全落地")
+                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資 analysis 報告已安全落地")
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"]); st.markdown("---")
 
                 tab1, tab2 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告"])
@@ -225,8 +197,7 @@ else:
                     fig.add_trace(go.Candlestick(x=date_strings, open=df_chart['Open'].to_numpy().flatten().tolist(), high=df_chart['High'].to_numpy().flatten().tolist(), low=df_chart['Low'].to_numpy().flatten().tolist(), close=df_chart['Close'].to_numpy().flatten().tolist(), name="K線"), row=1, col=1)
                     
                     st.sidebar.markdown("#### 📱 裝置視覺優化")
-                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False, help="當手機 K 線擠在一起時，勾選此項可完美釋放 K 線橫向寬度！")
-                    
+                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False)
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
                         ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
@@ -246,10 +217,8 @@ else:
         try:
             stock = yf.Ticker(t); info = stock.info
             p_raw = info.get('currentPrice') or info.get('previousClose') or 100.0
-            b_raw = info.get('bookValue') or 15.0
-            r_raw = info.get('returnOnEquity') or 0.12
-            m_raw = info.get('marketCap') or 50000000000
-            s_raw = info.get('sharesOutstanding') or (m_raw / p_raw)
+            b_raw = info.get('bookValue') or 15.0; r_raw = info.get('returnOnEquity') or 0.12
+            m_raw = info.get('marketCap') or 50000000000; s_raw = info.get('sharesOutstanding') or (m_raw / p_raw)
             price = float(np.nanmax(pd.to_numeric(p_raw, errors='coerce')))
             book_value = float(np.nanmax(pd.to_numeric(b_raw, errors='coerce')))
             roe = float(np.nanmax(pd.to_numeric(r_raw, errors='coerce')))
@@ -310,14 +279,13 @@ else:
                 df_top_net_sell = df_full[df_full['法人淨賣超佔股本比(%)'] > 0].sort_values(by='法人淨賣超佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    df_top_buy[['股票代碼','股票名稱','今日總成交量','法人總買進佔股本比(%)']].to_excel(writer, index=False, sheet_name='法人總買進佔比Top10')
-                    df_top_sell[['股票代碼','股票名稱','今日總成交量','法人總賣出佔股本比(%)']].to_excel(writer, index=False, sheet_name='法人總賣出佔比Top10')
-                    df_top_net_buy[['股票代碼','股票名稱','今日總成交量','法人淨買超佔股本比(%)']].to_excel(writer, index=False, sheet_name='法人純買超佔比Top10')
-                    df_top_net_sell[['股票代碼','股票名稱','今日總成交量','法人淨賣超佔股本比(%)']].to_excel(writer, index=False, sheet_name='法人純賣超佔比Top10')
+                    df_top_buy[['股票代碼','股票名稱','今日總成交量','法人總買進佔股本比(%)']].to_excel(writer, sheet_name='法人總買進佔比Top10', index=False)
+                    df_top_sell[['股票代碼','股票名稱','今日總成交量','法人總賣出佔股本比(%)']].to_excel(writer, sheet_name='法人總賣出佔比Top10', index=False)
+                    df_top_net_buy[['股票代碼','股票名稱','今日總成交量','法人淨買超佔股本比(%)']].to_excel(writer, sheet_name='法人純買超佔比Top10', index=False)
+                    df_top_net_sell[['股票代碼','股票名稱','今日總成交量','法人淨賣超佔股本比(%)']].to_excel(writer, sheet_name='法人純賣超佔比Top10', index=False)
                 st.download_button(label="🟢 點擊此處儲存【今日台股三大法人多空排行Top10.xlsx】", data=buffer.getvalue(), file_name="今日台股三大法人多空排行Top10.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
                 st.success("🎉 全台股大池動態多空 Excel 交叉過濾成功！請點擊上方按鈕儲存檔案。")
             except Exception as ex_e: st.error(f"Excel 導出引擎異常: {ex_e}")
-
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
         conn = sqlite3.connect(DB_FILE)
@@ -377,7 +345,6 @@ else:
                                 t_ai = row_ai['股票代碼']
                                 news_data = yf.Ticker(t_ai).get_news(count=2); headlines = [n['title'] for n in news_data] if news_data else []
                                 prompt = f"請針對代碼 {t_ai} 新聞 '{' | '.join(headlines)}' 回傳JSON。包含 'category'(8字內), 'theme_score'(1-10), 'reason'(40字)。不要含```json"
-                                # 💡 大池大腦一併升級為 2026 最新旗艦 3.8 核心模型
                                 response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
                                 ai_res = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
                                 new_row = row_ai.to_dict(); new_row['產業分類'] = ai_res.get('category', '未分類'); new_row['AI題材短評'] = ai_res.get('reason', '無'); ai_portfolio.append(new_row)
