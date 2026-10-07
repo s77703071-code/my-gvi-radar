@@ -1,8 +1,8 @@
 # ==============================================================================
 # 【機構級三核心策略雷達 2.1 真空合規版】 - 第 1/7 段：基礎配置與 7770 密碼防線
 # ==============================================================================
-import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io
-from google.genai import Client
+import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time
+import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
@@ -70,13 +70,17 @@ else:
 
     st.markdown("---")
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 3/7 段：個人看盤面板與籌碼演算法
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 3/7 段：Secrets 金鑰鎖與籌碼演算法
 # ==============================================================================
     # ==========================================
     # 3. 左側邊欄：個人自訂控制面板
     # ==========================================
     st.sidebar.markdown("### 🧠 系統 API 金鑰設定")
-    api_key_input = st.sidebar.text_input("請輸入您的 Gemini API Key：", type="password")
+    if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"].strip() != "":
+        api_key_input = st.secrets["GEMINI_API_KEY"].strip()
+        st.sidebar.success("🔒 Gemini API 金鑰已從雲端安全盾自動加載")
+    else:
+        api_key_input = st.sidebar.text_input("請輸入您的 Gemini API Key：", type="password")
 
     st.sidebar.markdown("### 🎛️ 個人自訂看盤面板")
     selected_tf = st.sidebar.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4)
@@ -131,7 +135,7 @@ else:
         else: status = "🔄 區間震盪洗盤"
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 4/7 段：智慧估值與 Gemini AI 診斷
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 4/7 段：503 高抗壓退讓 AI 引擎
 # ==============================================================================
     if selected_stock:
         try:
@@ -170,33 +174,51 @@ else:
                 st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
                 
+                def generate_content_with_retry(prompt_text):
+                    genai.configure(api_key=api_key_input)
+                    models_to_try = ['gemini-pro', 'gemini-1.5-flash', 'gemini-1.0-pro']
+                    last_exception = None
+                    
+                    for model_name in models_to_try:
+                        for attempt in range(3):
+                            try:
+                                model = genai.GenerativeModel(model_name)
+                                response = model.generate_content(prompt_text)
+                                return response.text.strip()
+                            except Exception as e:
+                                last_exception = e
+                                if "503" in str(e) or "high demand" in str(e).lower():
+                                    sleep_time = 2 ** (attempt + 1)
+                                    time.sleep(sleep_time)
+                                    continue
+                                break
+                    raise last_exception
+
                 if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
                     if not api_key_input: 
-                        st.error("⚠️ 請先在左側邊欄輸入您的 Gemini API Key！")
+                        st.error("⚠️ 請先在左側邊欄輸入或由 Secrets 自動加載 Gemini API Key！")
                     else:
-                        with st.spinner(f"🤖 最新 Gemini 3.8 核心正在連線機房，精算 {c_name} 報告中..."):
+                        with st.spinner(f"🤖 智慧退讓機制已鎖定機房，精算 {c_name} 報告中（503 尖峰自動防禦已開啟）..."):
                             try:
-                                client = Client(api_key=api_key_input)
-                                raw_news = stock.get_news(count=2); news_titles = [n['title'] for n in raw_news] if raw_news else ["無即時題材"]
                                 ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
-                                response = client.models.generate_content(model='gemini-3.8-flash', contents=ai_prompt)
-                                st.session_state[f"ai_report_{selected_stock}"] = response.text.strip()
+                                success_report = generate_content_with_retry(ai_prompt)
+                                st.session_state[f"ai_report_{selected_stock}"] = success_report
                             except Exception as ai_e: 
-                                st.error(f"Google 2026 旗艦 AI 模組對接異常: {ai_e}")
+                                st.error(f"Google 雲端 2026 旗艦機房目前極度繁忙，退讓防線已嘗試重試/切換模型，最終異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資分析報告已安全落地")
+                    st.success(f"📋 Google 2026 頂配 AI 【{c_name}】核心投資分析報告（已由常駐狀態鎖安全落地）")
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"])
                     st.markdown("---")
         except:
             pass
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 5/7 段：真空 K 線與智能網格自動生成器
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 5/7 段：真空 K 線與智能網格 Excel 匯出
 # ==============================================================================
         try:
             tab1, tab2, tab3 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 feature"])
             with tab1:
-                ma_display_html = "<div style='background-color:rgba(0,0,0,0.65); padding:4px 10px; border:1px solid gray; border-radius:6px; display:inline-block; font-family:monospace; font-size:15px; color:white; vertical-align:middle; margin-left:15px处理;'>"
+                ma_display_html = "<div style='background-color:rgba(0,0,0,0.65); padding:4px 10px; border:1px solid gray; border-radius:6px; display:inline-block; font-family:monospace; font-size:15px; color:white; vertical-align:middle; margin-left:15px;'>"
                 for ma in personal_ma_configs:
                     p, c = ma["period"], ma["color"]
                     ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
@@ -251,7 +273,20 @@ else:
                     grid_type = "🟢 買進掛單 (Buy Limit)" if level < grid_p else ("🚨 基準現價" if idx == input_num//2 else "🔴 賣出掛單 (Sell Limit)")
                     grid_details.append({"網格編號": f"Grid #{idx+1:02d}", "掛單目標價": round(level, 2), "執行流派動作": grid_type})
                 
-                st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=250)
+                df_grid_data = pd.DataFrame(grid_details)
+                st.dataframe(df_grid_data, use_container_width=True, height=250)
+                
+                # 🚀 獨家升級新增：網格交易生成器明細一鍵二進位下載功能
+                grid_buffer = io.BytesIO()
+                with pd.ExcelWriter(grid_buffer, engine='xlsxwriter') as grid_writer:
+                    df_grid_data.to_excel(grid_writer, sheet_name='網格佈網規劃明細', index=False)
+                st.download_button(
+                    label=f"📥 一鍵匯出【{c_name}】網格交易佈網規劃明細 (Excel 檔)",
+                    data=grid_buffer.getvalue(),
+                    file_name=f"Grid_Plan_{selected_stock}_{time.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
         except: 
             pass
 
@@ -337,7 +372,7 @@ else:
             except Exception as ex_e: 
                 st.error(f"Excel 導出引擎異常: {ex_e}")
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 7/7 段：多因子過濾與 Top 20 一鍵 Excel 匯出
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 7/7 段：網頁重整優化快取過濾引擎
 # ==============================================================================
     custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區（多檔請用英文逗號隔開）：", value="2330.TW, 2454.TW, AAPL, NVDA, INTC")
     custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
@@ -350,8 +385,10 @@ else:
             df_db = pd.DataFrame()
         conn.close()
         
+        # 🔒 智慧重整防護盾：網頁整理時優先加載本地快取，絕不盲目觸發網路超時
         if is_custom_mode and not df_db.empty:
             db_tickers = df_db['ticker'].tolist()
+            # 僅針對本地資料庫完全沒有記錄的「全新代碼」進行補登下載，達成 0 秒極速加載
             missing = [t for t in filter_list if t not in db_tickers]
             if missing:
                 for mt in missing: 
@@ -361,7 +398,7 @@ else:
                 conn.close()
                 
         if df_db.empty: 
-            st.warning("⚠️ 請先點擊側邊欄同步按鈕下載數據。")
+            st.warning("⚠️ 快取資料庫為空，請點擊側邊欄【盤後一鍵同步】按鈕進行資料落地。")
             return
             
         df_filtered = df_db[df_db['ticker'].isin(filter_list)].copy()
@@ -443,23 +480,24 @@ else:
             
             if st.button("🧠 啟動 Gemini AI 歸類上方篩選結果", use_container_width=True):
                 if not api_key_input: 
-                    st.error("⚠️ 請在邊欄輸入您的 Gemini API Key！")
+                    st.error("⚠️ 請在邊欄輸入或由 Secrets 自動加載您的 Gemini API Key！")
                 else:
-                    with st.spinner("🤖 Google 2026 旗煙 AI 大池題材分類中..."):
+                    with st.spinner("🤖 智慧型 503 退讓中樞已接管：正在抓取新聞並全自動歸類產業題材..."):
                         try:
-                            client = Client(api_key=api_key_input)
                             ai_portfolio = []
                             for idx, row_ai in df_res.iterrows():
                                 t_ai = row_ai['股票代碼']
                                 news_data = yf.Ticker(t_ai).get_news(count=2)
                                 headlines = [n['title'] for n in news_data] if news_data else []
                                 prompt = f"請針對代碼 {t_ai} 新聞 '{' | '.join(headlines)}' 回傳JSON。包含 'category'(8字內), 'theme_score'(1-10), 'reason'(40字)。不要含```json"
-                                response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
-                                ai_res = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+                                
+                                response_text = generate_content_with_retry(prompt)
+                                ai_res = json.loads(response_text.replace("```json", "").replace("```", ""))
                                 new_row = row_ai.to_dict()
                                 new_row['產業分類'] = ai_res.get('category', '未分類')
                                 new_row['AI題材短評'] = ai_res.get('reason', '無')
                                 ai_portfolio.append(new_row)
+                                
                             df_ai = pd.DataFrame(ai_portfolio)
                             if not df_ai.empty:
                                 df_ai = df_ai.sort_values(by=['產業分類', 'GVI值'], ascending=[True, False])
@@ -467,11 +505,11 @@ else:
                                     with st.expander(f"📁 {cat} 題材庫", expanded=True): 
                                         st.dataframe(df_ai[df_ai['產業分類'] == cat].drop(columns=['產業分類']), use_container_width=True)
                         except Exception as list_e: 
-                            st.error(f"大池 AI 歸類異常: {list_e}")
+                            st.error(f"大池 AI 歸類與退讓中樞異常: {list_e}")
         else: 
             st.info("ℹ️ 暫無標的通過選股因子條件。")
 
-    # 主控入口三大一鍵執行按鈕區 (確保平行鎖定縮排，無縫對齊 else 分支)
+    # 主控入口三大一鍵執行按鈕區
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     with col_btn1:
         if st.button("🇹🇼 一鍵執行：全自動過濾全台股核心池", type="secondary", use_container_width=True):
