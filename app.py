@@ -1,10 +1,10 @@
 import sys, subprocess, os
 
 # ==========================================
-# 💡 2.1 版智能分流核心：偵測到是 Streamlit 雲端時，100% 關閉本地 pip 安裝，徹底根除閃退！
+# 💡 2.1 智能環境分流盾：當網頁在雲端跑時，100% 繞過並停用一切本地 pip 語法，永不閃退！
 # ==========================================
 if not os.environ.get("STREAMLIT_SERVER_ADDRESS"):
-    # 💻 只有在您電腦本地 Windows 運行時，才發動 websockets 自動降級防禦盾
+    # 💻 只有在您電腦本地 Windows 運行環境下，才會發動 websockets 自動降級防禦盾
     try:
         import websockets
         from importlib.metadata import version as get_version
@@ -178,7 +178,7 @@ else:
                             except Exception as ai_e: st.error(f"Google 2026 旗艦 AI 模組對接異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資 analysis 報告已安全落地")
+                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資分析報告已安全落地")
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"]); st.markdown("---")
 
                 tab1, tab2 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告"])
@@ -231,7 +231,7 @@ else:
         except: pass
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 💾 本地資料庫常駐維護")
+    st.sidebar.markdown("### 💾 本地資料庫常常駐維護")
     if st.sidebar.button("🔄 盤後一鍵：同步全市場數據到本地資料庫", type="primary", use_container_width=True):
         with st.spinner("💾 系統正全自動同步下載基本面核心大池..."):
             for t in (AUTO_TW_UNIVERSE + AUTO_US_UNIVERSE): signature_save_to_db(t)
