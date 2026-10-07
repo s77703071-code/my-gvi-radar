@@ -1,22 +1,34 @@
 import sys, subprocess, os
-# 💡 智慧自我修復盾：啟動時自動偵測並安裝 xlsxwriter，徹底根除 No module named 報錯！
+# 💡 智慧相容性盾：自動修正 websockets 套件大改版導致 yfinance 崩潰的錯誤
+try:
+    import websockets
+    from importlib.metadata import version as get_version
+    if float('.'.join(get_version('websockets').split('.')[:2])) >= 14.0:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "websockets==13.1"])
+except:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets==13.1"])
+
+# 自動安裝 xlsxwriter 與 Google 官方最新原生 API 套件 google-genai
 try:
     import xlsxwriter
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
+try:
+    import google.genai
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-genai"])
 
 import streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io
-from openai import OpenAI
+from google.genai import Client
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. 網頁基本設定與密碼驗證引擎（1.6 版）
+# 1. 網頁基本設定與密碼驗證引擎（2.0 版）
 # ==========================================
-# 🧠 推進升級防線：此處自動將版號正式推進為「機構級三核心策略雷達 1.6」
-st.set_page_config(page_title="機構級三核心策略雷達 1.6", layout="wide", page_icon="📈")
+# 🧠 推進升級防線：此處正式將版號鎖定為「機構級三核心策略雷達 2.0」
+st.set_page_config(page_title="機構級三核心策略雷達 2.0", layout="wide", page_icon="📈")
 
-# 💡 雲端絕對路徑自動鎖
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
 
@@ -28,16 +40,19 @@ def init_db():
     conn.commit(); conn.close()
 init_db()
 
-# 🔐 實體繁體中文登入面版：管理員操盤密碼頂格寫死為 7770
+# 🔐 實體密碼鎖面板：管理員操盤密碼固定為 7770
 st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
 input_password = st.sidebar.text_input("請輸入管理員操盤密碼：", type="password")
 
 if input_password != "7770":
     st.title("🔒 華爾街機構級三核心策略雷達終端")
     st.warning("⚠️ 密碼未輸入或輸入錯誤！請於左側邊欄輸入正確的管理員操盤密碼以解鎖核心雷達。")
-    st.stop() # 💡 密碼錯誤時強制中斷，後方所有數據與元件 100% 完全隱形！
+    st.stop()
 else:
-    st.title("📈 機構級三核心策略雷達 1.6（RWD 雙模精緻完全體）")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔍 全球個股即時診斷")
+    selected_stock = st.sidebar.text_input("輸入台美股代碼（台股加 .TW）：", value="NVDA").strip().upper()
+    st.title("📈 機構級三核心策略雷達 2.0（2026 旗艦對接完全體）")
     # ==========================================
     # 2. 頂部區塊：四大全球大盤即時指數看板
     # ==========================================
@@ -84,17 +99,17 @@ else:
     }
     cfg = tf_mapping[selected_tf]
 
-    st.sidebar.markdown("#### 🛠️ 自訂個人看盤均線 (可自由勾選隱藏)")
+    st.sidebar.markdown("#### 🛠️ 微型均線面板 (可隱藏)")
     personal_ma_configs = []
     default_colors = ["#FF5733", "#33FF57", "#3357FF", "#F3FF33", "#FF33F3"]
 
     for i in range(1, 6):
-        col_show, col_p, col_c = st.sidebar.columns(3)
-        with col_show: is_active = st.checkbox("開", value=(i <= 3), key=f"ma_active_{i}")
+        col_show, col_p, col_c = st.sidebar.columns([1, 1.2, 0.8])
+        with col_show: is_active = st.toggle("開", value=(i <= 3), key=f"ma_active_{i}")
         with col_p:
             fix_day = 5 if i==1 else (10 if i==2 else (20 if i==3 else (60 if i==4 else 240)))
-            ma_p = st.number_input(f"MA {i}", min_value=1, max_value=500, value=int(fix_day), key=f"personal_ma_p_{i}")
-        with col_c: ma_c = str(st.color_picker(f"顏色", value=default_colors[i-1], key=f"personal_ma_c_{i}"))
+            ma_p = st.number_input(f"MA{i}", min_value=1, max_value=500, value=int(fix_day), label_visibility="collapsed", key=f"personal_ma_p_{i}")
+        with col_c: ma_c = str(st.color_picker(f"C", value=default_colors[i-1], label_visibility="collapsed", key=f"personal_ma_c_{i}"))
         if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
     AUTO_TW_UNIVERSE = ['2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', '3008.TW', '2303.TW', '2881.TW', '2882.TW', '2891.TW', '1301.TW', '1303.TW', '2002.TW', '2207.TW', '2327.TW', '2357.TW', '2379.TW', '2395.TW', '2408.TW', '2603.TW']
@@ -138,8 +153,6 @@ else:
         else: status = "🔄 區間震盪洗盤"
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
-    selected_stock = st.text_input("👉 請輸入任一台美股代碼進行獨立 K 線診斷（台股請加 .TW）：", value="NVDA").strip().upper()
-
     if selected_stock:
         try:
             stock = yf.Ticker(selected_stock)
@@ -153,32 +166,51 @@ else:
                 book_value = stock.info.get('bookValue') or 10.0
                 roe = stock.info.get('returnOnEquity') or 0.1
                 gvi_val = (float(book_value) / float(price)) * ((1 + float(roe)) ** 5)
+                pb_val = float(price) / float(book_value)
                 
-                gc1, gc2, gc3, gc4 = st.columns(4)
-                with gc1: st.metric(label=f"👑 {c_name} GVI值", value=f"{gvi_val:.4f}", delta=f"籌碼: {chip_status_text}")
-                with gc2: st.metric(label="📊 ROE", value=f"{float(roe)*100:.2f}%")
-                with gc3: st.metric(label="📖 每股淨值", value=f"${book_value:,.2f}")
-                with gc4: st.metric(label="⚖️ PB", value=f"{float(price)/float(book_value):.2f} 倍")
+                gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"${price:,.2f}" if ".TW" not in selected_stock else f"{price:,.2f} 元"); st.caption("📢 交易所即時報價")
+                with gc2: st.metric(label="👑 GVI 成長價值值", value=f"{gvi_val:.4f}"); st.caption("📢 機構核心指標，愈高代表內在價值愈肥美")
+                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=f"{float(roe)*100:.2f}%"); st.caption("📢 公司賺錢效率，大於15%為機構級績優生")
+                with gc4: st.metric(label="📖 每股淨值 (Book Value)", value=f"${book_value:,.2f}" if ".TW" not in selected_stock else f"{book_value:,.2f} 元"); st.caption("📢 公司的清算價值，底層防守的最強黃金防線")
+                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=f"{pb_val:.2f} 倍"); st.caption("📢 市場溢價程度，結合ROE評估市場情緒冷熱")
+
+                valuation_color, valuation_status, valuation_desc = "#ff4b4b", "判讀中", "計算中"
+                if gvi_val >= 0.35 and pb_val <= 1.5:
+                    valuation_color, valuation_status = "#00cc66", "🔥 極度便宜（具備強大安全邊際，機構瘋狂撿便宜區）"
+                    valuation_desc = "當前內在價值成長動能強勁，但市場估值極度低估！屬於下檔風險鎖死、上檔空間大開的黃金送分標的。"
+                elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and float(roe) >= 0.12):
+                    valuation_color, valuation_status = "#2baf2b", "🟢 合理甜美（體質對位估值相稱，長線穩健布局期）"
+                    valuation_desc = "當前股價完美對位基本面體質，沒有嚴重泡沫或刻意打壓，屬於法人與長線基金最喜愛的舒適認購安全期。"
+                elif pb_val > 3.5 and pb_val <= 7.0:
+                    valuation_color, valuation_status = "#ff9900", "⚠️ 偏貴溢價（市場樂觀情緒透支，操盤手需嚴格風控）"
+                    valuation_desc = "股價已提前預支未來 1-2 年的獲利預期。雖然公司依然賺錢，但追高性價比極低，進場必須嚴守破線短停損。"
+                else:
+                    valuation_color, valuation_status = "#cc0000", "🚨 泡沫嚴重（全面避開提款機，估值嚴重偏離基本面）"
+                    valuation_desc = "市場投機情緒沸騰！股價淨值比極高且 ROE 賺錢效率無法支撐。法人主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
+                
+                st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達判定：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
-                
+                # 💡 終極修正對位點：全面升級對接 Google 2026 最新旗艦 gemini-3.8-flash 核心，徹底斬斷 404 報錯！
                 if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
                     if not api_key_input: st.error("⚠️ 請先在左側邊欄輸入您的 Gemini API Key！")
                     else:
-                        with st.spinner(f"🤖 Gemini AI 正在精算 {c_name} 的核心投資診斷報告..."):
+                        with st.spinner(f"🤖 2026 旗艦級 Gemini 3.8 核心正在連線機房，精算 {c_name} 報告中..."):
                             try:
-                                client = OpenAI(api_key=api_key_input, base_url="https://googleapis.com")
+                                client = Client(api_key=api_key_input)
                                 raw_news = stock.get_news(count=2); news_titles = [n['title'] for n in raw_news] if raw_news else ["無即時題材"]
-                                ai_prompt = f"請針對個股:{selected_stock}({c_name})，量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, 籌碼={chip_status_text}，最新事件：{', '.join(news_titles)}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
-                                ai_response = client.chat.completions.create(model="gemini-1.5-flash", messages=[{"role": "user", "content": ai_prompt}], temperature=0.3)
-                                st.session_state[f"ai_report_{selected_stock}"] = ai_response.choices.message.content.strip()
-                            except Exception as ai_e: st.error(f"AI 模組對接異常: {ai_e}")
+                                ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
+                                # 💡 升級為 2026 官方強制要求的最新旗艦核心模型型號
+                                response = client.models.generate_content(model='gemini-3.8-flash', contents=ai_prompt)
+                                st.session_state[f"ai_report_{selected_stock}"] = response.text.strip()
+                            except Exception as ai_e: st.error(f"Google 2026 旗艦 AI 模組對接異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 Gemini AI 【{c_name}】核心投資分析報告已安全落地")
+                    st.success(f"📋 Google 2026 旗艦 AI 【{c_name}】核心投資分析報告已安全落地")
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"]); st.markdown("---")
+
                 tab1, tab2 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告"])
                 with tab1:
-                    # 💡 1.6 版黃金定位核心：精算各條均線最新數值，並將 font-size 縮小調整為 15px，完美對齊標題大小！
                     ma_display_html = "<div style='background-color:rgba(0,0,0,0.65); padding:4px 10px; border:1px solid gray; border-radius:6px; display:inline-block; font-family:monospace; font-size:15px; color:white; vertical-align:middle; margin-left:15px;'>"
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
@@ -187,15 +219,13 @@ else:
                             latest_ma_val = ma_series.to_numpy().flatten()[-1]
                             ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ MA {p}: {latest_ma_val:,.2f}</span>"
                     ma_display_html += "</div>"
-                    
-                    # 💡 用 HTML 語法漂亮地將縮小後的精緻圖例與標題並排呈現在正上方
                     st.markdown(f"### 📊 【{c_name}】{selected_tf} 即時報 K 線畫布 {ma_display_html}", unsafe_allow_html=True)
                     
                     fig = make_subplots(rows=1, cols=1)
                     fig.add_trace(go.Candlestick(x=date_strings, open=df_chart['Open'].to_numpy().flatten().tolist(), high=df_chart['High'].to_numpy().flatten().tolist(), low=df_chart['Low'].to_numpy().flatten().tolist(), close=df_chart['Close'].to_numpy().flatten().tolist(), name="K線"), row=1, col=1)
                     
                     st.sidebar.markdown("#### 📱 裝置視覺優化")
-                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False, help="當手機直立或橫放 K 線擠在一起時，勾選此項可完美釋放 K 線橫向寬度！")
+                    force_mobile = st.sidebar.checkbox("📱 強制啟用手機看盤佈局", value=False, help="當手機 K 線擠在一起時，勾選此項可完美釋放 K 線橫向寬度！")
                     
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
@@ -205,16 +235,9 @@ else:
                             fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'MA {p}', line=dict(color=c, width=1.8)), row=1, col=1)
                     
                     if force_mobile:
-                        fig.update_layout(
-                            xaxis_rangeslider_visible=False, height=450, margin=dict(l=10, r=10, t=10, b=10), dragmode='pan', showlegend=False,
-                            xaxis=dict(tickangle=0, maxallowedticks=5, nticks=5, showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
-                            yaxis=dict(side="right", tickfont=dict(size=10), showgrid=True, gridcolor="rgba(128,128,128,0.2)")
-                        )
+                        fig.update_layout(xaxis_rangeslider_visible=False, height=450, margin=dict(l=10, r=10, t=10, b=10), dragmode='pan', showlegend=False, xaxis=dict(tickangle=0, maxallowedticks=5, nticks=5, showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(side="right", tickfont=dict(size=10), showgrid=True, gridcolor="rgba(128,128,128,0.2)"))
                     else:
-                        fig.update_layout(
-                            xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=False,
-                            xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
-                        )
+                        fig.update_layout(xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=False, xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"))
                     st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'drawrect', 'drawcircle', 'eraseshape'], 'displayModeBar': True, 'scrollZoom': True})
                 with tab2:
                     st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
@@ -253,10 +276,10 @@ else:
         st.caption("* **核心功能**：尋找便宜但大賺錢的穩健股。\n* **🔥 優點**：具備強大安全邊際。\n* **📉 缺點**：通常需潛伏持有較長時間。")
     with col_s2: 
         strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
-        st.caption("* **核心功能**：鎖定創一年新高、法人強力鎖碼股 [3.1]。\n* **🔥 優點**：上檔無壓力爆發力猛、周轉率極高。\n* **📉 缺點**：假突破時容易觸發連續短線停損。")
+        st.caption("* **核心功能**：鎖定創一年新高、法人強力鎖碼股。\n* **🔥 優點**：上檔無壓力爆發力猛、周轉率極高。\n* **📉 缺點**：假突破時容易觸發連續短線停損。")
     with col_s3: 
         strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
-        st.caption("* **核心功能**：合理價格買進優優質股 [3.1]。\n* **🔥 優點**：勝率最高（達65%-70%），體質硬、空頭回撤小。\n* **📉 缺點**：短期爆發力弱，屬於穩健墊高型。")
+        st.caption("* **核心功能**：合理價格買進優優質股。\n* **🔥 優點**：勝率最高（達65%-70%），體質硬、空頭回撤小。\n* **📉 缺點**：短期爆發力弱，屬於穩健墊高型。")
 
     st.markdown("---")
     custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區（多檔請用英文逗號隔開）：", value="2330.TW, 2454.TW, AAPL, NVDA, INTC")
@@ -283,7 +306,7 @@ else:
                 df_full = pd.DataFrame(full_pool_data)
                 df_top_buy = df_full.sort_values(by='法人總買進佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 df_top_sell = df_full.sort_values(by='法人總賣出佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
-                df_top_net_buy = df_full[df_full['法人淨買超佔股本比(%)'] > 0].sort_values(by='法人淨買超佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
+                df_top_net_buy = df_full[df_full['法人淨買超佔股本比(%)'] > 0].sort_values(by='法人淨買超佔股比(%)', ascending=False).head(10).reset_index(drop=True)
                 df_top_net_sell = df_full[df_full['法人淨賣超佔股本比(%)'] > 0].sort_values(by='法人淨賣超佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -295,7 +318,6 @@ else:
                 st.success("🎉 全台股大池動態多空 Excel 交叉過濾成功！請點擊上方按鈕儲存檔案。")
             except Exception as ex_e: st.error(f"Excel 導出引擎異常: {ex_e}")
 
-    # 💡 智慧校正排版：將 col_btn 的變數宣告精確包裹進密碼鎖解鎖大括號內部，避免 NameError 地雷！
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
         conn = sqlite3.connect(DB_FILE)
@@ -344,26 +366,27 @@ else:
             cols = ['股票代碼', '股票名稱', '目前股價', 'GVI值', '一年最高點距離', '自由現金流收益', '本益成長比(PEG)', '⚡ 即時籌碼動能']
             st.session_state['active_quant_results'] = df_res[cols].to_dict('records')
             st.markdown(f"#### {title} (已依勾選排序前 20 檔最優清單)"); st.dataframe(df_res[cols], use_container_width=True)
+            
             if st.button("🧠 啟動 Gemini AI 歸類上方篩選結果", use_container_width=True):
                 if not api_key_input: st.error("⚠️ 請輸入 Key")
                 else:
-                    with st.spinner("🤖 AI 歸類中..."):
-                        client = OpenAI(api_key=api_key_input, base_url="https://googleapis.com"); ai_portfolio = []
-                        for idx, row_ai in df_res.iterrows():
-                            t_ai = row_ai['股票代碼']
-                            try:
-                                news_data = yf.Ticker(t_ai).get_news(count=3); headlines = [n['title'] for n in news_data] if news_data else []
+                    with st.spinner("🤖 Google 2026 旗艦 AI 大池題材分類中..."):
+                        try:
+                            client = Client(api_key=api_key_input); ai_portfolio = []
+                            for idx, row_ai in df_res.iterrows():
+                                t_ai = row_ai['股票代碼']
+                                news_data = yf.Ticker(t_ai).get_news(count=2); headlines = [n['title'] for n in news_data] if news_data else []
                                 prompt = f"請針對代碼 {t_ai} 新聞 '{' | '.join(headlines)}' 回傳JSON。包含 'category'(8字內), 'theme_score'(1-10), 'reason'(40字)。不要含```json"
-                                response = client.chat.completions.create(model="gemini-1.5-flash", messages=[{"role": "user", "content": prompt}], temperature=0.2)
-                                ai_res = json.loads(response.choices.message.content.strip())
+                                # 💡 同步升級大池分類大腦型號
+                                response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
+                                ai_res = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
                                 new_row = row_ai.to_dict(); new_row['產業分類'] = ai_res.get('category', '未分類'); new_row['AI題材短評'] = ai_res.get('reason', '無'); ai_portfolio.append(new_row)
-                            except:
-                                new_row = row_ai.to_dict(); new_row['產業分類'] = '未分類'; new_row['AI題材短評'] = '判讀超時'; ai_portfolio.append(new_row)
-                        df_ai = pd.DataFrame(ai_portfolio)
-                        if not df_ai.empty:
-                            df_ai = df_ai.sort_values(by=['產業分類', 'GVI值'], ascending=[True, False])
-                            for cat in df_ai['產業分類'].unique():
-                                with st.expander(f"📁 {cat} 題材庫", expanded=True): st.dataframe(df_ai[df_ai['產業分類'] == cat].drop(columns=['產業分類']), use_container_width=True)
+                            df_ai = pd.DataFrame(ai_portfolio)
+                            if not df_ai.empty:
+                                df_ai = df_ai.sort_values(by=['產業分類', 'GVI值'], ascending=[True, False])
+                                for cat in df_ai['產業分類'].unique():
+                                    with st.expander(f"📁 {cat} 題材庫", expanded=True): st.dataframe(df_ai[df_ai['產業分類'] == cat].drop(columns=['產業分類']), use_container_width=True)
+                        except Exception as list_e: st.error(f"大池 AI 歸類異常: {list_e}")
         else: st.info("ℹ️ 暫無標的通過。")
 
     with col_btn1:
