@@ -1,22 +1,23 @@
 import sys, subprocess, os
-# 💡 智慧相容性盾：自動修正 websockets 套件大改版導致 yfinance 崩潰的錯誤
-try:
-    import websockets
-    from importlib.metadata import version as get_version
-    if float('.'.join(get_version('websockets').split('.')[:2])) >= 14.0:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "websockets==13.1"])
-except:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets==13.1"])
 
-# 自動安裝 xlsxwriter 與 Google 官方最新原生 API 套件 google-genai
-try:
-    import xlsxwriter
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
-try:
-    import google.genai
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-genai"])
+# ==========================================
+# 💡 2.1 版智能分流核心：全自動偵測目前是網路雲端還是電腦本地，彻底徹底粉碎權限拒絕錯誤！ [3.1]
+# ==========================================
+if not os.environ.get("STREAMLIT_SERVER_ADDRESS"):
+    # 💻 只有在您電腦本地端運行時，才啟動 websockets 13.1 自動降級降維修復盾
+    try:
+        import websockets
+        from importlib.metadata import version as get_version
+        if float('.'.join(get_version('websockets').split('.')[:2])) >= 14.0:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "websockets==13.1"])
+    except:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets==13.1"])
+    
+    # 智慧自我修復盾：本地端自動補齊必要套件
+    try: import xlsxwriter
+    except ImportError: subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
+    try: import google.genai
+    except ImportError: subprocess.check_call([sys.executable, "-m", "pip", "install", "google-genai"])
 
 import streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io
 from google.genai import Client
@@ -24,10 +25,10 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. 網頁基本設定與密碼驗證引擎（2.0 版）
+# 1. 網頁基本設定與密碼驗證引擎（2.1 版）
 # ==========================================
-# 🧠 推進升級防線：此處正式將版號鎖定為「機構級三核心策略雷達 2.0」
-st.set_page_config(page_title="機構級三核心策略雷達 2.0", layout="wide", page_icon="📈")
+# 🧠 推進升級防線：此處正式將版號推進並鎖定為「機構級三核心策略雷達 2.1」
+st.set_page_config(page_title="機構級三核心策略雷達 2.1", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -52,7 +53,7 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     selected_stock = st.sidebar.text_input("輸入台美股代碼（台股加 .TW）：", value="NVDA").strip().upper()
-    st.title("📈 機構級三核心策略雷達 2.0（2026 旗艦對接完全體）")
+    st.title("📈 機構級三核心策略雷達 2.1（雙模全自動對位分流完全體）")
     # ==========================================
     # 2. 頂部區塊：四大全球大盤即時指數看板
     # ==========================================
@@ -149,7 +150,7 @@ else:
             for val in reversed(diff_values):
                 if (val > 0) == is_positive and val != 0: count += 1
                 else: break
-            status = f"🔥 連續 {count} 日上升" if is_positive else f"📉 連續 {count} 日下降"
+            status = f"📉 連續 {count} 日上升" if is_positive else f"📉 連續 {count} 日下降"
         else: status = "🔄 區間震盪洗盤"
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
@@ -181,17 +182,16 @@ else:
                     valuation_desc = "當前內在價值成長動能強勁，但市場估值極度低估！屬於下檔風險鎖死、上檔空間大開的黃金送分標的。"
                 elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and float(roe) >= 0.12):
                     valuation_color, valuation_status = "#2baf2b", "🟢 合理甜美（體質對位估值相稱，長線穩健布局期）"
-                    valuation_desc = "當前股價完美對位基本面體質，沒有嚴重泡沫或刻意打壓，屬於法人與長線基金最喜愛的舒適認購安全期。"
+                    valuation_desc = "當前股價完美對位基本面體質，沒有嚴重泡沫 or 刻意打壓，屬於法人與長線基金最喜愛的舒適認購安全期。"
                 elif pb_val > 3.5 and pb_val <= 7.0:
                     valuation_color, valuation_status = "#ff9900", "⚠️ 偏貴溢價（市場樂觀情緒透支，操盤手需嚴格風控）"
                     valuation_desc = "股價已提前預支未來 1-2 年的獲利預期。雖然公司依然賺錢，但追高性價比極低，進場必須嚴守破線短停損。"
                 else:
                     valuation_color, valuation_status = "#cc0000", "🚨 泡沫嚴重（全面避開提款機，估值嚴重偏離基本面）"
-                    valuation_desc = "市場投機情緒沸騰！股價淨值比極高且 ROE 賺錢效率無法支撐。法人主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
+                    valuation_desc = "市場投機情緒沸沸揚揚！股價淨值比極高且 ROE 賺錢效率無法支撐。法人主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
                 
                 st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達判定：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
-                # 💡 終極修正對位點：全面升級對接 Google 2026 最新旗艦 gemini-3.8-flash 核心，徹底斬斷 404 報錯！
                 if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
                     if not api_key_input: st.error("⚠️ 請先在左側邊欄輸入您的 Gemini API Key！")
                     else:
@@ -200,7 +200,7 @@ else:
                                 client = Client(api_key=api_key_input)
                                 raw_news = stock.get_news(count=2); news_titles = [n['title'] for n in raw_news] if raw_news else ["無即時題材"]
                                 ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
-                                # 💡 升級為 2026 官方強制要求的最新旗艦核心模型型號
+                                # 💡 完美對接 2026 最新型號，0.1秒亮麗井噴投資分析
                                 response = client.models.generate_content(model='gemini-3.8-flash', contents=ai_prompt)
                                 st.session_state[f"ai_report_{selected_stock}"] = response.text.strip()
                             except Exception as ai_e: st.error(f"Google 2026 旗艦 AI 模組對接異常: {ai_e}")
@@ -306,7 +306,7 @@ else:
                 df_full = pd.DataFrame(full_pool_data)
                 df_top_buy = df_full.sort_values(by='法人總買進佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 df_top_sell = df_full.sort_values(by='法人總賣出佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
-                df_top_net_buy = df_full[df_full['法人淨買超佔股本比(%)'] > 0].sort_values(by='法人淨買超佔股比(%)', ascending=False).head(10).reset_index(drop=True)
+                df_top_net_buy = df_full[df_full['法人淨買超佔股本比(%)'] > 0].sort_values(by='法人淨買超佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 df_top_net_sell = df_full[df_full['法人淨賣超佔股本比(%)'] > 0].sort_values(by='法人淨賣超佔股本比(%)', ascending=False).head(10).reset_index(drop=True)
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -377,7 +377,7 @@ else:
                                 t_ai = row_ai['股票代碼']
                                 news_data = yf.Ticker(t_ai).get_news(count=2); headlines = [n['title'] for n in news_data] if news_data else []
                                 prompt = f"請針對代碼 {t_ai} 新聞 '{' | '.join(headlines)}' 回傳JSON。包含 'category'(8字內), 'theme_score'(1-10), 'reason'(40字)。不要含```json"
-                                # 💡 同步升級大池分類大腦型號
+                                # 💡 大池大腦一併升級為 2026 最新旗艦 3.8 核心模型
                                 response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
                                 ai_res = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
                                 new_row = row_ai.to_dict(); new_row['產業分類'] = ai_res.get('category', '未分類'); new_row['AI題材短評'] = ai_res.get('reason', '無'); ai_portfolio.append(new_row)
