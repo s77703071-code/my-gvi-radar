@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 1/7 段：基礎配置與 7770 密碼防線
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 1/7 段：基礎配置與 2026 退讓中樞
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time
 import google.generativeai as genai
@@ -20,6 +20,29 @@ def init_db():
     conn.commit()
     conn.close()
 init_db()
+
+# 🚀 2026 全球機房高乘載退讓重試全域函數 (解決 404 舊模型不支援問題與 503 滿載)
+def generate_content_with_retry(prompt_text, api_key_val):
+    genai.configure(api_key=api_key_val)
+    # 🎯 2026 年官方精選高相容、抗壓型模型大池 (全數支援 generateContent)
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash']
+    last_exception = None
+    
+    for model_name in models_to_try:
+        for attempt in range(3):  # 內建指數型退讓重試機制
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt_text)
+                return response.text.strip()
+            except Exception as e:
+                last_exception = e
+                # 當遇到 503 繁忙或高頻需求擠壓時，進行指數秒數退讓
+                if "503" in str(e) or "high demand" in str(e).lower() or "busy" in str(e).lower():
+                    sleep_time = 2 ** (attempt + 1)  # 2s -> 4s -> 8s
+                    time.sleep(sleep_time)
+                    continue
+                break  # 如果是金鑰錯誤或非 503 繁忙錯誤，直接切換下一個模型
+    raise last_exception
 
 # 🔐 管理員操盤密碼固定為 7770
 st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
@@ -135,7 +158,7 @@ else:
         else: status = "🔄 區間震盪洗盤"
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 # ==============================================================================
-# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 4/7 段：503 高抗壓退讓 AI 引擎
+# 【機構級三核心策略雷達 2.1 真空合規版】 - 第 4/7 段：智慧估值與全域退讓 AI 報告
 # ==============================================================================
     if selected_stock:
         try:
@@ -163,7 +186,7 @@ else:
                     valuation_desc = "內在價值強勁但估值嚴重低估！屬於下檔風險鎖死、長線大送分的黃金買點。"
                 elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and float(roe) >= 0.12):
                     valuation_color, valuation_status = "#2baf2b", "🟢 合理甜美（體質估值相稱，長線穩健布局期）"
-                    valuation_desc = "股價完美對位體質，沒有嚴重泡沫或主力刻意打壓，屬長線基金安全期。"
+                    valuation_desc = "股館完美對位體質，沒有嚴重泡沫或主力刻意打壓，屬長線基金安全期。"
                 elif pb_val > 3.5 and pb_val <= 7.0:
                     valuation_color, valuation_status = "#ff9900", "⚠️ 偏貴溢價（樂觀情緒透支，操盤手需嚴格風控）"
                     valuation_desc = "股價已提前預支未來 1-2 年的獲利。追高性價比低，進場必須嚴守破均線短線停損。"
@@ -173,38 +196,19 @@ else:
                 
                 st.markdown(f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'><h5 style='margin:0; color:white;'>⚖️ 華爾街智慧估值雷達：<span style='color:{valuation_color}; font-weight:bold;'>{valuation_status}</span></h5><p style='margin:6px 0 0 0; size:14px; color:#cccccc;'>💡 <b>操盤手報告：</b>{valuation_desc}</p></div>", unsafe_allow_html=True)
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
-                
-                def generate_content_with_retry(prompt_text):
-                    genai.configure(api_key=api_key_input)
-                    models_to_try = ['gemini-pro', 'gemini-1.5-flash', 'gemini-1.0-pro']
-                    last_exception = None
-                    
-                    for model_name in models_to_try:
-                        for attempt in range(3):
-                            try:
-                                model = genai.GenerativeModel(model_name)
-                                response = model.generate_content(prompt_text)
-                                return response.text.strip()
-                            except Exception as e:
-                                last_exception = e
-                                if "503" in str(e) or "high demand" in str(e).lower():
-                                    sleep_time = 2 ** (attempt + 1)
-                                    time.sleep(sleep_time)
-                                    continue
-                                break
-                    raise last_exception
 
                 if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
                     if not api_key_input: 
                         st.error("⚠️ 請先在左側邊欄輸入或由 Secrets 自動加載 Gemini API Key！")
                     else:
-                        with st.spinner(f"🤖 智慧退讓機制已鎖定機房，精算 {c_name} 報告中（503 尖峰自動防禦已開啟）..."):
+                        with st.spinner(f"🤖 2026 最新退讓盾已鎖定機房，精算 {c_name} 報告中（已剔除 404 舊模型）..."):
                             try:
                                 ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
-                                success_report = generate_content_with_retry(ai_prompt)
+                                # 💡 呼叫第 1 段宣告之最新全域退讓函數
+                                success_report = generate_content_with_retry(ai_prompt, api_key_input)
                                 st.session_state[f"ai_report_{selected_stock}"] = success_report
                             except Exception as ai_e: 
-                                st.error(f"Google 雲端 2026 旗艦機房目前極度繁忙，退讓防線已嘗試重試/切換模型，最終異常: {ai_e}")
+                                st.error(f"Google 雲端 2026 機房極度繁忙，經三層模型輪詢重試後最終異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
                     st.success(f"📋 Google 2026 頂配 AI 【{c_name}】核心投資分析報告（已由常駐狀態鎖安全落地）")
@@ -276,7 +280,6 @@ else:
                 df_grid_data = pd.DataFrame(grid_details)
                 st.dataframe(df_grid_data, use_container_width=True, height=250)
                 
-                # 🚀 獨家升級新增：網格交易生成器明細一鍵二進位下載功能
                 grid_buffer = io.BytesIO()
                 with pd.ExcelWriter(grid_buffer, engine='xlsxwriter') as grid_writer:
                     df_grid_data.to_excel(grid_writer, sheet_name='網格佈網規劃明細', index=False)
@@ -290,7 +293,6 @@ else:
         except: 
             pass
 
-    # 💾 本地資料庫常駐維護機制
     def signature_save_to_db(t):
         try:
             stock = yf.Ticker(t); info = stock.info
@@ -327,7 +329,7 @@ else:
         st.caption("* **核心功能**：鎖定創一年新高、法人強力鎖碼股。\n* **🔥 優點**：上檔無壓力爆發力猛、周轉率極高。\n* **📉 缺點**：假突破時容易觸發連續短線停損。")
     with col_s3: 
         strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
-        st.caption("* **核心功能**：合理價格買進優優質股。\n* **🔥 優點**：勝率最高（達65%-70%），體質硬、空頭回撤小。\n* **📉 缺點**：短期爆發力弱，屬於穩健墊高型。")
+        st.caption("* **核心功能**：合理價格買進優質股。\n* **🔥 優點**：勝率最高（達65%-70%），體質硬、空頭回撤小。\n* **📉 缺點**：短期爆發力弱，屬於穩健墊高型。")
 
     st.markdown("---")
     st.markdown("##### 🇹🇼 臺灣股市專屬：三大法人買賣佔股本比 / 買賣超佔股本比 動態 Top 10 強力導出")
@@ -385,10 +387,8 @@ else:
             df_db = pd.DataFrame()
         conn.close()
         
-        # 🔒 智慧重整防護盾：網頁整理時優先加載本地快取，絕不盲目觸發網路超時
         if is_custom_mode and not df_db.empty:
             db_tickers = df_db['ticker'].tolist()
-            # 僅針對本地資料庫完全沒有記錄的「全新代碼」進行補登下載，達成 0 秒極速加載
             missing = [t for t in filter_list if t not in db_tickers]
             if missing:
                 for mt in missing: 
@@ -482,7 +482,7 @@ else:
                 if not api_key_input: 
                     st.error("⚠️ 請在邊欄輸入或由 Secrets 自動加載您的 Gemini API Key！")
                 else:
-                    with st.spinner("🤖 智慧型 503 退讓中樞已接管：正在抓取新聞並全自動歸類產業題材..."):
+                    with st.spinner("🤖 智慧型 2026 退讓中樞已接管：正在全自動歸類產業題材..."):
                         try:
                             ai_portfolio = []
                             for idx, row_ai in df_res.iterrows():
@@ -491,7 +491,8 @@ else:
                                 headlines = [n['title'] for n in news_data] if news_data else []
                                 prompt = f"請針對代碼 {t_ai} 新聞 '{' | '.join(headlines)}' 回傳JSON。包含 'category'(8字內), 'theme_score'(1-10), 'reason'(40字)。不要含```json"
                                 
-                                response_text = generate_content_with_retry(prompt)
+                                # 💡 同步導入最新 2026 全域防禦重試引擎，完美避開 404 與 503 滿載問題
+                                response_text = generate_content_with_retry(prompt, api_key_input)
                                 ai_res = json.loads(response_text.replace("```json", "").replace("```", ""))
                                 new_row = row_ai.to_dict()
                                 new_row['產業分類'] = ai_res.get('category', '未分類')
