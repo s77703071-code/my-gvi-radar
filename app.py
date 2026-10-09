@@ -193,7 +193,7 @@ else:
         if df.empty or len(df) < 5: return df, "盤後快取中", 0.0
         np.random.seed(abs(hash(ticker_name)) % 10000)
         vols = df['Volume'].astype(float).to_numpy().flatten()
-        current_trend = 0.0
+        current_trend = 0.85 * np.random.uniform(-0.08, 0.08)
         sim_net = np.zeros(len(vols))
         for i in range(len(vols)):
             current_trend = 0.85 * current_trend + np.random.uniform(-0.08, 0.08)
@@ -224,27 +224,73 @@ else:
                 date_strings = df_chart.index.strftime('%Y-%m-%d %H:%M' if 'm' in cfg["i"] else '%Y-%m-%d').tolist()
                 c_name = STOCK_NAME_MAP.get(selected_stock, stock.info.get('shortName', selected_stock))
                 price = stock.info.get('currentPrice') or stock.info.get('previousClose') or float(df_chart['Close'].to_numpy().flatten()[-1])
-                book_value = stock.info.get('bookValue') or 10.0; roe = stock.info.get('returnOnEquity') or 0.1
-                gvi_val = (float(book_value) / float(price)) * ((1 + float(roe)) ** 5); pb_val = float(price) / float(book_value)
                 
+                # 🛠️ 整合多重備援：精確提取 Book Value 與 ROE
+                info_data = stock.info
+                book_value = info_data.get('bookValue')
+                
+                # 若 info 無淨值，嘗試使用財報 Total Stockholder Equity / sharesOutstanding 計算
+                if book_value is None or np.isnan(book_value) or book_value <= 0:
+                    try:
+                        bs = stock.quarterly_balance_sheet
+                        if bs.empty: bs = stock.balance_sheet
+                        if not bs.empty:
+                            equity_key = [k for k in ['Total Stockholder Equity', 'Stockholders Equity', 'Total Equity Gross Minority Interest'] if k in bs.index]
+                            if equity_key:
+                                total_equity = bs.loc[equity_key[0]].iloc[0]
+                                shares = info_data.get('sharesOutstanding')
+                                if shares and shares > 0:
+                                    book_value = total_equity / shares
+                    except Exception:
+                        book_value = None
+
+                roe = info_data.get('returnOnEquity')
+                # 若 info 無 ROE，嘗試使用近四季 EPS / 每股淨值 計算
+                if roe is None or np.isnan(roe):
+                    eps = info_data.get('trailingEps')
+                    if eps is not None and book_value and book_value > 0:
+                        roe = eps / book_value
+                    else:
+                        roe = None
+
+                # 數據轉型與防禦
+                bv_val = float(book_value) if book_value and not np.isnan(book_value) else None
+                roe_val = float(roe) if roe and not np.isnan(roe) else None
+
+                # 計算 GVI 與 PB
+                if price > 0 and bv_val and bv_val > 0:
+                    effective_roe = roe_val if roe_val is not None else 0.08  # 估算用保守基準
+                    gvi_val = (bv_val / float(price)) * ((1 + effective_roe) ** 5)
+                    pb_val = float(price) / bv_val
+                else:
+                    gvi_val = 0.0
+                    pb_val = 0.0
+
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
+                
+                # UI 格式化展示
+                roe_str = f"{roe_val*100:.2f}%" if roe_val is not None else "N/A"
+                bv_str = f"{bv_val:,.2f} 元" if (is_tw_stock and bv_val) else (f"${bv_val:,.2f}" if bv_val else "N/A")
+                pb_str = f"{pb_val:.2f} 倍" if pb_val > 0 else "N/A"
+
                 gc1, gc2, gc3, gc4, gc5 = st.columns(5)
                 with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"{price:,.2f} 元" if is_tw_stock else f"${price:,.2f}"); st.caption("📢 交易所即時報價")
-                with gc2: st.metric(label="👑 GVI 成長價值值", value=f"{gvi_val:.4f}"); st.caption("📢 內在價值指標，愈高愈肥美")
-                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=f"{float(roe)*100:.2f}%"); st.caption("📢 賺錢效率，>15%為機構級績優生")
-                with gc4: st.metric(label="📖 每股淨值", value=f"{book_value:,.2f} 元" if is_tw_stock else f"${book_value:,.2f}"); st.caption("📢 公司清算價值，底層防守線")
-                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=f"{pb_val:.2f} 倍"); st.caption("📢 溢價程度，結合ROE評估市場冷熱")
+                with gc2: st.metric(label="👑 GVI 成長價值值", value=f"{gvi_val:.4f}" if gvi_val > 0 else "N/A"); st.caption("📢 內在價值指標，愈高愈肥美")
+                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=roe_str); st.caption("📢 賺錢效率，>15%為機構級績優生")
+                with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption("📢 公司清算價值，底層防守線")
+                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度，結合ROE評估市場冷熱")
 
-                # 🛡️ 估值狀態多行文字化重構，徹底防禦複製截斷問題
+                # 🛡️ 估值狀態多行文字化重構
                 valuation_color = "#ff4b4b"
                 valuation_status = "判讀中"
                 valuation_desc = "計算中"
 
-                if gvi_val >= 0.35 and pb_val <= 1.5:
+                eval_roe = roe_val if roe_val is not None else 0.1
+                if gvi_val >= 0.35 and pb_val <= 1.5 and pb_val > 0:
                     valuation_color = "#00cc66"
                     valuation_status = "🔥 極度便宜（有安全邊際，機構瘋狂撿便宜區）"
                     valuation_desc = "內在價值強勁但估值嚴重低估！屬於下檔風險鎖死、長線大送分的黃金買點。"
-                elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and float(roe) >= 0.12):
+                elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and eval_roe >= 0.12):
                     valuation_color = "#2baf2b"
                     valuation_status = "🟢 合理甜美（體質估值相稱，長線穩健布局期）"
                     valuation_desc = "股價完美對位體質，沒有嚴重泡沫或主力刻意打壓，屬長線基金安全期。"
@@ -270,11 +316,11 @@ else:
                     if not api_key_input: 
                         st.error("⚠️ 請先在左側邊欄輸入 Gemini API Key！")
                     else:
-                        with st.spinner(f"🤖 2026 最新退讓盾已鎖定機房，精算 {c_name} 報告中..."):
+                        with st.spinner(f"🤖 退讓盾已鎖定機房，精算 {c_name} 報告中..."):
                             try:
                                 ai_prompt = (
                                     f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_val:.4f}, "
-                                    f"ROE={float(roe)*100:.2f}%, PB={pb_val:.2f}倍，估值狀態為{valuation_status}。"
+                                    f"ROE={roe_str}, PB={pb_str}，估值狀態為{valuation_status}。"
                                     f"在300字內提供繁體中文投資報告，給出明確的多空與下檔風險評估。"
                                 )
                                 success_report = generate_content_with_retry(ai_prompt, api_key_input)
@@ -283,11 +329,11 @@ else:
                                 st.error(f"Google 雲端機房繁忙或金鑰異常: {ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 Google 2026 頂配 AI 【{c_name}】核心投資分析報告（已由常駐狀態鎖安全落地）")
+                    st.success(f"📋 Google AI 【{c_name}】核心投資分析報告")
                     st.markdown(st.session_state[f"ai_report_{selected_stock}"])
                     st.markdown("---")
-        except:
-            pass
+        except Exception as e:
+            st.error(f"即時數據解析異常: {e}")
 
         # ==========================================
         # K 線畫布與動態網格區塊
@@ -384,13 +430,17 @@ else:
         try:
             stock = yf.Ticker(t); info = stock.info
             p_raw = info.get('currentPrice') or info.get('previousClose') or 100.0
-            book_value = float(np.nanmax(pd.to_numeric(info.get('bookValue', 15.0), errors='coerce')))
-            roe = float(np.nanmax(pd.to_numeric(info.get('returnOnEquity', 0.12), errors='coerce')))
-            mcap = float(np.nanmax(pd.to_numeric(info.get('marketCap', 50000000000), errors='coerce')))
-            price = float(np.nanmax(pd.to_numeric(p_raw, errors='coerce')))
-            gvi = (book_value / price) * ((1 + roe) ** 5)
+            bv_raw = info.get('bookValue')
+            roe_raw = info.get('returnOnEquity')
+            
+            book_value = float(bv_raw) if bv_raw and not np.isnan(bv_raw) else 15.0
+            roe = float(roe_raw) if roe_raw and not np.isnan(roe_raw) else 0.12
+            mcap = float(info.get('marketCap') or 50000000000)
+            price = float(p_raw)
+            gvi = (book_value / price) * ((1 + roe) ** 5) if price > 0 else 0.0
+            
             conn = sqlite3.connect(DB_FILE); c = conn.cursor()
-            c.execute('''INSERT OR REPLACE INTO market_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (t, "LATEST", price, price, price, price, 10000, gvi, roe, mcap, mcap/price))
+            c.execute('''INSERT OR REPLACE INTO market_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (t, "LATEST", price, price, price, price, 10000, gvi, roe, mcap, mcap/price if price > 0 else 1))
             conn.commit(); conn.close()
         except: 
             pass
@@ -571,7 +621,7 @@ else:
                 if not api_key_input: 
                     st.error("⚠️ 請在邊欄輸入 Gemini API Key！")
                 else:
-                    with st.spinner("🤖 智慧型退讓中樞已接管：正在全自動歸類產業題材..."):
+                    with st.spinner("🤖 退讓中樞接管：正在全自動歸類產業題材..."):
                         try:
                             ai_portfolio = []
                             for idx, row_ai in df_res.iterrows():
