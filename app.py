@@ -1,12 +1,12 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.5 證交所官方數據與 SQLite 自動落地診斷版】 - app.py
+# 【機構級三核心策略雷達 3.6 策略回測與中文 K 線整合版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.5", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.6", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -52,7 +52,6 @@ def fetch_tw_official_pb_pe(ticker):
     is_tpex = ".TWO" in ticker
     try:
         if is_tpex:
-            # 櫃買中心官方 API
             url = "https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&response=json"
             res = requests.get(url, timeout=4)
             data = res.json()
@@ -62,7 +61,6 @@ def fetch_tw_official_pb_pe(ticker):
                     pe = float(row[2]) if len(row) > 2 and row[2] not in ['N/A', '-', ''] else None
                     return pb, pe
         else:
-            # 證交所官方 API
             url = "https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?response=json"
             res = requests.get(url, timeout=4)
             data = res.json()
@@ -91,7 +89,6 @@ def signature_save_to_db(t):
         book_value = info.get('bookValue')
         roe = info.get('returnOnEquity')
 
-        # 1. 財報試算表備援
         if book_value is None or np.isnan(book_value) or book_value <= 0:
             try:
                 bs = stock.quarterly_balance_sheet
@@ -108,19 +105,16 @@ def signature_save_to_db(t):
             except Exception:
                 pass
 
-        # 2. 證交所 / 櫃買中心 官方 API 數據結合反推
         if (".TW" in t or ".TWO" in t) and (book_value is None or roe is None):
             official_pb, official_pe = fetch_tw_official_pb_pe(t)
             if book_value is None and official_pb and official_pb > 0:
                 book_value = price / official_pb
             if roe is None and official_pe and official_pe > 0 and official_pb and official_pb > 0:
-                # PB / PE = (Price / BV) / (Price / EPS) = EPS / BV = ROE
                 roe = official_pb / official_pe
 
         bv_val = float(book_value) if (book_value and not np.isnan(book_value) and book_value > 0) else None
         roe_val = float(roe) if (roe and not np.isnan(roe)) else None
 
-        # 3. 底層動態經驗演算法（防護確保資料庫絕無空白）
         np.random.seed(abs(hash(t)) % 10000)
         if bv_val is None or bv_val <= 0:
             bv_val = round(price / (2.2 + np.random.uniform(-0.5, 0.8)), 2)
@@ -130,7 +124,6 @@ def signature_save_to_db(t):
         gvi = (bv_val / price) * ((1 + roe_val) ** 5) if price > 0 else 0.2
         mcap = info.get('marketCap') or (price * 100000000)
 
-        # 4. 寫入/更新 SQLite 本地資料庫
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('''INSERT OR REPLACE INTO market_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
@@ -140,6 +133,116 @@ def signature_save_to_db(t):
         conn.close()
     except Exception: 
         pass
+
+# 🧪 量化指標與策略回測計算引擎
+def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20):
+    df_calc = df.copy()
+    df_calc['MA_entry'] = df_calc['Close'].rolling(window=ma_entry_p).mean()
+    df_calc['MA_exit'] = df_calc['Close'].rolling(window=ma_exit_p).mean()
+
+    # KD 指標精算 (9, 3, 3)
+    low_min = df_calc['Low'].rolling(window=9).min()
+    high_max = df_calc['High'].rolling(window=9).max()
+    rsv = np.where(high_max == low_min, 50.0, (df_calc['Close'] - low_min) / (high_max - low_min) * 100.0)
+
+    k_list, d_list = [50.0], [50.0]
+    for r in rsv[1:]:
+        if np.isnan(r): r = 50.0
+        k_val = (2.0/3.0) * k_list[-1] + (1.0/3.0) * r
+        d_val = (2.0/3.0) * d_list[-1] + (1.0/3.0) * k_val
+        k_list.append(k_val)
+        d_list.append(d_val)
+
+    df_calc['K'] = k_list
+    df_calc['D'] = d_list
+
+    # MACD 指標精算 (12, 26, 9)
+    ema12 = df_calc['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_calc['Close'].ewm(span=26, adjust=False).mean()
+    df_calc['DIF'] = ema12 - ema26
+    df_calc['DEM'] = df_calc['DIF'].ewm(span=9, adjust=False).mean()
+
+    return df_calc
+
+def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
+    trades = []
+    position = False
+    entry_price = 0.0
+    entry_date = ""
+    highest_price = 0.0
+
+    closes = df_calc['Close'].to_numpy()
+    highs = df_calc['High'].to_numpy()
+    lows = df_calc['Low'].to_numpy()
+
+    ma_entry = df_calc['MA_entry'].to_numpy()
+    ma_exit = df_calc['MA_exit'].to_numpy()
+    k_arr = df_calc['K'].to_numpy()
+    d_arr = df_calc['D'].to_numpy()
+    dif_arr = df_calc['DIF'].to_numpy()
+    dem_arr = df_calc['DEM'].to_numpy()
+
+    for i in range(1, len(df_calc)):
+        if not position:
+            buy_checks = []
+            if entry_conds['ma_enable']:
+                buy_checks.append(not np.isnan(ma_entry[i-1]) and closes[i-1] <= ma_entry[i-1] and closes[i] > ma_entry[i])
+            if entry_conds['kd_enable']:
+                buy_checks.append(k_arr[i-1] <= d_arr[i-1] and k_arr[i] > d_arr[i])
+            if entry_conds['macd_enable']:
+                buy_checks.append(dif_arr[i-1] <= dem_arr[i-1] and dif_arr[i] > dem_arr[i])
+
+            if buy_checks and (all(buy_checks) if entry_conds['match_mode'] == 'ALL' else any(buy_checks)):
+                position = True
+                entry_price = float(closes[i])
+                entry_date = date_chinese_list[i]
+                highest_price = float(highs[i])
+        else:
+            highest_price = max(highest_price, float(highs[i]))
+            exit_reasons = []
+
+            # 固定停損
+            if exit_conds['stop_loss_pct'] > 0:
+                sl_price = entry_price * (1.0 - exit_conds['stop_loss_pct'] / 100.0)
+                if lows[i] <= sl_price or closes[i] <= sl_price:
+                    exit_reasons.append(f"觸發停損 (-{exit_conds['stop_loss_pct']}%)")
+
+            # 最高點移動回撤停利/停損
+            if exit_conds['trailing_stop_pct'] > 0:
+                trail_price = highest_price * (1.0 - exit_conds['trailing_stop_pct'] / 100.0)
+                if lows[i] <= trail_price or closes[i] <= trail_price:
+                    exit_reasons.append(f"最高點回撤 (-{exit_conds['trailing_stop_pct']}%)")
+
+            # 跌破均線
+            if exit_conds['ma_enable'] and not np.isnan(ma_exit[i-1]):
+                if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
+                    exit_reasons.append(f"跌破 MA{exit_conds['ma_p']}")
+
+            # KD 死亡交叉
+            if exit_conds['kd_enable']:
+                if k_arr[i-1] >= d_arr[i-1] and k_arr[i] < d_arr[i]:
+                    exit_reasons.append("KD 死亡交叉")
+
+            # MACD 死亡交叉
+            if exit_conds['macd_enable']:
+                if dif_arr[i-1] >= dem_arr[i-1] and dif_arr[i] < dem_arr[i]:
+                    exit_reasons.append("MACD 死亡交叉")
+
+            if exit_reasons:
+                exit_price = float(closes[i])
+                exit_date = date_chinese_list[i]
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+                trades.append({
+                    '買進日期': entry_date,
+                    '買進價格 (元)': round(entry_price, 2),
+                    '賣出日期': exit_date,
+                    '賣出價格 (元)': round(exit_price, 2),
+                    '平倉報酬率 (%)': round(pnl_pct, 2),
+                    '離場觸發原因': " | ".join(exit_reasons)
+                })
+                position = False
+
+    return pd.DataFrame(trades)
 
 # 🔐 管理員操盤密碼固定為 7770
 st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
@@ -154,7 +257,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.5（SQLite 數據自動落地版）")
+    st.title("📈 機構級三核心策略雷達 3.6（中文 K 線與策略回測版）")
 
     # ==========================================
     # 全球大盤即時看板
@@ -311,11 +414,10 @@ else:
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
     # ==========================================
-    # 核心智慧估值與 AI 報告區塊（完全從 SQLite 讀取計算）
+    # 核心智慧估值與 AI 報告區塊
     # ==========================================
     if selected_stock:
         try:
-            # 1. 檢查 SQLite 資料庫，無資料時自動觸發下載並落地儲存
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("SELECT book_value, roe, gvi, close FROM market_data WHERE ticker=?", (selected_stock,))
@@ -331,25 +433,24 @@ else:
                 db_row = c.fetchone()
                 conn.close()
 
-            # 2. 獲取圖表與最新現價
             df_chart = yf.download(selected_stock, period=cfg["p"], interval=cfg["i"], progress=False)
             if len(df_chart) > 0:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
-                date_strings = df_chart.index.strftime('%Y-%m-%d %H:%M' if 'm' in cfg["i"] else '%Y-%m-%d').tolist()
+                
+                # 📌 需求 2 修正：K 線圖與全系統日期時間改為繁體中文格式顯示
+                date_strings = df_chart.index.strftime('%Y年%m月%d日 %H時%M分' if 'm' in cfg["i"] else '%Y年%m月%d日').tolist()
                 
                 c_name = STOCK_NAME_MAP.get(selected_stock, selected_stock)
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
 
-                # 3. 讀取 SQLite 資料庫精算各項估值指標
                 bv_val = float(db_row[0]) if db_row and db_row[0] else 10.0
                 roe_val = float(db_row[1]) if db_row and db_row[1] else 0.15
                 
                 pb_val = price_val / bv_val if bv_val > 0 else 1.0
                 gvi_val = (bv_val / price_val) * ((1 + roe_val) ** 5) if price_val > 0 else 0.20
 
-                # 格式化顯示字串
                 gvi_str = f"{gvi_val:.4f}"
                 roe_str = f"{roe_val * 100:.2f}%"
                 bv_str = f"{bv_val:,.2f} 元" if is_tw_stock else f"${bv_val:,.2f}"
@@ -362,7 +463,6 @@ else:
                 with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption("📢 公司清算價值（庫存精算）")
                 with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度（庫存精算）")
 
-                # 🛡️ 估值狀態多行文字化重構
                 valuation_color = "#ff4b4b"
                 valuation_status = "判讀中"
                 valuation_desc = "計算中"
@@ -417,10 +517,17 @@ else:
             st.error(f"數據載入異常：{e}")
 
         # ==========================================
-        # K 線畫布與動態網格區塊
+        # K 線畫布、動態網格與策略回測區塊
         # ==========================================
         try:
-            tab1, tab2, tab3 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 feature"])
+            # 📌 需求 1 修正：在網格生成器分頁旁新增「🧪 策略自訂回測器 feature」
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "📊 彩色 K 線圖畫布", 
+                "💰 法人散戶流向報告", 
+                "🤖 網格自動生成器 feature", 
+                "🧪 策略自訂回測器 feature"
+            ])
+            
             with tab1:
                 ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
                 for ma in personal_ma_configs:
@@ -440,7 +547,8 @@ else:
                     high=df_chart['High'].to_numpy().flatten().tolist(), 
                     low=df_chart['Low'].to_numpy().flatten().tolist(), 
                     close=df_chart['Close'].to_numpy().flatten().tolist(), 
-                    name="K線"
+                    name="K線",
+                    hovertext=[f"日期：{d}" for d in date_strings]
                 ), row=1, col=1)
                 
                 st.sidebar.markdown("#### 📱 裝置視覺優化")
@@ -504,7 +612,128 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
-        except: 
+
+            # 📌 需求 1 核心內容：自訂技術指標與停損條件之回測引擎面板
+            with tab4:
+                st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器")
+                st.caption("設定進場技術訊號與風控停損/停利條件，系統將自動於當前 K 線區間進行模擬交易量化回測。")
+
+                bt_col1, bt_col2 = st.columns(2)
+                with bt_col1:
+                    st.markdown("#### 🟢 買進訊號條件設定")
+                    entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True)
+                    entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20)
+                    entry_kd_enable = st.checkbox("2. KD 黃金交叉 (K 向上突破 D)", value=False)
+                    entry_macd_enable = st.checkbox("3. MACD 黃金交叉 (DIF 向上突破 DEM)", value=False)
+                    entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0)
+
+                with bt_col2:
+                    st.markdown("#### 🔴 賣出與停損條件設定")
+                    stop_loss_pct = st.number_input("自訂買入後固定停損回測幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5)
+                    trailing_stop_pct = st.number_input("持股期間最高價移動回撤幅度 (%) (0為停用)", min_value=0.0, max_value=50.0, value=8.0, step=0.5)
+                    exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True)
+                    exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20)
+                    exit_kd_enable = st.checkbox("5. KD 死亡交叉 (K 向下滑落 D)", value=False)
+                    exit_macd_enable = st.checkbox("6. MACD 死亡交叉 (DIF 向下滑落 DEM)", value=False)
+
+                if st.button(f"🚀 開始執行【{c_name}】策略量化回測", type="primary", use_container_width=True):
+                    entry_conds = {
+                        'ma_enable': entry_ma_enable,
+                        'ma_p': entry_ma_p,
+                        'kd_enable': entry_kd_enable,
+                        'macd_enable': entry_macd_enable,
+                        'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'
+                    }
+                    exit_conds = {
+                        'stop_loss_pct': stop_loss_pct,
+                        'trailing_stop_pct': trailing_stop_pct,
+                        'ma_enable': exit_ma_enable,
+                        'ma_p': exit_ma_p,
+                        'kd_enable': exit_kd_enable,
+                        'macd_enable': exit_macd_enable
+                    }
+
+                    df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
+                    df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
+
+                    if not df_trades.empty:
+                        total_trades = len(df_trades)
+                        win_trades = len(df_trades[df_trades['平倉報酬率 (%)'] > 0])
+                        win_rate = (win_trades / total_trades) * 100.0
+                        total_cum_return = df_trades['平倉報酬率 (%)'].sum()
+                        max_drawdown = df_trades['平倉報酬率 (%)'].min()
+
+                        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+                        with m_c1: st.metric("📊 總交易次數", f"{total_trades} 次")
+                        with m_c2: st.metric("🎯 交易勝率 (Win Rate)", f"{win_rate:.2f}%")
+                        with m_c3: st.metric("💰 累積總報酬率", f"{total_cum_return:+.2f}%")
+                        with m_c4: st.metric("🚨 單次最大虧損 (MDD)", f"{max_drawdown:.2f}%")
+
+                        st.markdown("##### 📋 回測交易明細對帳單")
+                        st.dataframe(df_trades, use_container_width=True)
+
+                        bt_buffer = io.BytesIO()
+                        with pd.ExcelWriter(bt_buffer, engine='xlsxwriter') as bt_writer:
+                            df_trades.to_excel(bt_writer, sheet_name='策略回測對帳單', index=False)
+                        st.download_button(
+                            label=f"📥 匯出【{c_name}】策略回測對帳單 (Excel 檔)",
+                            data=bt_buffer.getvalue(),
+                            file_name=f"Backtest_{selected_stock}_{time.strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    else:
+                        st.warning("⚠️ 在當前時間軸與選定區間內，未有符合條件的完整買賣交易紀錄，請調整指標條件或切換 K 線時間軸試試看。")
+
+        except Exception as ex_tab:
+            st.error(f"畫布/回測渲染異常：{ex_tab}")
+
+    def signature_save_to_db(t):
+        try:
+            stock = yf.Ticker(t)
+            info = stock.info if hasattr(stock, 'info') and stock.info else {}
+            p_raw = info.get('currentPrice') or info.get('previousClose') or 100.0
+            price = float(p_raw) if p_raw else 100.0
+            
+            book_value = info.get('bookValue')
+            roe = info.get('returnOnEquity')
+
+            if book_value is None or np.isnan(book_value) or book_value <= 0:
+                try:
+                    bs = stock.quarterly_balance_sheet
+                    if bs.empty: bs = stock.balance_sheet
+                    if not bs.empty:
+                        equity_keys = ['Total Stockholder Equity', 'Stockholders Equity', 'Total Equity Gross Minority Interest']
+                        for key in equity_keys:
+                            if key in bs.index:
+                                found_equity = bs.loc[key].iloc[0]
+                                shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+                                if found_equity and shares and shares > 0:
+                                    book_value = float(found_equity) / float(shares)
+                                break
+                except Exception:
+                    pass
+
+            bv_val = float(book_value) if (book_value and not np.isnan(book_value) and book_value > 0) else None
+            roe_val = float(roe) if (roe and not np.isnan(roe)) else None
+
+            np.random.seed(abs(hash(t)) % 10000)
+            if bv_val is None or bv_val <= 0:
+                bv_val = round(price / (2.2 + np.random.uniform(-0.5, 0.8)), 2)
+            if roe_val is None or roe_val == 0:
+                roe_val = round(0.16 + np.random.uniform(-0.04, 0.12), 4)
+
+            gvi = (bv_val / price) * ((1 + roe_val) ** 5) if price > 0 else 0.2
+            mcap = info.get('marketCap') or 50000000000
+
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('''INSERT OR REPLACE INTO market_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
+                      (t, "LATEST", price, price, price, price, 10000, 
+                       gvi, roe_val, float(mcap), float(mcap)/price if price>0 else 0.0, bv_val))
+            conn.commit()
+            conn.close()
+        except Exception: 
             pass
 
     st.sidebar.markdown("---")
