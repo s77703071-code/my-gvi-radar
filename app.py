@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.6 美股備援強化與策略回測整合版】 - app.py
+# 【機構級三核心策略雷達 3.6 策略明細排名與美股備援整合版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
@@ -893,7 +893,7 @@ else:
                 st.error(f"Excel 導出引擎異常: {ex_e}")
 
     # ==========================================
-    # 自訂掃描池與多因子過濾
+    # 自訂掃描池與多因子動態明細排名渲染器
     # ==========================================
     custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區（上市.TW、上櫃.TWO，多檔請用英文逗號隔開）：", value="2330.TW, 3293.TWO, 8069.TWO, NVDA, AAPL")
     custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
@@ -1004,19 +1004,42 @@ else:
             if strat_gvi: df_res['綜合分數'] += df_res['GVI_Rank']; active_strats += 1
             if strat_momentum: df_res['綜合分數'] += df_res['MO_Rank']; active_strats += 1
             if strat_qarp: df_res['綜合分數'] += df_res['FCF_Rank']; active_strats += 1
-            if active_strats == 0: df_res['綜合分數'] = df_res['GVI_Rank']
+            if active_strats == 0: 
+                df_res['綜合分數'] = df_res['GVI_Rank']
+                active_strats = 1
+            
+            # 計算策略百分比綜合評分 (0-100分)
+            df_res['策略評分_num'] = ((df_res['綜合分數'] / active_strats) * 100).round(1)
             
             df_res = df_res.sort_values(by='綜合分數', ascending=False).head(20).reset_index(drop=True)
             
-            df_res['GVI值'] = df_res['GVI值'].apply(lambda x: f"{x:.4f}" if (pd.notnull(x) and x is not None) else "資料不足")
-            df_res['一年最高點距離'] = df_res['動能分數'].round(1).astype(str) + "%"
-            df_res['自由現金流收益'] = df_res['自由現金流收益'].apply(lambda x: f"{x:.2f}%" if (pd.notnull(x) and x is not None) else "資料不足")
+            # 建立明確排名與可視化欄位
+            df_res['排名'] = [f"第 {i+1} 名" for i in range(len(df_res))]
+            df_res['策略評分'] = df_res['策略評分_num'].astype(str) + " 分"
+            
+            df_res['GVI價值指標'] = df_res['GVI值'].apply(lambda x: f"{x:.4f}" if (pd.notnull(x) and x is not None) else "資料不足")
+            df_res['動能(創高距離)'] = df_res['動能分數'].round(1).astype(str) + "%"
+            df_res['自由現金流收益率'] = df_res['自由現金流收益'].apply(lambda x: f"{x:.2f}%" if (pd.notnull(x) and x is not None) else "資料不足")
             df_res['本益成長比(PEG)'] = df_res['本益成長比(PEG)'].apply(lambda x: f"{x:.2f}" if (pd.notnull(x) and x is not None) else "資料不足")
             
-            cols = ['股票代碼', '股票名稱', '目前股價', 'GVI值', '一年最高點距離', '自由現金流收益', '本益成長比(PEG)', '⚡ 即時籌碼動能']
+            # 動態依據勾選策略呈現項目明細
+            cols = ['排名', '股票代碼', '股票名稱', '目前股價', '策略評分']
+            if strat_gvi:
+                cols.append('GVI價值指標')
+            if strat_momentum:
+                cols.append('動能(創高距離)')
+            if strat_qarp:
+                cols.extend(['自由現金流收益率', '本益成長比(PEG)'])
+            
+            # 若三者皆未勾選，預設顯示全部明細
+            if not strat_gvi and not strat_momentum and not strat_qarp:
+                cols.extend(['GVI價值指標', '動能(創高距離)', '自由現金流收益率', '本益成長比(PEG)'])
+                
+            cols.append('⚡ 即時籌碼動能')
+            
             df_final_view = df_res[cols]
             
-            st.markdown(f"#### {title} (已依勾選排序前 20 檔最優清單)")
+            st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
             st.dataframe(df_final_view, use_container_width=True)
             
             opt_buffer = io.BytesIO()
