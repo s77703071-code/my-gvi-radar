@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.6 策略回測、中文 K 線與動態估值診斷整合版】 - app.py
+# 【機構級三核心策略雷達 3.6 美股備援強化與策略回測整合版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
@@ -103,13 +103,14 @@ def fetch_tw_official_pb_pe(ticker):
         st.sidebar.caption(f"TWSE/TPEx API 擷取提醒 ({ticker}): {e}")
     return None, None
 
-# 💾 共用核心函數：抓取數據、精算並明確欄位「寫入 SQLite 資料庫」
+# 💾 共用核心函數：抓取數據、美股/台股多重備援精算並「寫入 SQLite 資料庫」
 def signature_save_to_db(t):
     """
-    統一資料來源與寫入流程：
-    1. 不再使用隨機數補缺值；若數據缺失標示為 None。
-    2. 紀錄每股淨值與 ROE 的真實來源 (yfinance 財報 / TWSE 估算 / PB/PE 代理值)。
-    3. 顯式指定 SQL 欄位名稱，處理例外異常。
+    統一數據抓取與雙重備援機制：
+    1. yfinance.info 優先讀取。
+    2. 台股備援：證交所/櫃買中心官方 PB/PE API 估算。
+    3. 美股備援：自動解析季報資產負債表 (Balance Sheet) 與損益表 (Income Statement TTM) 推算。
+    4. 嚴格拒絕隨機數與假值，絕不冒充財報真值。
     """
     try:
         stock = yf.Ticker(t)
@@ -129,34 +130,78 @@ def signature_save_to_db(t):
         roe_val = parse_roe(raw_roe)
         roe_source = "yfinance 財報" if roe_val is not None else None
 
-        # 若 yfinance Info 缺失每股淨值，讀取資產負債表 (Total Equity / Shares)
-        if book_value is None or np.isnan(book_value) or book_value <= 0:
-            try:
-                bs = stock.quarterly_balance_sheet
-                if bs.empty: bs = stock.balance_sheet
-                if not bs.empty:
-                    equity_keys = ['Total Stockholder Equity', 'Stockholders Equity', 'Total Equity Gross Minority Interest']
-                    for key in equity_keys:
-                        if key in bs.index:
-                            found_equity = bs.loc[key].iloc[0]
-                            shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
-                            if found_equity and shares and shares > 0:
-                                book_value = float(found_equity) / float(shares)
-                                bv_source = "yfinance 資產負債表推算"
-                            break
-            except Exception:
-                pass
-
-        # 若台股資料仍缺失，調用 TWSE/TPEx 官方 PB/PE 作為估算值 / 代理值
+        # ------------------------------------------------------------------
+        # 🇹🇼 台灣股市備援邏輯：調用 TWSE / TPEx 官方 API
+        # ------------------------------------------------------------------
         if (".TW" in t or ".TWO" in t) and (book_value is None or roe_val is None):
             official_pb, official_pe = fetch_tw_official_pb_pe(t)
             if (book_value is None or book_value <= 0) and price and official_pb and official_pb > 0:
                 book_value = price / official_pb
                 bv_source = "TWSE/TPEx PB估算值"
             if roe_val is None and official_pe and official_pe > 0 and official_pb and official_pb > 0:
-                # PB / PE = (P/BV) / (P/EPS) = EPS / BV (視為代理值)
                 roe_val = parse_roe(official_pb / official_pe)
                 roe_source = "TWSE/TPEx PB/PE代理值"
+
+        # ------------------------------------------------------------------
+        # 🇺🇸 美國股市備援邏輯：解析季報/年報資產負債表與損益表 (TTM 財務精算)
+        # ------------------------------------------------------------------
+        if (".TW" not in t and ".TWO" not in t) and (book_value is None or roe_val is None):
+            try:
+                # 1. 抓取資產負債表 (Quarterly / Annual Balance Sheet)
+                bs = stock.quarterly_balance_sheet
+                if bs.empty: bs = stock.balance_sheet
+                
+                # 2. 抓取損益表 (Quarterly / Annual Financials)
+                inc = stock.quarterly_financials
+                if inc.empty: inc = stock.financials
+
+                tot_equity = None
+                if not bs.empty:
+                    equity_keys = [
+                        'Total Stockholder Equity', 'Stockholders Equity', 
+                        'Common Stock Equity', 'Total Equity Gross Minority Interest'
+                    ]
+                    for key in equity_keys:
+                        if key in bs.index:
+                            found_eq = bs.loc[key].iloc[0]
+                            if found_eq is not None and not np.isnan(found_eq):
+                                tot_equity = float(found_eq)
+                                break
+
+                # A. 備援精算每股淨值 (BV)
+                if book_value is None and tot_equity is not None:
+                    shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+                    if shares and shares > 0:
+                        calculated_bv = tot_equity / float(shares)
+                        if calculated_bv > 0:
+                            book_value = calculated_bv
+                            bv_source = "yfinance 美股資產負債表精算"
+                        else:
+                            bv_source = "美股負股東權益(庫藏股/虧損)"
+
+                # B. 備援精算近四季累計 ROE (Net Income TTM / Total Equity)
+                if roe_val is None and tot_equity is not None and tot_equity > 0 and not inc.empty:
+                    net_income_keys = [
+                        'Net Income', 'Net Income Common Stockholders', 
+                        'Net Income Including Noncontrolling Interests'
+                    ]
+                    for net_key in net_income_keys:
+                        if net_key in inc.index:
+                            inc_series = inc.loc[net_key].dropna()
+                            if len(inc_series) >= 4:
+                                net_income_ttm = float(inc_series.iloc[:4].sum())
+                            elif len(inc_series) > 0:
+                                net_income_ttm = float(inc_series.iloc[0]) * 4
+                            else:
+                                net_income_ttm = None
+                            
+                            if net_income_ttm is not None:
+                                calc_roe = net_income_ttm / tot_equity
+                                roe_val = parse_roe(calc_roe)
+                                roe_source = "yfinance 美股財報 TTM 推算"
+                            break
+            except Exception as us_err:
+                st.sidebar.caption(f"美股財報備援解析提醒 [{t}]: {us_err}")
 
         bv_val = float(book_value) if (book_value is not None and not np.isnan(book_value) and book_value > 0) else None
         roe_val = parse_roe(roe_val)
@@ -561,18 +606,21 @@ else:
                         reasons.append("❌ <b>股價異常</b>：查無即時報價或標的停牌 ($P \\le 0$)")
                     
                     if bv_val is None:
-                        reasons.append("❌ <b>每股淨值 (BV) 缺失</b>：可能為 ETF/債券/REITs 等非普通股，或財報未揭露")
+                        if "負股東權益" in bv_src or "庫藏股" in bv_src:
+                            reasons.append("❌ <b>美股負股東權益</b>：該美股大量執行庫藏股註銷或累積虧損致每股淨值 $\\le 0$（例如 AAPL/SBUX），GVI 指標天然不適用")
+                        else:
+                            reasons.append("❌ <b>每股淨值 (BV) 缺失</b>：可能為 ETF/債券/REITs 等非普通股，或財報未揭露")
                     elif bv_val <= 0:
-                        reasons.append("❌ <b>每股淨值為負 ($BV \\le 0$)</b>：公司長期虧損導致淨值侵蝕（財務危機/全額交割）")
+                        reasons.append("❌ <b>每股淨值為負 ($BV \\le 0$)</b>：公司長期虧損或執行巨額庫藏股致權益負值")
 
                     if roe_val is None:
-                        reasons.append("❌ <b>ROE 缺失/無法推算</b>：當期連續虧損 (EPS < 0) 導致交易所 PE 標示 N/A 無法推算代用值，或財報缺值")
+                        reasons.append("❌ <b>ROE 缺失/無法推算</b>：當期連續虧損 (EPS < 0) 導致交易所 PE 標示 N/A 或財報數據未完整發布")
 
                     reason_details = "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• " + "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• ".join(reasons)
                     
                     valuation_desc = (
                         f"<b>【基本面缺值動態診斷】</b>{reason_details}<br/>"
-                        f"💡 <b>操盤手安全提醒：</b>根據防護機制，系統嚴禁使用隨機數或預設假值補缺。若標的為連續虧損個股或 ETF，出現「資料不足」屬於防範錯估的正常避險現象。"
+                        f"💡 <b>操盤手安全提醒：</b>根據防護機制，系統嚴禁使用隨機數補缺。美股若因巨額庫藏股致淨值為負（如蘋果 AAPL），建議改用「QARP 現金流雷達」評估。"
                     )
 
                 st.markdown(
