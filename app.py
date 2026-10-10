@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.6 完整修正版】 - app.py
+# 【機構級三核心策略雷達 3.6 全能修復與防錯優化版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
@@ -442,6 +442,7 @@ else:
         
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
+    df_chart = None
     if selected_stock:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -552,85 +553,89 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 feature", "🧪 策略自訂回測器 feature"])
-        
-        with tab1:
-            ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
-            for ma in personal_ma_configs:
-                p, c = ma["period"], ma["color"]
-                ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                if not ma_series.empty:
-                    latest_ma_val = ma_series.to_numpy().flatten()[-1]
-                    ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
-            ma_display_html += "</div>"
+        # 🛡️ 安全機制：防範無效代碼導致 NameError
+        if df_chart is None or df_chart.empty:
+            st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否輸入正確（如台股請加上 .TW 或 .TWO）。")
+        else:
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 feature", "🧪 策略自訂回測器 feature"])
             
-            st.markdown(f"### 📊 【{c_name}】{selected_tf} K線視窗 {ma_display_html}", unsafe_allow_html=True)
+            with tab1:
+                ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
+                for ma in personal_ma_configs:
+                    p, c = ma["period"], ma["color"]
+                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                    if not ma_series.empty:
+                        latest_ma_val = ma_series.to_numpy().flatten()[-1]
+                        ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
+                ma_display_html += "</div>"
+                
+                st.markdown(f"### 📊 【{c_name}】{selected_tf} K線視窗 {ma_display_html}", unsafe_allow_html=True)
+                
+                fig = make_subplots(rows=1, cols=1)
+                fig.add_trace(go.Candlestick(
+                    x=date_strings, 
+                    open=df_chart['Open'].to_numpy().flatten().tolist(), 
+                    high=df_chart['High'].to_numpy().flatten().tolist(), 
+                    low=df_chart['Low'].to_numpy().flatten().tolist(), 
+                    close=df_chart['Close'].to_numpy().flatten().tolist(), 
+                    name="K線",
+                    hovertext=[f"日期：{d}" for d in date_strings]
+                ), row=1, col=1)
+                
+                for ma in personal_ma_configs:
+                    p, c = ma["period"], ma["color"]
+                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                    if not ma_series.empty:
+                        ma_list = ma_series.to_numpy().flatten().tolist()
+                        fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
+                
+                fig.update_layout(xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=True, xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"))
+                st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'drawrect', 'drawcircle', 'eraseshape'], 'displayModeBar': True, 'scrollZoom': True})
             
-            fig = make_subplots(rows=1, cols=1)
-            fig.add_trace(go.Candlestick(
-                x=date_strings, 
-                open=df_chart['Open'].to_numpy().flatten().tolist(), 
-                high=df_chart['High'].to_numpy().flatten().tolist(), 
-                low=df_chart['Low'].to_numpy().flatten().tolist(), 
-                close=df_chart['Close'].to_numpy().flatten().tolist(), 
-                name="K線",
-                hovertext=[f"日期：{d}" for d in date_strings]
-            ), row=1, col=1)
+            with tab2:
+                st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
             
-            for ma in personal_ma_configs:
-                p, c = ma["period"], ma["color"]
-                ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                if not ma_series.empty:
-                    ma_list = ma_series.to_numpy().flatten().tolist()
-                    fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
-            
-            fig.update_layout(xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=True, xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"))
-            st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'drawrect', 'drawcircle', 'eraseshape'], 'displayModeBar': True, 'scrollZoom': True})
-        
-        with tab2:
-            st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
-        
-        with tab3:
-            st.markdown("### 🎛️ 智慧型動態網格區間自動規劃器")
-            grid_p = float(price_val)
-            g_col1, g_col2, g_col3 = st.columns(3)
-            with g_col1: input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.85, 2))
-            with g_col2: input_upper = st.number_input("網格上限價格", value=round(grid_p * 1.15, 2))
-            with g_col3: input_num = st.number_input("規劃總格數", min_value=5, max_value=100, value=20, step=5)
-            
-            levels = np.linspace(input_lower, input_upper, input_num)
-            grid_details = [{"網格編號": f"Grid #{idx+1:02d}", "掛單目標價": round(level, 2), "執行流派動作": "🟢 買進掛單" if level < grid_p else "🔴 賣出掛單"} for idx, level in enumerate(levels)]
-            st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=250)
+            with tab3:
+                st.markdown("### 🎛️ 智慧型動態網格區間自動規劃器")
+                grid_p = float(price_val)
+                g_col1, g_col2, g_col3 = st.columns(3)
+                with g_col1: input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.85, 2))
+                with g_col2: input_upper = st.number_input("網格上限價格", value=round(grid_p * 1.15, 2))
+                with g_col3: input_num = st.number_input("規劃總格數", min_value=5, max_value=100, value=20, step=5)
+                
+                levels = np.linspace(input_lower, input_upper, input_num)
+                grid_details = [{"網格編號": f"Grid #{idx+1:02d}", "掛單目標價": round(level, 2), "執行流派動作": "🟢 買進掛單" if level < grid_p else "🔴 賣出掛單"} for idx, level in enumerate(levels)]
+                st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=250)
 
-        with tab4:
-            st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器")
-            bt_col1, bt_col2 = st.columns(2)
-            with bt_col1:
-                entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True)
-                entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20)
-                entry_kd_enable = st.checkbox("2. KD 黃金交叉", value=False)
-                entry_macd_enable = st.checkbox("3. MACD 黃金交叉", value=False)
-                entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0)
+            with tab4:
+                st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器")
+                bt_col1, bt_col2 = st.columns(2)
+                with bt_col1:
+                    entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True)
+                    entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20)
+                    entry_kd_enable = st.checkbox("2. KD 黃金交叉", value=False)
+                    entry_macd_enable = st.checkbox("3. MACD 黃金交叉", value=False)
+                    entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0)
 
-            with bt_col2:
-                stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5)
-                trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5)
-                exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True)
-                exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20)
+                with bt_col2:
+                    stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5)
+                    trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5)
+                    exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True)
+                    exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20)
 
-            if st.button(f"🚀 開始執行【{c_name}】策略量化回測", type="primary", use_container_width=True):
-                entry_conds = {'ma_enable': entry_ma_enable, 'ma_p': entry_ma_p, 'kd_enable': entry_kd_enable, 'macd_enable': entry_macd_enable, 'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'}
-                exit_conds = {'stop_loss_pct': stop_loss_pct, 'trailing_stop_pct': trailing_stop_pct, 'ma_enable': exit_ma_enable, 'ma_p': exit_ma_p, 'kd_enable': False, 'macd_enable': False}
-                df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
-                df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
+                if st.button(f"🚀 開始執行【{c_name}】策略量化回測", type="primary", use_container_width=True):
+                    entry_conds = {'ma_enable': entry_ma_enable, 'ma_p': entry_ma_p, 'kd_enable': entry_kd_enable, 'macd_enable': entry_macd_enable, 'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'}
+                    exit_conds = {'stop_loss_pct': stop_loss_pct, 'trailing_stop_pct': trailing_stop_pct, 'ma_enable': exit_ma_enable, 'ma_p': exit_ma_p, 'kd_enable': False, 'macd_enable': False}
+                    df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
+                    df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
 
-                if not df_trades.empty:
-                    st.dataframe(df_trades, use_container_width=True)
-                else:
-                    st.warning("⚠️ 在選定區間內未有符合條件的完整交易紀錄。")
+                    if not df_trades.empty:
+                        st.dataframe(df_trades, use_container_width=True)
+                    else:
+                        st.warning("⚠️ 在選定區間內未有符合條件的完整交易紀錄。")
 
     except Exception as ex_tab:
-        st.error(f"畫布/回測渲染異常：{ex_tab}")
+        st.error(f"❌ 畫面渲染異常：{ex_tab}")
 
     st.markdown("---")
     st.markdown("### 🚀 華爾街機構級三核心策略雷達")
