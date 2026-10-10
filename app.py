@@ -8,6 +8,18 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
+# 📱 行動端手機螢幕顯示優化 CSS
+st.markdown("""
+    <style>
+        .block-container { padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
+        .js-plotly-plot .plotly .main-svg { border-radius: 8px; }
+        @media (max-width: 768px) {
+            .stMetric { padding: 4px !important; }
+            .block-container { padding-top: 1rem !important; }
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
 CACHE_TTL = 86400  # 快取有效期限：24 小時 (86400 秒)
@@ -458,8 +470,11 @@ else:
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df.dropna(subset=['Close', 'Low', 'Volume']).copy()
+        
+        # 修正：針對特定級別重採樣，避開非必要的 Resample 造成 K 棒過度擠壓
         if timeframe_name == "半年": df = df.resample('6ME').last().dropna()
         elif timeframe_name == "1年": df = df.resample('12ME').last().dropna()
+        
         if df.empty or len(df) < 5: return df, "盤後快取中", 0.0
         
         closes = df['Close'].astype(float).to_numpy().flatten()
@@ -526,7 +541,12 @@ else:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
                 
-                date_strings = df_chart.index.strftime('%Y.%m').tolist()
+                # 📅 日期格式動態適應：分時圖精確到分，日線精確到日
+                if "分鐘" in selected_tf:
+                    date_strings = df_chart.index.strftime('%m-%d %H:%M').tolist()
+                else:
+                    date_strings = df_chart.index.strftime('%Y-%m-%d').tolist()
+
                 c_name = STOCK_NAME_MAP.get(selected_stock, selected_stock)
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
@@ -632,31 +652,38 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.12 操盤手教學版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與成交量", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.12 操盤手教學版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
             
             # ==============================================================================
-            # 【Tab 1: Plotly 原生 K 線圖 + 年.月日期 + 畫圖選色移除/文字註記 + K棒寬度固定】
+            # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 手機/行動版視角優化】
             # ==============================================================================
             with tab1:
                 col_title, col_draw_color = st.columns([3, 1])
                 with col_title:
-                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle;'>"
+                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:4px 8px; border:1px solid #444; border-radius:6px; display:inline-block; font-size:12px; color:white; vertical-align:middle;'>"
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
                         ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
                         if not ma_series.empty:
                             latest_ma_val = ma_series.to_numpy().flatten()[-1]
-                            ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
+                            ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:8px;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
                     ma_display_html += "</div>"
-                    st.markdown(f"### 📊 【{c_name}】全功能互動 K 線圖 {ma_display_html}", unsafe_allow_html=True)
+                    st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
                 
                 with col_draw_color:
-                    draw_color = st.color_picker("🎨 自訂畫線與文字顏色", value="#FF3333", key="draw_line_color_picker")
+                    draw_color = st.color_picker("🎨 自訂畫線顏色", value="#FF3333", key="draw_line_color_picker")
 
-                st.caption("💡 **繪圖工具列指南**：點擊右上方工具列「直線 (drawline)」、「筆刷」、「矩形 (drawrect)」、「📝 輸入文字 (drawtext)」即可在圖上繪製標記；點擊「橡皮擦 (eraseshape)」後選取畫線即可移除！")
+                st.caption("💡 **行動與桌面端操作提示**：圖表雙指縮放/雙擊重置；右上方支援畫線、文字標記與橡皮擦功能！")
                 
-                fig = make_subplots(rows=1, cols=1)
+                # 📊 建立 2 行 1 列雙子圖，共用 X 軸（上 K線 75% 高度，下 成交量 25% 高度）
+                fig = make_subplots(
+                    rows=2, cols=1, 
+                    shared_xaxes=True, 
+                    vertical_spacing=0.03, 
+                    row_heights=[0.75, 0.25]
+                )
                 
+                # 1️⃣ 上半部：主圖 Candlestick K棒
                 fig.add_trace(go.Candlestick(
                     x=date_strings, 
                     open=df_chart['Open'].to_numpy().flatten().tolist(), 
@@ -664,29 +691,59 @@ else:
                     low=df_chart['Low'].to_numpy().flatten().tolist(), 
                     close=df_chart['Close'].to_numpy().flatten().tolist(), 
                     name="K線",
+                    increasing_line_color='#ef5350', # 台股習慣：漲紅
+                    decreasing_line_color='#26a69a', # 台股習慣：跌綠
                     hovertext=[f"日期：{d}" for d in date_strings]
                 ), row=1, col=1)
                 
+                # 均線繪製
                 for ma in personal_ma_configs:
                     p, c = ma["period"], ma["color"]
                     ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
                     if not ma_series.empty:
                         ma_list = ma_series.to_numpy().flatten().tolist()
-                        fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
+                        fig.add_trace(go.Scatter(
+                            x=date_strings[-len(ma_list):], 
+                            y=ma_list, 
+                            mode='lines', 
+                            name=f'{p}MA', 
+                            line=dict(color=c, width=1.5)
+                        ), row=1, col=1)
+
+                # 2️⃣ 下半部：副圖 成交量 Bar 柱狀圖
+                open_arr = df_chart['Open'].to_numpy().flatten()
+                close_arr = df_chart['Close'].to_numpy().flatten()
+                vol_colors = ['#ef5350' if c >= o else '#26a69a' for o, c in zip(open_arr, close_arr)]
                 
+                fig.add_trace(go.Bar(
+                    x=date_strings,
+                    y=df_chart['Volume'].to_numpy().flatten().tolist(),
+                    name="成交量",
+                    marker_color=vol_colors,
+                    opacity=0.8
+                ), row=2, col=1)
+
+                # 🚀 優化 X 軸休市日斷層與手機介面排版
                 fig.update_layout(
-                    xaxis_rangeslider_visible=False, 
-                    height=620, 
-                    margin=dict(l=10, r=40, t=10, b=10), 
+                    xaxis_rangeslider_visible=False, # 隱藏大滑塊以釋放手機空間
+                    height=580, 
+                    margin=dict(l=10, r=10, t=10, b=10), 
                     dragmode='pan', 
-                    showlegend=True, 
+                    showlegend=False, # 簡化圖例，節省視覺空間
                     xaxis=dict(
-                        type='category',
+                        type='category', # 避免非交易日空白拉長時間軸
                         showgrid=True, 
                         gridcolor="rgba(128,128,128,0.2)",
-                        nticks=15
-                    ), 
-                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
+                        nticks=10
+                    ),
+                    xaxis2=dict(
+                        type='category',
+                        showgrid=True,
+                        gridcolor="rgba(128,128,128,0.2)",
+                        nticks=10
+                    ),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right"),
+                    yaxis2=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="量"),
                     newshape=dict(
                         line=dict(color=draw_color, width=2.5),
                         fillcolor=draw_color,
@@ -707,7 +764,8 @@ else:
                             'eraseshape'      
                         ],
                         'displayModeBar': True,
-                        'scrollZoom': True
+                        'scrollZoom': True,
+                        'responsive': True
                     }
                 )
             
