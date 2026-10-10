@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.6 全能修復與防錯優化版】 - app.py
+# 【機構級三核心策略雷達 3.6 自動檢測下載與缺值診斷全能版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
@@ -126,7 +126,7 @@ def signature_save_to_db(t):
                 roe_val = parse_roe(official_pb / official_pe)
                 roe_source = "TWSE/TPEx PB/PE代理值"
 
-        # 🇺🇸 美國股市備援邏輯
+        # 🇺🇸 美國股市備援邏輯 (資產負債表 & 損益表 TTM 自動精算)
         if (".TW" not in t and ".TWO" not in t) and (book_value is None or roe_val is None):
             try:
                 bs = stock.quarterly_balance_sheet
@@ -445,6 +445,7 @@ else:
     df_chart = None
     if selected_stock:
         try:
+            # 🔍【階段一：自動檢查 SQLite 資料庫】
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("SELECT book_value, roe, gvi, close, bv_source, roe_source, updated_at FROM market_data WHERE ticker=?", (selected_stock,))
@@ -452,12 +453,20 @@ else:
             conn.close()
 
             needs_sync = False
-            if not db_row or not is_cache_valid(db_row[6]):
-                needs_sync = True
+            was_missing_in_db = False
 
+            if not db_row:
+                needs_sync = True
+                was_missing_in_db = True  # 標註：原本資料庫查無此股票
+            elif not is_cache_valid(db_row[6]):
+                needs_sync = True  # 標註：資料庫資料已逾期
+
+            # 📥【階段二：資料庫無資料或逾期，自動線上下載】
             if needs_sync:
-                with st.spinner(f"📥 正自動同步與驗證【{selected_stock}】最新基本面數據..."):
+                with st.spinner(f"📥 資料庫未發現【{selected_stock}】或數據已逾期，正自動啟動線上下載並更新資料庫..."):
                     signature_save_to_db(selected_stock)
+                
+                # 重新由資料庫讀取下載後的數據
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute("SELECT book_value, roe, gvi, close, bv_source, roe_source, updated_at FROM market_data WHERE ticker=?", (selected_stock,))
@@ -502,6 +511,7 @@ else:
                 with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption(f"📢 來源: {bv_src}")
                 with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度")
 
+                # 💡【階段三：動態分析缺值具體原因與給予操盤手建議】
                 if gvi_val is not None and pb_val is not None:
                     if gvi_val >= 0.35 and pb_val <= 1.5:
                         valuation_color = "#00cc66"
@@ -522,7 +532,29 @@ else:
                 else:
                     valuation_color = "#888888"
                     valuation_status = "⚠️ 基本面資料不足（系統停止計算 GVI）"
-                    valuation_desc = "<b>【基本面缺值診斷】</b>美股若因巨額庫藏股致淨值為負，建議改用「QARP 現金流雷達」評估。"
+
+                    reasons = []
+                    # 自動排查具體原因
+                    if was_missing_in_db:
+                        reasons.append("📡 <b>自動連線下載結果</b>：系統剛已自動發起線上請求，但交易所/Yahoo Finance 未回傳完整財報數據。")
+
+                    if bv_val is None:
+                        if "負股東權益" in bv_src or "庫藏股" in bv_src:
+                            reasons.append("📉 <b>美股負股東權益</b>：該美股長期執行巨額庫藏股註銷，導致股東權益 $BV \\le 0$（如 AAPL/SBUX），GVI 估值法天然不適用。")
+                        else:
+                            reasons.append("❌ <b>每股淨值 (BV) 缺失</b>：該標的可能為 ETF、債券、指數，或官方財報未揭露淨值。")
+                    
+                    if roe_val is None:
+                        reasons.append("❌ <b>ROE 缺失/非正值</b>：當期公司處於虧損狀態 (EPS < 0) 或尚無分析師預估資料。")
+
+                    reason_html = "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• " + "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• ".join(reasons)
+                    
+                    valuation_desc = (
+                        f"<b>【自動排查與缺值診斷】</b>{reason_html}<br/><br/>"
+                        f"💡 <b>給操盤手的應變建議：</b><br/>"
+                        f"1. 若標的為美股巨額庫藏股巨頭（如蘋果 AAPL），請改為勾選下方 <b>「QARP 現金流雷達」</b>（關注 FCF 收益率與 PEG 比率）。<br/>"
+                        f"2. 若標的為飆股或技術面突破股，請改用 <b>「動能突破雷達」</b> 搭配 K 線圖均線操作。"
+                    )
 
                 st.markdown(
                     f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'>"
@@ -553,7 +585,7 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
-        # 🛡️ 安全機制：防範無效代碼導致 NameError
+        # 🛡️ 安全機制：防範無效代碼導致渲染異常
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否輸入正確（如台股請加上 .TW 或 .TWO）。")
         else:
