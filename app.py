@@ -110,6 +110,136 @@ def fetch_tw_official_pb_pe(ticker):
         st.sidebar.caption(f"TWSE/TPEx API 擷取提醒 ({ticker}): {e}")
     return None, None
 
+def _to_number(value):
+    """Parse TWSE/TPEx comma-formatted numbers without turning missing values into zero."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(',', '').replace(' ', '')
+    if text in ('', '-', '--', 'N/A', 'nan', 'None'):
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_institutional_market_data():
+    """Fetch official latest daily institutional trades and issued share counts for TWSE/TPEx."""
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.twse.com.tw/'}
+    result = {}
+    errors = []
+    # TWSE T86 is date based. Walk back over weekends/holidays to the latest report.
+    from datetime import date, timedelta
+    today = date.today()
+    twse_payload = None
+    twse_date = None
+    for offset in range(8):
+        query_date = (today - timedelta(days=offset)).strftime('%Y%m%d')
+        try:
+            response = requests.get('https://www.twse.com.tw/rwd/zh/fund/T86',
+                                    params={'date': query_date, 'selectType': 'ALLBUT0999', 'response': 'json'},
+                                    headers=headers, timeout=12)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get('data') and payload.get('fields'):
+                twse_payload, twse_date = payload, query_date
+                break
+        except Exception as exc:
+            errors.append(f'TWSE: {exc}')
+    if twse_payload:
+        fields = twse_payload.get('fields', [])
+        for row in twse_payload.get('data', []):
+            values = dict(zip(fields, row))
+            code = str(values.get('證券代號', '')).strip()
+            if not code:
+                continue
+            def pick(prefix):
+                for key, val in values.items():
+                    if prefix in key:
+                        return _to_number(val)
+                return None
+            foreign_buy = pick('外陸資買進股數(不含外資自營商)')
+            foreign_sell = pick('外陸資賣出股數(不含外資自營商)')
+            trust_buy, trust_sell = pick('投信買進股數'), pick('投信賣出股數')
+            # Domestic dealer buy/sell includes both proprietary and hedge categories.
+            dealer_buys = [pick('自營商買進股數(自行買賣)'), pick('自營商買進股數(避險)')]
+            dealer_sells = [pick('自營商賣出股數(自行買賣)'), pick('自營商賣出股數(避險)')]
+            result[code] = {'日期': twse_date, '市場': '上市',
+                '外資買進股數': foreign_buy, '外資賣出股數': foreign_sell,
+                '外資買賣超股數': (foreign_buy - foreign_sell) if None not in (foreign_buy, foreign_sell) else None,
+                '投信買進股數': trust_buy, '投信賣出股數': trust_sell,
+                '投信買賣超股數': (trust_buy - trust_sell) if None not in (trust_buy, trust_sell) else None,
+                '自營商買進股數': sum(x for x in dealer_buys if x is not None) if any(x is not None for x in dealer_buys) else None,
+                '自營商賣出股數': sum(x for x in dealer_sells if x is not None) if any(x is not None for x in dealer_sells) else None}
+            if result[code]['自營商買進股數'] is not None and result[code]['自營商賣出股數'] is not None:
+                result[code]['自營商買賣超股數'] = result[code]['自營商買進股數'] - result[code]['自營商賣出股數']
+            else:
+                result[code]['自營商買賣超股數'] = None
+    else:
+        errors.append('TWSE 最近 8 日沒有可用的 T86 資料。')
+
+    try:
+        response = requests.get('https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading',
+                                headers=headers, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
+        for values in payload if isinstance(payload, list) else []:
+            code = str(values.get('SecuritiesCompanyCode', '')).strip()
+            if not code:
+                continue
+            def find_value(*needles):
+                for key, val in values.items():
+                    if all(n.lower() in key.lower() for n in needles):
+                        return _to_number(val)
+                return None
+            fb, fs = find_value('Foreign Investors', 'Total Buy'), find_value('Foreign Investors', 'Total Sell')
+            tb, ts = find_value('SecuritiesInvestmentTrustCompanies', 'TotalBuy'), find_value('SecuritiesInvestmentTrustCompanies', 'TotalSell')
+            db, ds = find_value('Dealers', 'TotalBuy'), find_value('Dealers', 'TotalSell')
+            # If endpoint labels use spaces in place of camel case, retry common variants.
+            if tb is None: tb = find_value('Securities Investment Trust Companies', 'Total Buy')
+            if ts is None: ts = find_value('Securities Investment Trust Companies', 'Total Sell')
+            if db is None: db = find_value('Dealers', 'Total Buy')
+            if ds is None: ds = find_value('Dealers', 'Total Sell')
+            result[code] = {'日期': str(values.get('Date', '最新交易日')), '市場': '上櫃',
+                '外資買進股數': fb, '外資賣出股數': fs, '外資買賣超股數': fb-fs if None not in (fb, fs) else None,
+                '投信買進股數': tb, '投信賣出股數': ts, '投信買賣超股數': tb-ts if None not in (tb, ts) else None,
+                '自營商買進股數': db, '自營商賣出股數': ds, '自營商買賣超股數': db-ds if None not in (db, ds) else None}
+    except Exception as exc:
+        errors.append(f'TPEx: {exc}')
+
+    shares_by_code = {}
+    for url in ('https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+                'https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O'):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            profiles = response.json()
+            for profile in profiles if isinstance(profiles, list) else []:
+                code = str(profile.get('公司代號') or profile.get('SecuritiesCompanyCode') or '').strip()
+                shares = _to_number(profile.get('已發行普通股數或TDR原股發行股數') or profile.get('已發行普通股數') or profile.get('IssuedShares'))
+                if code and shares and shares > 0:
+                    shares_by_code[code] = shares
+        except Exception as exc:
+            errors.append(f'股數資料: {exc}')
+    return result, shares_by_code, errors
+
+def build_institutional_screen(trades, shares_by_code, tickers, investor, min_net_pct):
+    rows = []
+    for ticker in tickers:
+        code = ticker.replace('.TWO', '').replace('.TW', '').strip()
+        trade = trades.get(code)
+        shares = shares_by_code.get(code)
+        if not trade or not shares:
+            continue
+        row = {'股票代碼': ticker, '市場': trade['市場'], '資料日期': trade['日期'], '已發行股數': shares}
+        for name in ('外資', '投信', '自營商'):
+            for measure, label in (('買進股數', '買進'), ('賣出股數', '賣出'), ('買賣超股數', '買賣超')):
+                value = trade.get(f'{name}{measure}')
+                row[f'{name}{label}佔股本比(%)'] = value / shares * 100 if value is not None else None
+        if row.get(f'{investor}買賣超佔股本比(%)') is not None and row[f'{investor}買賣超佔股本比(%)'] >= min_net_pct:
+            rows.append(row)
+    return pd.DataFrame(rows)
+
 def signature_save_to_db(t):
     try:
         stock = yf.Ticker(t)
@@ -937,7 +1067,24 @@ else:
                 )
             
             with tab2:
-                st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
+                st.markdown("### 🏦 三大法人買賣超與股本比")
+                st.caption("使用 TWSE T86／TPEx OpenAPI 個股每日成交股數；比率 = 法人買進、賣出或買賣超股數 ÷ 官方已發行普通股數 × 100%。")
+                if selected_stock.endswith(('.TW', '.TWO')):
+                    with st.spinner('讀取官方法人交易與已發行股數資料…'):
+                        inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
+                    inst_one = build_institutional_screen(inst_trades, inst_shares, [selected_stock], '外資', -100000)
+                    if not inst_one.empty:
+                        view_cols = ['資料日期', '市場', '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
+                                     '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
+                                     '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
+                        st.dataframe(inst_one[view_cols].style.format({c: '{:+.4f}%' for c in view_cols if c.endswith('(%)')}), use_container_width=True)
+                        st.caption("分類口徑：外資含外陸資、不含外資自營商；自營商買賣股數合計自行買賣與避險。股本分母採 TWSE／TPEx 公司基本資料的已發行普通股數。")
+                    else:
+                        st.info("目前無此股票的法人資料或官方已發行股數；可能是非交易日、資料尚未更新，或標的非普通股。")
+                    if inst_errors:
+                        st.caption("部分官方資料來源暫時無法連線，畫面僅顯示可取得的市場資料。")
+                else:
+                    st.info("三大法人選股資料目前適用台灣上市 `.TW` 與上櫃 `.TWO` 普通股。")
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
@@ -1406,3 +1553,34 @@ else:
     with col_btn3:
         if st.button("🚀 執行：自訂名單多因子本地精準過濾", type="primary", use_container_width=True):
             load_data_from_sqlite_and_render(custom_scan_list, "🎯 操盤手自訂名單策略篩選結果", is_custom_mode=True)
+
+    st.markdown("---")
+    st.markdown("### 🏦 台股三大法人獨立選股策略")
+    st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比。")
+    inst_col1, inst_col2 = st.columns([1, 2])
+    with inst_col1:
+        inst_investor = st.selectbox("篩選法人", ['外資', '投信', '自營商'], key='inst_screen_investor')
+        inst_min_net_pct = st.number_input("淨買賣超佔股本至少 (%)", min_value=-100.0, max_value=100.0, value=0.0, step=0.01, format='%.2f', key='inst_min_net_pct')
+    with inst_col2:
+        st.write("篩選條件：所選法人的「買賣超佔股本比」大於等於設定值。表格仍同時列出外資、投信、自營商三方買進、賣出及買賣超佔股本比。")
+    if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
+        taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
+        if not taiwan_tickers:
+            st.warning("請先在上方自訂觀察名單加入台股代碼，例如 2330.TW、3293.TWO。")
+        else:
+            with st.spinner("正在取得 TWSE／TPEx 官方法人交易與股數資料…"):
+                inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
+            inst_result = build_institutional_screen(inst_trades, inst_shares, taiwan_tickers, inst_investor, float(inst_min_net_pct))
+            if inst_result.empty:
+                st.info("此條件下沒有符合標的，或官方資料暫時缺漏。可調低淨買超門檻或檢查代碼格式。")
+            else:
+                inst_display_cols = ['股票代碼', '市場', '資料日期',
+                    '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
+                    '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
+                    '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
+                pct_cols = [c for c in inst_display_cols if c.endswith('(%)')]
+                st.dataframe(inst_result[inst_display_cols].style.format({c: '{:+.4f}%' for c in pct_cols}), use_container_width=True)
+                st.download_button("下載法人策略結果 CSV", inst_result[inst_display_cols].to_csv(index=False, encoding='utf-8-sig'),
+                                   file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
+            if inst_errors:
+                st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
