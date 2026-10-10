@@ -1,12 +1,12 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.7 動態網格資產管理與複利回測版】 - app.py
+# 【機構級三核心策略雷達 3.8 下拉選單與全指標量化回測版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.7", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.8", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -189,11 +189,12 @@ def signature_save_to_db(t):
     except Exception as e:
         st.error(f"❌ 數據寫入資料庫失敗 [{t}]: {e}")
 
-def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20):
+def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=20):
     df_calc = df.copy()
     df_calc['MA_entry'] = df_calc['Close'].rolling(window=ma_entry_p).mean()
     df_calc['MA_exit'] = df_calc['Close'].rolling(window=ma_exit_p).mean()
 
+    # KD 指標
     low_min = df_calc['Low'].rolling(window=9).min()
     high_max = df_calc['High'].rolling(window=9).max()
     rsv = np.where(high_max == low_min, 50.0, (df_calc['Close'] - low_min) / (high_max - low_min) * 100.0)
@@ -209,10 +210,28 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20):
     df_calc['K'] = k_list
     df_calc['D'] = d_list
 
+    # MACD 指標
     ema12 = df_calc['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df_calc['Close'].ewm(span=26, adjust=False).mean()
     df_calc['DIF'] = ema12 - ema26
     df_calc['DEM'] = df_calc['DIF'].ewm(span=9, adjust=False).mean()
+
+    # 成交量均線
+    df_calc['VOL_MA20'] = df_calc['Volume'].rolling(window=20).mean()
+
+    # RSI 指標
+    delta = df_calc['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_p).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_p).mean()
+    rs = gain / (loss + 1e-9)
+    df_calc['RSI'] = 100 - (100 / (1 + rs))
+
+    # 布林通道 (Bollinger Bands)
+    bb_middle = df_calc['Close'].rolling(window=bb_p).mean()
+    bb_std = df_calc['Close'].rolling(window=bb_p).std()
+    df_calc['BB_Upper'] = bb_middle + (bb_std * 2)
+    df_calc['BB_Lower'] = bb_middle - (bb_std * 2)
+    df_calc['BB_Middle'] = bb_middle
 
     return df_calc
 
@@ -226,6 +245,8 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
     closes = df_calc['Close'].to_numpy()
     highs = df_calc['High'].to_numpy()
     lows = df_calc['Low'].to_numpy()
+    vols = df_calc['Volume'].to_numpy()
+    vol_ma20 = df_calc['VOL_MA20'].to_numpy()
 
     ma_entry = df_calc['MA_entry'].to_numpy()
     ma_exit = df_calc['MA_exit'].to_numpy()
@@ -233,16 +254,45 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
     d_arr = df_calc['D'].to_numpy()
     dif_arr = df_calc['DIF'].to_numpy()
     dem_arr = df_calc['DEM'].to_numpy()
+    rsi_arr = df_calc['RSI'].to_numpy()
+    bb_upper = df_calc['BB_Upper'].to_numpy()
+    bb_lower = df_calc['BB_Lower'].to_numpy()
 
     for i in range(1, len(df_calc)):
         if not position:
             buy_checks = []
-            if entry_conds['ma_enable']:
+            
+            # 1. 均線進場
+            if entry_conds['ma_mode'] == '突破均線':
                 buy_checks.append(not np.isnan(ma_entry[i-1]) and closes[i-1] <= ma_entry[i-1] and closes[i] > ma_entry[i])
-            if entry_conds['kd_enable']:
+            elif entry_conds['ma_mode'] == '站穩均線上':
+                buy_checks.append(not np.isnan(ma_entry[i]) and closes[i] > ma_entry[i])
+
+            # 2. KD 進場
+            if entry_conds['kd_mode'] == '黃金交叉':
                 buy_checks.append(k_arr[i-1] <= d_arr[i-1] and k_arr[i] > d_arr[i])
-            if entry_conds['macd_enable']:
+
+            # 3. MACD 進場
+            if entry_conds['macd_mode'] == '黃金交叉':
                 buy_checks.append(dif_arr[i-1] <= dem_arr[i-1] and dif_arr[i] > dem_arr[i])
+
+            # 4. 成交量進場
+            if entry_conds['vol_mode'] == '爆量 (大於20日均量1.5倍)':
+                buy_checks.append(not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 1.5)
+            elif entry_conds['vol_mode'] == '爆量 (大於20日均量2.0倍)':
+                buy_checks.append(not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 2.0)
+
+            # 5. RSI 進場
+            if entry_conds['rsi_mode'] == '超賣回升 (RSI向上突破30)':
+                buy_checks.append(rsi_arr[i-1] <= 30 and rsi_arr[i] > 30)
+            elif entry_conds['rsi_mode'] == '強勢突破 (RSI向上突破50)':
+                buy_checks.append(rsi_arr[i-1] <= 50 and rsi_arr[i] > 50)
+
+            # 6. 布林通道進場
+            if entry_conds['bb_mode'] == '突破布林上軌':
+                buy_checks.append(closes[i-1] <= bb_upper[i-1] and closes[i] > bb_upper[i])
+            elif entry_conds['bb_mode'] == '觸及布林下軌反彈':
+                buy_checks.append(lows[i-1] <= bb_lower[i-1] and closes[i] > bb_lower[i])
 
             if buy_checks and (all(buy_checks) if entry_conds['match_mode'] == 'ALL' else any(buy_checks)):
                 position = True
@@ -253,6 +303,7 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
             highest_price = max(highest_price, float(highs[i]))
             exit_reasons = []
 
+            # 固定停損與移動停利
             if exit_conds['stop_loss_pct'] > 0:
                 sl_price = entry_price * (1.0 - exit_conds['stop_loss_pct'] / 100.0)
                 if lows[i] <= sl_price or closes[i] <= sl_price:
@@ -263,17 +314,38 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                 if lows[i] <= trail_price or closes[i] <= trail_price:
                     exit_reasons.append(f"最高點回撤 (-{exit_conds['trailing_stop_pct']}%)")
 
-            if exit_conds['ma_enable'] and not np.isnan(ma_exit[i-1]):
+            # 1. 均線離場
+            if exit_conds['ma_mode'] == '跌破均線' and not np.isnan(ma_exit[i-1]):
                 if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
                     exit_reasons.append(f"跌破 MA{exit_conds['ma_p']}")
 
-            if exit_conds['kd_enable']:
+            # 2. KD 離場
+            if exit_conds['kd_mode'] == '死亡交叉':
                 if k_arr[i-1] >= d_arr[i-1] and k_arr[i] < d_arr[i]:
                     exit_reasons.append("KD 死亡交叉")
 
-            if exit_conds['macd_enable']:
+            # 3. MACD 離場
+            if exit_conds['macd_mode'] == '死亡交叉':
                 if dif_arr[i-1] >= dem_arr[i-1] and dif_arr[i] < dem_arr[i]:
                     exit_reasons.append("MACD 死亡交叉")
+
+            # 4. 成交量離場
+            if exit_conds['vol_mode'] == '極端爆量倒貨 (大於20日均量2.5倍)':
+                if not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 2.5:
+                    exit_reasons.append("觸發極端爆量離場")
+
+            # 5. RSI 離場
+            if exit_conds['rsi_mode'] == '超買警戒 (RSI跌破70)':
+                if rsi_arr[i-1] >= 70 and rsi_arr[i] < 70:
+                    exit_reasons.append("RSI 70 死亡交叉離場")
+
+            # 6. 布林通道離場
+            if exit_conds['bb_mode'] == '跌破布林下軌':
+                if closes[i-1] >= bb_lower[i-1] and closes[i] < bb_lower[i]:
+                    exit_reasons.append("跌破布林下軌離場")
+            elif exit_conds['bb_mode'] == '觸及上軌拉回':
+                if highs[i-1] >= bb_upper[i-1] and closes[i] < bb_upper[i]:
+                    exit_reasons.append("布林上軌受阻離場")
 
             if exit_reasons:
                 exit_price = float(closes[i])
@@ -304,7 +376,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.7（動態網格資產管理與複利回測版）")
+    st.title("📈 機構級三核心策略雷達 3.8（下拉選單與全指標量化回測版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -581,7 +653,7 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 升級版)", "🧪 策略自訂回測器 (含網格複利對比)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
             
             with tab1:
                 ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
@@ -619,9 +691,6 @@ else:
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
             
-            # ==============================================================================
-            # 【Tab 3: 升級版 3.7 智慧型動態網格資產管理與自動規劃器】
-            # ==============================================================================
             with tab3:
                 st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.7 版)")
                 
@@ -629,7 +698,6 @@ else:
                 is_tw = ".TW" in selected_stock or ".TWO" in selected_stock
                 unit_label = "股" if not is_tw else "股 (台股預設)"
 
-                # --- 第一層：總資金與策略選擇 ---
                 g_top1, g_top2, g_top3 = st.columns(3)
                 with g_top1:
                     total_capital = st.number_input("💵 投入總資金 (元/$)", value=100000, step=10000, key="grid_capital")
@@ -644,7 +712,6 @@ else:
 
                 st.markdown("---")
 
-                # --- 第二層：網格參數設定 ---
                 g_col1, g_col2, g_col3 = st.columns(3)
                 with g_col1: 
                     input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.80, 2), key="grid_lower")
@@ -653,7 +720,6 @@ else:
                 with g_col3: 
                     input_num = st.number_input("規劃總格數", min_value=3, max_value=50, value=10, step=1, key="grid_num")
 
-                # 計算初始資金配置
                 init_stock_cash = total_capital * (init_stock_ratio / 100.0)
                 init_shares = int(init_stock_cash // grid_p) if grid_p > 0 else 0
                 actual_init_stock_val = init_shares * grid_p
@@ -665,7 +731,6 @@ else:
                     f"保留預備現金 **{actual_init_cash:,.0f}** 元"
                 )
 
-                # 生成價格區間
                 levels = np.linspace(input_lower, input_upper, input_num)
                 grid_details = []
 
@@ -689,7 +754,7 @@ else:
                         fixed_shares = max(1, int((init_shares or 1000) / input_num))
                         trade_desc = f"固定交易 {fixed_shares:,} {unit_label} (約 {fixed_shares * level:,.0f} 元)"
 
-                    else: # 庫存百分比
+                    else:
                         pct = round(100.0 / input_num, 1)
                         trade_desc = f"交易當前庫存之 {pct}% (隨庫存規模動態增減)"
 
@@ -703,71 +768,67 @@ else:
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
 
-                with st.expander("📌 操盤手提醒：網格交易與長期正期望值（點擊展開分析）"):
-                    st.markdown("""
-                    - **震盪市 vs 趨勢市**：網格交易本質是「用波動換取收益」。在單邊大漲的多頭行情中，固定比例與賣出網格會過早賣出優質資產；在單邊下跌行情中，則會太早把現金耗盡。
-                    - **手續費與稅費侵蝕**：頻繁交易會產生額外成本（台股證交稅 0.3% + 手續費 0.1425%），必須確保網格間距（Grid Spacing）高於交易成本 2 倍以上。
-                    - **長期複利建議**：若標的為具備強大 GVI / ROE 的長期成長股，建議以 **固定比例再平衡** 或 **買進持有 (Buy & Hold)** 為主，避免因網格過早離場而錯失長期複利成長。
-                    """)
-
             # ==============================================================================
-            # 【Tab 4: 升級版 3.7 策略自訂回測器與網格複利對比】
+            # 【Tab 4: 升級版 3.8 全指標下拉式選單量化回測器】
             # ==============================================================================
             with tab4:
-                st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器 (含網格複利對比)")
+                st.markdown(f"### 🧪 【{c_name}】全指標多空量化策略與動態停損回測器 (3.8 版)")
                 
                 bt_col1, bt_col2 = st.columns(2)
+                
                 with bt_col1:
-                    entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True, key="bt_entry_ma")
+                    st.markdown("##### 🟢 進場 (買進) 策略下拉式選單")
+                    entry_ma_mode = st.selectbox("1. 均線策略 (MA)", ["停用", "突破均線", "站穩均線上"], index=1, key="bt_entry_ma_sel")
                     entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
-                    entry_kd_enable = st.checkbox("2. KD 黃金交叉", value=False, key="bt_entry_kd")
-                    entry_macd_enable = st.checkbox("3. MACD 黃金交叉", value=False, key="bt_entry_macd")
-                    entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0, key="bt_match")
+                    
+                    entry_kd_mode = st.selectbox("2. KD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_kd_sel")
+                    entry_macd_mode = st.selectbox("3. MACD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_macd_sel")
+                    entry_vol_mode = st.selectbox("4. 成交量策略", ["停用", "爆量 (大於20日均量1.5倍)", "爆量 (大於20日均量2.0倍)"], index=0, key="bt_entry_vol_sel")
+                    entry_rsi_mode = st.selectbox("5. RSI 指標策略", ["停用", "超賣回升 (RSI向上突破30)", "強勢突破 (RSI向上突破50)"], index=0, key="bt_entry_rsi_sel")
+                    entry_bb_mode = st.selectbox("6. 布林通道策略", ["停用", "突破布林上軌", "觸及布林下軌反彈"], index=0, key="bt_entry_bb_sel")
+                    
+                    entry_match_mode = st.radio("買進訊號判定邏輯", options=["同時滿足所有選定條件 (ALL)", "任一滿足即買進 (ANY)"], index=0, key="bt_match")
 
                 with bt_col2:
+                    st.markdown("##### 🔴 離場 (停損/停利) 策略下拉式選單")
                     stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, key="bt_sl")
                     trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5, key="bt_trail")
-                    exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True, key="bt_exit_ma")
+                    
+                    exit_ma_mode = st.selectbox("1. 均線平倉策略 (MA)", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel")
                     exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
+                    
+                    exit_kd_mode = st.selectbox("2. KD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_kd_sel")
+                    exit_macd_mode = st.selectbox("3. MACD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_macd_sel")
+                    exit_vol_mode = st.selectbox("4. 成交量離場策略", ["停用", "極端爆量倒貨 (大於20日均量2.5倍)"], index=0, key="bt_exit_vol_sel")
+                    exit_rsi_mode = st.selectbox("5. RSI 離場策略", ["停用", "超買警戒 (RSI跌破70)"], index=0, key="bt_exit_rsi_sel")
+                    exit_bb_mode = st.selectbox("6. 布林通道離場策略", ["停用", "跌破布林下軌", "觸及上軌拉回"], index=0, key="bt_exit_bb_sel")
 
                 st.markdown("---")
-                st.markdown("#### ⚖️ 網格再平衡 (1:1) vs 買進持有 (Buy & Hold) 歷史累積資產對比")
-                
-                closes_arr = df_chart['Close'].astype(float).to_numpy()
-                if len(closes_arr) >= 2:
-                    init_cap = 100000.0
-                    
-                    # 1. Buy & Hold
-                    bh_shares = init_cap / closes_arr[0]
-                    bh_curve = bh_shares * closes_arr
-                    
-                    # 2. 1:1 固定比例再平衡 (模擬按月再平衡)
-                    stock_val = init_cap * 0.5
-                    cash_val = init_cap * 0.5
-                    rebalance_curve = []
-                    shares_held = stock_val / closes_arr[0]
-                    
-                    for step_idx, p in enumerate(closes_arr):
-                        stock_val = shares_held * p
-                        total_v = stock_val + cash_val
-                        # 每 20 個 K 線節點進行一次再平衡
-                        if step_idx % 20 == 0 and step_idx > 0:
-                            stock_val = total_v * 0.5
-                            cash_val = total_v * 0.5
-                            shares_held = stock_val / p
-                        rebalance_curve.append(total_v)
-                        
-                    bh_final_ret = ((bh_curve[-1] - init_cap) / init_cap) * 100.0
-                    reb_final_ret = ((rebalance_curve[-1] - init_cap) / init_cap) * 100.0
-                    
-                    res_m1, res_m2, res_m3 = st.columns(3)
-                    with res_m1: st.metric("初始投資本金", f"{init_cap:,.0f} 元")
-                    with res_m2: st.metric("單純買進持有 (Buy & Hold) 累積報酬率", f"{bh_final_ret:+.2f}%", delta=f"{bh_curve[-1] - init_cap:+,.0f} 元")
-                    with res_m3: st.metric("1:1 固定比例網格再平衡 累積報酬率", f"{reb_final_ret:+.2f}%", delta=f"{rebalance_curve[-1] - init_cap:+,.0f} 元")
 
-                if st.button(f"🚀 開始執行【{c_name}】技術指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
-                    entry_conds = {'ma_enable': entry_ma_enable, 'ma_p': entry_ma_p, 'kd_enable': entry_kd_enable, 'macd_enable': entry_macd_enable, 'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'}
-                    exit_conds = {'stop_loss_pct': stop_loss_pct, 'trailing_stop_pct': trailing_stop_pct, 'ma_enable': exit_ma_enable, 'ma_p': exit_ma_p, 'kd_enable': False, 'macd_enable': False}
+                if st.button(f"🚀 開始執行【{c_name}】全指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
+                    entry_conds = {
+                        'ma_mode': entry_ma_mode,
+                        'ma_p': entry_ma_p,
+                        'kd_mode': entry_kd_mode,
+                        'macd_mode': entry_macd_mode,
+                        'vol_mode': entry_vol_mode,
+                        'rsi_mode': entry_rsi_mode,
+                        'bb_mode': entry_bb_mode,
+                        'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'
+                    }
+                    
+                    exit_conds = {
+                        'stop_loss_pct': stop_loss_pct,
+                        'trailing_stop_pct': trailing_stop_pct,
+                        'ma_mode': exit_ma_mode,
+                        'ma_p': exit_ma_p,
+                        'kd_mode': exit_kd_mode,
+                        'macd_mode': exit_macd_mode,
+                        'vol_mode': exit_vol_mode,
+                        'rsi_mode': exit_rsi_mode,
+                        'bb_mode': exit_bb_mode
+                    }
+                    
                     df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
                     df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
 
