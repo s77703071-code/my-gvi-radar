@@ -1673,15 +1673,20 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
 
     return df_calc
 
-def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
+def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
+                         risk_reward_ratio=None):
     trades = []
     position = False
     entry_price = 0.0
     entry_date = ""
     entry_index = None
     highest_price = 0.0
+    initial_stop_price = None
+    take_profit_price = None
+    risk_ratio = _finite_number(risk_reward_ratio)
 
     closes = df_calc['Close'].to_numpy()
+    opens = df_calc['Open'].to_numpy() if 'Open' in df_calc.columns else closes
     highs = df_calc['High'].to_numpy()
     lows = df_calc['Low'].to_numpy()
     vols = df_calc['Volume'].to_numpy()
@@ -1732,20 +1737,41 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                 entry_price = float(closes[i])
                 entry_date = date_chinese_list[i]
                 entry_index = i
-                highest_price = float(highs[i])
+                # The entry is modeled at the close, so earlier highs from
+                # that same candle are not part of the position's trailing peak.
+                highest_price = entry_price
+                # Lock the initial risk at entry. If both percentage stops are
+                # enabled, use the closer price stop (the smaller loss distance).
+                configured_risk_pcts = [
+                    float(exit_conds.get('stop_loss_pct', 0.0)),
+                    float(exit_conds.get('trailing_stop_pct', 0.0)),
+                ]
+                configured_risk_pcts = [value for value in configured_risk_pcts if value > 0]
+                if configured_risk_pcts:
+                    initial_risk_pct = min(configured_risk_pcts)
+                    initial_stop_price = entry_price * (1.0 - initial_risk_pct / 100.0)
+                    take_profit_price = (
+                        entry_price + (entry_price - initial_stop_price) * risk_ratio
+                        if risk_ratio is not None and risk_ratio > 0 else None
+                    )
+                else:
+                    initial_stop_price = None
+                    take_profit_price = None
         else:
-            highest_price = max(highest_price, float(highs[i]))
             exit_reasons = []
+            stop_hits = []
 
             if exit_conds['stop_loss_pct'] > 0:
                 sl_price = entry_price * (1.0 - exit_conds['stop_loss_pct'] / 100.0)
                 if lows[i] <= sl_price or closes[i] <= sl_price:
                     exit_reasons.append(f"觸發停損 (-{exit_conds['stop_loss_pct']}%)")
+                    stop_hits.append((sl_price, exit_reasons[-1]))
 
             if exit_conds['trailing_stop_pct'] > 0:
                 trail_price = highest_price * (1.0 - exit_conds['trailing_stop_pct'] / 100.0)
                 if lows[i] <= trail_price or closes[i] <= trail_price:
                     exit_reasons.append(f"最高點回撤 (-{exit_conds['trailing_stop_pct']}%)")
+                    stop_hits.append((trail_price, exit_reasons[-1]))
 
             if exit_conds['ma_mode'] == '跌破均線' and not np.isnan(ma_exit[i-1]):
                 if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
@@ -1774,13 +1800,48 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                 if highs[i-1] >= bb_upper[i-1] and closes[i] < bb_upper[i]:
                     exit_reasons.append("布林上軌受阻離場")
 
-            if exit_reasons:
+            target_hit = take_profit_price is not None and (
+                float(highs[i]) >= take_profit_price or float(closes[i]) >= take_profit_price
+            )
+            if stop_hits:
+                if take_profit_price is not None:
+                    # If a daily bar crosses both a stop and target, use the
+                    # stop first because OHLC data cannot reveal intraday order.
+                    # A gap through a stop is modeled at the opening price.
+                    stop_level = max(level for level, _reason in stop_hits)
+                    opening_price = _finite_number(opens[i]) or float(closes[i])
+                    exit_price = min(opening_price, float(stop_level))
+                else:
+                    # Keep the original close-based stop execution when the
+                    # risk/reward target is disabled or cannot be derived.
+                    exit_price = float(closes[i])
+            elif target_hit:
+                # A favorable gap through the target is modeled at the open.
+                opening_price = _finite_number(opens[i]) or float(closes[i])
+                exit_price = max(opening_price, float(take_profit_price))
+                exit_reasons = [
+                    f"達成風險報酬停利目標（1:{risk_ratio:g}）"
+                ]
+            elif exit_reasons:
+                # Indicator exits retain the existing close-based execution.
                 exit_price = float(closes[i])
+            else:
+                # Update the trailing peak only after this bar's exit checks;
+                # daily OHLC data does not reveal whether its high came first.
+                highest_price = max(highest_price, float(highs[i]))
+                continue
+
+            if stop_hits and target_hit:
+                exit_reasons.append("同根資料也觸及停利目標，依保守方式先計停損")
+            if stop_hits or target_hit or exit_reasons:
                 exit_date = date_chinese_list[i]
                 pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
                 trades.append({
                     '買進日期': entry_date,
                     '買進價格 (元)': round(entry_price, 2),
+                    '初始停損參考價 (元)': round(initial_stop_price, 2) if initial_stop_price is not None else None,
+                    '目標停利價 (元)': round(take_profit_price, 2) if take_profit_price is not None else None,
+                    '設定風險報酬比': f"1:{risk_ratio:g}" if take_profit_price is not None else None,
                     '賣出日期': exit_date,
                     '賣出價格 (元)': round(exit_price, 2),
                     '平倉報酬率 (%)': round(pnl_pct, 2),
@@ -1788,6 +1849,8 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                     '持有K棒數': max(0, i - entry_index),
                     '_entry_index': entry_index,
                     '_exit_index': i,
+                    '_entry_fill_price': entry_price,
+                    '_exit_fill_price': exit_price,
                 })
                 position = False
 
@@ -1800,6 +1863,9 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
         trades.append({
             '買進日期': entry_date,
             '買進價格 (元)': round(entry_price, 2),
+            '初始停損參考價 (元)': round(initial_stop_price, 2) if initial_stop_price is not None else None,
+            '目標停利價 (元)': round(take_profit_price, 2) if take_profit_price is not None else None,
+            '設定風險報酬比': f"1:{risk_ratio:g}" if take_profit_price is not None else None,
             '賣出日期': date_chinese_list[exit_index],
             '賣出價格 (元)': round(exit_price, 2),
             '平倉報酬率 (%)': round(pnl_pct, 2),
@@ -1807,6 +1873,8 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
             '持有K棒數': max(0, exit_index - entry_index),
             '_entry_index': entry_index,
             '_exit_index': exit_index,
+            '_entry_fill_price': entry_price,
+            '_exit_fill_price': exit_price,
         })
 
     return pd.DataFrame(trades)
@@ -1858,18 +1926,23 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
             entry_i, exit_i = int(trade['_entry_index']), int(trade['_exit_index'])
             if not (0 <= entry_i < n and entry_i <= exit_i < n):
                 continue
+            entry_fill = _finite_number(trade.get('_entry_fill_price')) or float(price[entry_i])
+            exit_fill = _finite_number(trade.get('_exit_fill_price')) or float(price[exit_i])
             strategy_factors[entry_i] *= entry_fee_factor
-            for i in range(entry_i + 1, exit_i + 1):
+            for i in range(entry_i + 1, exit_i):
                 strategy_factors[i] *= price[i] / price[i - 1]
+            if exit_i > entry_i:
+                strategy_factors[exit_i] *= exit_fill / price[exit_i - 1]
             strategy_factors[exit_i] *= exit_fee_factor
             in_market[entry_i:exit_i + 1] = True
-            gross_ratio = price[exit_i] / price[entry_i]
+            gross_ratio = exit_fill / entry_fill
             net_return = entry_fee_factor * gross_ratio * exit_fee_factor - 1.0
             trade_rows.append({
                 '買進日期': trade.get('買進日期'),
                 '賣出日期': trade.get('賣出日期'),
                 '成本後報酬率 (%)': net_return * 100.0,
                 '持有K棒數': max(0, exit_i - entry_i),
+                '目標停利價 (元)': trade.get('目標停利價 (元)'),
             })
 
     strategy_equity = pd.Series(float(initial_capital) * np.cumprod(strategy_factors), index=close.index, name='技術策略資產')
@@ -2924,6 +2997,21 @@ else:
                     st.markdown("##### 🔴 離場 (停損/停利) 策略下拉式選單")
                     stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, key="bt_sl")
                     trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5, key="bt_trail")
+                    bt_rr_enabled = st.checkbox(
+                        "買點成立後啟用風險報酬停利目標（預設 1:3）",
+                        value=True, key="bt_rr_enabled",
+                        help="停利價會依進場價與價格型停損距離計算；停損條件不會被移除。"
+                    )
+                    bt_rr_multiple = st.number_input(
+                        "目標報酬倍數（風險 1，報酬 X）",
+                        min_value=0.5, max_value=10.0, value=3.0, step=0.5,
+                        key="bt_rr_multiple", disabled=not bt_rr_enabled,
+                        help="預設 3 代表風險報酬比 1:3；可改成 1.5、2、4 等。"
+                    )
+                    if bt_rr_enabled and stop_loss_pct <= 0 and trailing_stop_pct <= 0:
+                        st.warning("目前固定停損與移動停損都為 0，沒有價格型停損距離可供計算；風險報酬停利目標不會生效。")
+                    else:
+                        st.caption("初始風險取固定停損與移動停損中較靠近進場價的價格型停損；目標價在買點成立時鎖定，移動停損後續上移不會改寫目標價。")
                     
                     exit_ma_mode = st.selectbox("1. 均線平倉策略 (MA)", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel")
                     exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
@@ -2978,7 +3066,10 @@ else:
                     }
                     
                     df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
-                    df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
+                    df_trades = run_strategy_backtest(
+                        df_calc, entry_conds, exit_conds, date_strings,
+                        risk_reward_ratio=float(bt_rr_multiple) if bt_rr_enabled else None,
+                    )
                     analysis = analyze_indicator_backtest(
                         df_calc, df_trades, float(bt_initial_capital), float(bt_commission_pct),
                         float(bt_sell_tax_pct), float(bt_slippage_pct), selected_tf, is_tw_stock)
@@ -2986,7 +3077,9 @@ else:
                     if df_trades.empty:
                         st.info("這段期間沒有買賣訊號；下方仍會顯示策略資金變化，以及直接買進後持有的參考結果。")
                     else:
-                        trade_display = df_trades.drop(columns=["_entry_index", "_exit_index"], errors="ignore").rename(columns={
+                        trade_display = df_trades.drop(columns=[
+                            "_entry_index", "_exit_index", "_entry_fill_price", "_exit_fill_price"
+                        ], errors="ignore").rename(columns={
                             "平倉報酬率 (%)": "未扣費用損益率 (%)",
                             "持有K棒數": "持有資料筆數",
                         })
@@ -3198,8 +3291,8 @@ else:
                         if strategy_metrics["cagr"] is None:
                             st.info("回測時間跨度或有效資料筆數不足，為避免年化數字失真，平均每年報酬和報酬起伏參考數值暫不顯示。")
                         st.caption(
-                            "模擬假設所有本金可投入且可買零碎股；依收盤資料產生訊號，並假設以同一收盤價買賣。停損參考當期最高價與最低價，"
-                            "但沒有模擬隔日開盤跳空、實際成交價或當日價格先後順序。直接買進持有使用相同價格資料，沒有另外估算股息。"
+                            "模擬假設所有本金可投入且可買零碎股；進場及指標訊號依收盤價處理。啟用風險報酬停利時，停損／停利以當根最高價、最低價判斷並以觸發價成交；若開盤跳空越過觸發價，按開盤價估算。"
+                            "同一根 K 棒同時碰到停損與停利時，採較保守的停損先出；日線無法還原當日價格先後。直接買進持有使用相同價格資料，沒有另外估算股息。"
                         )
 
     except Exception as ex_tab:
