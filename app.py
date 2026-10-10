@@ -1208,6 +1208,71 @@ def _to_number(value):
         return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def fetch_grid_daily_history(ticker):
+    """Fetch cached daily prices used only to suggest initial grid settings."""
+    try:
+        frame = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True, progress=False)
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = frame.columns.get_level_values(0)
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def recommend_dynamic_grid(price, history):
+    """Suggest a balanced grid around the current price using recent daily range."""
+    price = float(price) if price is not None else 0.0
+    if not np.isfinite(price) or price <= 0:
+        return 0.01, 0.02, 9, "目前價格無效，請先確認股票報價。"
+
+    atr = None
+    observation_count = 0
+    if isinstance(history, pd.DataFrame) and {"High", "Low", "Close"}.issubset(history.columns):
+        recent = history[["High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna().tail(40)
+        if len(recent) >= 10:
+            previous_close = recent["Close"].shift(1)
+            true_range = pd.concat([
+                recent["High"] - recent["Low"],
+                (recent["High"] - previous_close).abs(),
+                (recent["Low"] - previous_close).abs(),
+            ], axis=1).max(axis=1).dropna().tail(20)
+            if len(true_range) >= 9:
+                atr = float(true_range.mean())
+                observation_count = len(true_range)
+
+    if atr is None or not np.isfinite(atr) or atr <= 0:
+        half_range = round(price * 0.10, 2)
+        half_range = max(half_range, 0.01)
+        lower = max(round(price - half_range, 2), 0.01)
+        upper = round(price + half_range, 2)
+        grid_count = 9
+        reason = ("最近日線資料不足，先採用通用起始值：現價上下約 10%、共 9 個價位，讓買進與賣出價位分布在現價兩側。"
+                  "這只是方便開始規劃的預設，不保證適合每檔股票。")
+        return lower, upper, grid_count, reason
+
+    half_range = min(max(3.0 * atr, price * 0.05), price * 0.30)
+    half_range = max(round(half_range, 2), 0.01)
+    lower = max(round(price - half_range, 2), 0.01)
+    upper = max(round(price + half_range, 2), round(lower + 0.02, 2))
+    target_spacing = max(1.25 * atr, price * 0.015)
+    interval_count = int(round((upper - lower) / target_spacing))
+    grid_count = max(3, min(15, interval_count + 1))
+    if grid_count % 2 == 0:
+        grid_count = grid_count + 1 if grid_count < 15 else grid_count - 1
+
+    actual_spacing_pct = (upper - lower) / max(grid_count - 1, 1) / price * 100.0
+    atr_pct = atr / price * 100.0
+    down_pct = (price - lower) / price * 100.0
+    up_pct = (upper - price) / price * 100.0
+    reason = (
+        f"依最近約 {observation_count} 個日線資料估算，平均單日波動約 {atr_pct:.2f}%。"
+        f"上下限各距現價約 {down_pct:.1f}%／{up_pct:.1f}%：通常取約 3 倍近期波動，至少保留 5% 空間，最多放寬至 30%。"
+        f"建議 {grid_count} 個價位，平均間距約 {actual_spacing_pct:.2f}%，並盡量讓現價上下都有規劃價位。"
+        "此設定是兼顧交易機會與格距的起點，不代表最佳或保證獲利；可依自己的持股和風險承受度手動調整。"
+    )
+    return lower, upper, grid_count, reason
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_institutional_market_data():
     """Fetch official latest daily institutional trades and issued share counts for TWSE/TPEx."""
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.twse.com.tw/'}
@@ -2600,9 +2665,23 @@ else:
 
                 st.markdown("---")
 
-                grid_p = float(price_val)
+                grid_p = round(float(price_val), 2)
                 is_tw = ".TW" in selected_stock or ".TWO" in selected_stock
                 unit_label = "股" if not is_tw else "股 (台股預設)"
+
+                grid_history = fetch_grid_daily_history(selected_stock)
+                recommended_lower, recommended_upper, recommended_count, recommendation_reason = recommend_dynamic_grid(grid_p, grid_history)
+                if st.session_state.get("_grid_default_stock") != selected_stock:
+                    st.session_state["_grid_default_stock"] = selected_stock
+                    st.session_state["grid_lower"] = recommended_lower
+                    st.session_state["grid_upper"] = recommended_upper
+                    st.session_state["grid_num"] = recommended_count
+
+                st.info(f"**本檔建議預設理由：**{recommendation_reason}")
+                if st.button("恢復本檔建議預設值", key="grid_restore_recommended"):
+                    st.session_state["grid_lower"] = recommended_lower
+                    st.session_state["grid_upper"] = recommended_upper
+                    st.session_state["grid_num"] = recommended_count
 
                 g_top1, g_top2, g_top3 = st.columns(3)
                 with g_top1:
@@ -2618,11 +2697,11 @@ else:
 
                 g_col1, g_col2, g_col3 = st.columns(3)
                 with g_col1: 
-                    input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.80, 2), key="grid_lower")
+                    input_lower = st.number_input("網格下限價格", min_value=0.01, step=0.01, format="%.2f", key="grid_lower")
                 with g_col2: 
-                    input_upper = st.number_input("網格上限價格", value=round(grid_p * 1.20, 2), key="grid_upper")
+                    input_upper = st.number_input("網格上限價格", min_value=0.01, step=0.01, format="%.2f", key="grid_upper")
                 with g_col3: 
-                    input_num = st.number_input("規劃總格數", min_value=3, max_value=50, value=10, step=1, key="grid_num")
+                    input_num = st.number_input("規劃總格數", min_value=3, max_value=50, step=1, key="grid_num")
 
                 init_stock_cash = total_capital * (init_stock_ratio / 100.0)
                 init_shares = int(init_stock_cash // grid_p) if grid_p > 0 else 0
@@ -2638,8 +2717,18 @@ else:
                 levels = np.linspace(input_lower, input_upper, input_num)
                 grid_details = []
 
+                buy_level_count = int(np.sum(levels < grid_p))
+                sell_level_count = int(np.sum(levels > grid_p))
+                reference_level_count = int(input_num - buy_level_count - sell_level_count)
+                if input_upper <= grid_p:
+                    st.warning(f"現價 {grid_p:.2f} 高於或等於網格上限 {input_upper:.2f}，目前沒有賣出價位；這通常是上下限沿用舊股票設定所致，請提高上限或恢復本檔建議預設值。")
+                elif input_lower >= grid_p:
+                    st.warning(f"現價 {grid_p:.2f} 低於或等於網格下限 {input_lower:.2f}，目前沒有買進價位；請降低下限或恢復本檔建議預設值。")
+                else:
+                    st.caption(f"依目前設定，現價下方有 {buy_level_count} 個買進價位、上方有 {sell_level_count} 個賣出價位；規劃格數包含 {reference_level_count} 個現價參考價位（若有）。")
+
                 for idx, level in enumerate(levels):
-                    action = "🟢 買進掛單" if level < grid_p else ("🔴 賣出掛單" if level > grid_p else "⚪ 當前基準價")
+                    action = "🟢 買進掛單" if level < grid_p else ("🔴 賣出掛單" if level > grid_p else "⚪ 現價參考價")
                     
                     if "固定比例" in grid_strategy:
                         est_stock_val = init_shares * level
@@ -2663,7 +2752,7 @@ else:
                         trade_desc = f"交易當前庫存之 {pct}% (隨庫存規模動態增減)"
 
                     grid_details.append({
-                        "網格層級": f"Grid #{idx+1:02d}",
+                        "網格層級": f"第 {idx+1:02d} 格",
                         "目標觸發價": round(level, 2),
                         "偏離現價 (%)": f"{((level - grid_p) / grid_p * 100):+.2f}%",
                         "預計動作": action,
