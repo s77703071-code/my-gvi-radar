@@ -1444,12 +1444,20 @@ def describe_backtest_conditions(entry_conds, exit_conds, risk_reward_ratio=None
         if value and value != "停用":
             suffix = f"{entry_conds.get('ma_p')}日" if key == "ma_mode" else ""
             entries.append(f"{label}{suffix}:{value}")
+    entry_cross_pairs = _normalize_ma_cross_pairs(entry_conds.get("ma_cross_pairs", []))
+    if entry_cross_pairs:
+        pairs_text = "、".join(f"{fast}/{slow}日" for fast, slow in entry_cross_pairs)
+        entries.append(f"均線黃金交叉{pairs_text}")
     exits = []
     for key, label in exit_labels.items():
         value = exit_conds.get(key)
         if value and value != "停用":
             suffix = f"{exit_conds.get('ma_p')}日" if key == "ma_mode" else ""
             exits.append(f"{label}{suffix}:{value}")
+    exit_cross_pairs = _normalize_ma_cross_pairs(exit_conds.get("ma_cross_pairs", []))
+    if exit_cross_pairs:
+        pairs_text = "、".join(f"{fast}/{slow}日" for fast, slow in exit_cross_pairs)
+        exits.append(f"均線死亡交叉{pairs_text}")
     stop_loss = float(entry_conds.get("stop_loss_pct", exit_conds.get("stop_loss_pct", 0)) or 0)
     trailing = float(exit_conds.get("trailing_stop_pct", 0) or 0)
     if stop_loss > 0:
@@ -1905,10 +1913,39 @@ def signature_save_to_db(t):
     except Exception as e:
         st.error(f"❌ 數據寫入資料庫失敗 [{t}]: {e}")
 
-def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=20):
+def _normalize_ma_cross_pairs(pairs):
+    """Return unique (fast, slow) periods where the fast average is shorter."""
+    normalized = []
+    for pair in pairs or []:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            continue
+        try:
+            fast, slow = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if fast < 1 or slow < 1 or fast >= slow:
+            continue
+        if (fast, slow) not in normalized:
+            normalized.append((fast, slow))
+    return normalized
+
+
+def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=20,
+                                entry_ma_cross_pairs=None, exit_ma_cross_pairs=None):
     df_calc = df.copy()
     df_calc['MA_entry'] = df_calc['Close'].rolling(window=ma_entry_p).mean()
     df_calc['MA_exit'] = df_calc['Close'].rolling(window=ma_exit_p).mean()
+
+    cross_periods = {
+        period
+        for pair in (
+            _normalize_ma_cross_pairs(entry_ma_cross_pairs)
+            + _normalize_ma_cross_pairs(exit_ma_cross_pairs)
+        )
+        for period in pair
+    }
+    for period in cross_periods:
+        df_calc[f'MA_CROSS_{period}'] = df_calc['Close'].rolling(window=period).mean()
 
     low_min = df_calc['Low'].rolling(window=9).min()
     high_max = df_calc['High'].rolling(window=9).max()
@@ -1966,6 +2003,20 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
 
     ma_entry = df_calc['MA_entry'].to_numpy()
     ma_exit = df_calc['MA_exit'].to_numpy()
+    entry_ma_cross_pairs = _normalize_ma_cross_pairs(entry_conds.get('ma_cross_pairs', []))
+    exit_ma_cross_pairs = _normalize_ma_cross_pairs(exit_conds.get('ma_cross_pairs', []))
+    cross_periods = {
+        period for pair in entry_ma_cross_pairs + exit_ma_cross_pairs for period in pair
+    }
+    cross_ma_values = {}
+    for period in cross_periods:
+        column = f'MA_CROSS_{period}'
+        if column in df_calc.columns:
+            cross_ma_values[period] = df_calc[column].to_numpy()
+        else:
+            # Keep direct callers compatible even if they did not request the
+            # extra moving-average columns when computing indicators.
+            cross_ma_values[period] = df_calc['Close'].rolling(window=period).mean().to_numpy()
     k_arr = df_calc['K'].to_numpy()
     d_arr = df_calc['D'].to_numpy()
     dif_arr = df_calc['DIF'].to_numpy()
@@ -1982,6 +2033,15 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                 buy_checks.append(not np.isnan(ma_entry[i-1]) and closes[i-1] <= ma_entry[i-1] and closes[i] > ma_entry[i])
             elif entry_conds['ma_mode'] == '站穩均線上':
                 buy_checks.append(not np.isnan(ma_entry[i]) and closes[i] > ma_entry[i])
+
+            for fast_period, slow_period in entry_ma_cross_pairs:
+                fast_ma = cross_ma_values[fast_period]
+                slow_ma = cross_ma_values[slow_period]
+                buy_checks.append(
+                    np.isfinite(fast_ma[i-1]) and np.isfinite(slow_ma[i-1])
+                    and np.isfinite(fast_ma[i]) and np.isfinite(slow_ma[i])
+                    and fast_ma[i-1] <= slow_ma[i-1] and fast_ma[i] > slow_ma[i]
+                )
 
             if entry_conds['kd_mode'] == '黃金交叉':
                 buy_checks.append(k_arr[i-1] <= d_arr[i-1] and k_arr[i] > d_arr[i])
@@ -2048,6 +2108,18 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             if exit_conds['ma_mode'] == '跌破均線' and not np.isnan(ma_exit[i-1]):
                 if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
                     exit_reasons.append(f"跌破 MA{exit_conds['ma_p']}")
+
+            for fast_period, slow_period in exit_ma_cross_pairs:
+                fast_ma = cross_ma_values[fast_period]
+                slow_ma = cross_ma_values[slow_period]
+                if (
+                    np.isfinite(fast_ma[i-1]) and np.isfinite(slow_ma[i-1])
+                    and np.isfinite(fast_ma[i]) and np.isfinite(slow_ma[i])
+                    and fast_ma[i-1] >= slow_ma[i-1] and fast_ma[i] < slow_ma[i]
+                ):
+                    exit_reasons.append(
+                        f"均線死亡交叉 MA{fast_period}/MA{slow_period}"
+                    )
 
             if exit_conds['kd_mode'] == '死亡交叉':
                 if k_arr[i-1] >= d_arr[i-1] and k_arr[i] < d_arr[i]:
@@ -3291,6 +3363,41 @@ else:
                     st.markdown("##### 🟢 進場 (買進) 策略下拉式選單")
                     entry_ma_mode = st.selectbox("1. 均線策略 (MA)", ["停用", "突破均線", "站穩均線上"], index=1, key="bt_entry_ma_sel")
                     entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
+
+                    entry_ma_cross_pairs = []
+                    with st.expander("新增多組均線黃金交叉買進條件", expanded=False):
+                        st.caption("快線由下往上穿越慢線時成立。每組會依下方 ALL／ANY 規則，與其他已啟用買進條件一起判斷。最多可設定 10 組。")
+                        entry_ma_cross_count = st.number_input(
+                            "買進交叉組數", min_value=0, max_value=10, value=0, step=1,
+                            key="bt_entry_ma_cross_count",
+                        )
+                        default_cross_pairs = [
+                            (5, 20), (10, 20), (10, 60), (20, 60), (20, 120),
+                            (60, 120), (60, 240), (5, 60), (20, 240), (120, 240),
+                        ]
+                        invalid_entry_cross = False
+                        for pair_index in range(int(entry_ma_cross_count)):
+                            fast_default, slow_default = default_cross_pairs[pair_index]
+                            pair_cols = st.columns(2)
+                            with pair_cols[0]:
+                                fast_period = st.number_input(
+                                    f"第 {pair_index + 1} 組快線天數",
+                                    min_value=1, max_value=240, value=fast_default, step=1,
+                                    key=f"bt_entry_ma_cross_fast_{pair_index + 1}",
+                                )
+                            with pair_cols[1]:
+                                slow_period = st.number_input(
+                                    f"第 {pair_index + 1} 組慢線天數",
+                                    min_value=1, max_value=240, value=slow_default, step=1,
+                                    key=f"bt_entry_ma_cross_slow_{pair_index + 1}",
+                                )
+                            if fast_period >= slow_period:
+                                invalid_entry_cross = True
+                            else:
+                                entry_ma_cross_pairs.append((int(fast_period), int(slow_period)))
+                        entry_ma_cross_pairs = _normalize_ma_cross_pairs(entry_ma_cross_pairs)
+                        if invalid_entry_cross:
+                            st.warning("快線天數必須小於慢線天數；不符合的組別會略過。")
                     
                     entry_kd_mode = st.selectbox("2. KD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_kd_sel")
                     entry_macd_mode = st.selectbox("3. MACD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_macd_sel")
@@ -3322,6 +3429,37 @@ else:
                     
                     exit_ma_mode = st.selectbox("1. 均線平倉策略 (MA)", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel")
                     exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
+
+                    exit_ma_cross_pairs = []
+                    with st.expander("新增多組均線死亡交叉平倉條件", expanded=False):
+                        st.caption("快線由上往下跌破慢線時成立；任一組死亡交叉成立，就會作為一項平倉訊號。最多可設定 10 組。")
+                        exit_ma_cross_count = st.number_input(
+                            "平倉交叉組數", min_value=0, max_value=10, value=0, step=1,
+                            key="bt_exit_ma_cross_count",
+                        )
+                        invalid_exit_cross = False
+                        for pair_index in range(int(exit_ma_cross_count)):
+                            fast_default, slow_default = default_cross_pairs[pair_index]
+                            pair_cols = st.columns(2)
+                            with pair_cols[0]:
+                                fast_period = st.number_input(
+                                    f"第 {pair_index + 1} 組快線天數",
+                                    min_value=1, max_value=240, value=fast_default, step=1,
+                                    key=f"bt_exit_ma_cross_fast_{pair_index + 1}",
+                                )
+                            with pair_cols[1]:
+                                slow_period = st.number_input(
+                                    f"第 {pair_index + 1} 組慢線天數",
+                                    min_value=1, max_value=240, value=slow_default, step=1,
+                                    key=f"bt_exit_ma_cross_slow_{pair_index + 1}",
+                                )
+                            if fast_period >= slow_period:
+                                invalid_exit_cross = True
+                            else:
+                                exit_ma_cross_pairs.append((int(fast_period), int(slow_period)))
+                        exit_ma_cross_pairs = _normalize_ma_cross_pairs(exit_ma_cross_pairs)
+                        if invalid_exit_cross:
+                            st.warning("快線天數必須小於慢線天數；不符合的組別會略過。")
                     
                     exit_kd_mode = st.selectbox("2. KD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_kd_sel")
                     exit_macd_mode = st.selectbox("3. MACD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_macd_sel")
@@ -3352,6 +3490,7 @@ else:
                     entry_conds = {
                         'ma_mode': entry_ma_mode,
                         'ma_p': entry_ma_p,
+                        'ma_cross_pairs': entry_ma_cross_pairs,
                         'kd_mode': entry_kd_mode,
                         'macd_mode': entry_macd_mode,
                         'vol_mode': entry_vol_mode,
@@ -3365,6 +3504,7 @@ else:
                         'trailing_stop_pct': trailing_stop_pct,
                         'ma_mode': exit_ma_mode,
                         'ma_p': exit_ma_p,
+                        'ma_cross_pairs': exit_ma_cross_pairs,
                         'kd_mode': exit_kd_mode,
                         'macd_mode': exit_macd_mode,
                         'vol_mode': exit_vol_mode,
@@ -3372,7 +3512,11 @@ else:
                         'bb_mode': exit_bb_mode
                     }
                     
-                    df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
+                    df_calc = compute_backtest_indicators(
+                        df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p,
+                        entry_ma_cross_pairs=entry_ma_cross_pairs,
+                        exit_ma_cross_pairs=exit_ma_cross_pairs,
+                    )
                     df_trades = run_strategy_backtest(
                         df_calc, entry_conds, exit_conds, date_strings,
                         risk_reward_ratio=float(bt_rr_multiple) if bt_rr_enabled else None,
