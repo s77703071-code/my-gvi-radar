@@ -2,7 +2,12 @@
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
 import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    # Keep the dashboard usable if a hosting environment has not installed
+    # the Gemini SDK; the AI action reports the missing dependency.
+    genai = None
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import plotly.express as px
@@ -1150,6 +1155,11 @@ def is_cache_valid(updated_at):
     return (time.time() - float(updated_at)) < CACHE_TTL
 
 def generate_content_with_retry(prompt_text, api_key_val):
+    if genai is None:
+        raise RuntimeError(
+            "找不到 google-genai 套件。請將 google-genai>=2.3.0 加入部署環境的 requirements.txt，"
+            "重新部署或重啟後再使用 Gemini AI 分析。"
+        )
     client = genai.Client(api_key=api_key_val)
     for attempt in range(3):
         try:
