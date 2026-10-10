@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.10 全股票相容畫線與全指標回測版】 - app.py
+# 【機構級三核心策略雷達 3.11 全股票相容專業畫線與全指標回測版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import streamlit.components.v1 as components
@@ -7,7 +7,7 @@ import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.10", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.11", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -358,7 +358,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.10（全股票相容畫線與全指標回測版）")
+    st.title("📈 機構級三核心策略雷達 3.11（專業畫線與年.月簡化版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -529,7 +529,8 @@ else:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
                 
-                date_strings = df_chart.index.strftime('%Y年%m月%d日 %H時%M分' if 'm' in cfg["i"] else '%Y年%m月%d日').tolist()
+                # 💡【優化 1：日期改成年.月 (YYYY.MM) 格式】
+                date_strings = df_chart.index.strftime('%Y.%m').tolist()
                 c_name = STOCK_NAME_MAP.get(selected_stock, selected_stock)
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
@@ -638,13 +639,12 @@ else:
             tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
             
             # ==============================================================================
-            # 【Tab 1: 3.10 全股票 100% 相容 + 完整畫線工具箱 + TradingView 備援雙引擎】
+            # 【Tab 1: 3.11 Plotly 原生 K 線圖 + 年.月日期 + 畫圖選色移除/文字註記 + K棒寬度固定】
             # ==============================================================================
             with tab1:
-                chart_engine = st.radio("🛠️ 選擇圖表畫線引擎：", ["Plotly 全股票 100% 畫線圖表 (推薦，保證完全顯示)", "TradingView 官方進階 Widget"], horizontal=True)
-                
-                if "Plotly" in chart_engine:
-                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
+                col_title, col_draw_color = st.columns([3, 1])
+                with col_title:
+                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle;'>"
                     for ma in personal_ma_configs:
                         p, c = ma["period"], ma["color"]
                         ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
@@ -652,94 +652,73 @@ else:
                             latest_ma_val = ma_series.to_numpy().flatten()[-1]
                             ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
                     ma_display_html += "</div>"
-                    
                     st.markdown(f"### 📊 【{c_name}】全功能互動 K 線圖 {ma_display_html}", unsafe_allow_html=True)
-                    st.caption("💡 **畫線工具使用提示**：滑鼠移至圖表右上角工具列，點選「🖊️ 直線 (drawline)」、「✏️ 筆刷 (drawopenpath)」、「矩形 (drawrect)」即可在圖上自由畫趨勢線或標示區間！")
-                    
-                    fig = make_subplots(rows=1, cols=1)
-                    fig.add_trace(go.Candlestick(
-                        x=date_strings, 
-                        open=df_chart['Open'].to_numpy().flatten().tolist(), 
-                        high=df_chart['High'].to_numpy().flatten().tolist(), 
-                        low=df_chart['Low'].to_numpy().flatten().tolist(), 
-                        close=df_chart['Close'].to_numpy().flatten().tolist(), 
-                        name="K線",
-                        hovertext=[f"日期：{d}" for d in date_strings]
-                    ), row=1, col=1)
-                    
-                    for ma in personal_ma_configs:
-                        p, c = ma["period"], ma["color"]
-                        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                        if not ma_series.empty:
-                            ma_list = ma_series.to_numpy().flatten().tolist()
-                            fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
-                    
-                    fig.update_layout(
-                        xaxis_rangeslider_visible=False, 
-                        height=620, 
-                        margin=dict(l=10, r=40, t=10, b=10), 
-                        dragmode='pan', 
-                        showlegend=True, 
-                        xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), 
-                        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
-                    )
-                    
-                    st.plotly_chart(
-                        fig, 
-                        use_container_width=True, 
-                        config={
-                            'modeBarButtonsToAdd': [
-                                'drawline',       # 趨勢線
-                                'drawopenpath',   # 畫筆自由書寫
-                                'drawclosedpath', # 封閉圖形
-                                'drawrect',       # 繪製矩形 (壓力/支撐/網格區間)
-                                'drawcircle',     # 繪製圓形
-                                'eraseshape'      # 橡皮擦 (清除畫線)
-                            ],
-                            'displayModeBar': True,
-                            'scrollZoom': True
-                        }
-                    )
-                else:
-                    st.markdown(f"### 📊 【{c_name}】TradingView 官方進階 Widget (若無顯示請切換回 Plotly 模式)")
-                    tv_symbol = selected_stock
-                    if ".TW" in selected_stock:
-                        tv_symbol = f"TWSE:{selected_stock.replace('.TW', '')}"
-                    elif ".TWO" in selected_stock:
-                        tv_symbol = f"TPEX:{selected_stock.replace('.TWO', '')}"
-                    elif selected_stock in ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'NFLX', 'INTC']:
-                        tv_symbol = f"NASDAQ:{selected_stock}"
-                    else:
-                        tv_symbol = selected_stock
+                
+                with col_draw_color:
+                    # 💡【優化 3：動態自訂畫線筆劃顏色】
+                    draw_color = st.color_picker("🎨 自訂畫線與文字顏色", value="#FF3333", key="draw_line_color_picker")
 
-                    tv_widget_code = f"""
-                    <div class="tradingview-widget-container" style="height:650px;width:100%;">
-                      <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%;"></div>
-                      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-                      <script type="text/javascript">
-                      new TradingView.widget(
-                      {{
-                      "autosize": true,
-                      "symbol": "{tv_symbol}",
-                      "interval": "D",
-                      "timezone": "Asia/Taipei",
-                      "theme": "dark",
-                      "style": "1",
-                      "locale": "zh_TW",
-                      "toolbar_bg": "#f1f3f6",
-                      "enable_publishing": false,
-                      "hide_side_toolbar": false,
-                      "allow_symbol_change": true,
-                      "details": true,
-                      "hotlist": true,
-                      "calendar": true,
-                      "container_id": "tradingview_chart"
-                    }}
-                      );
-                      </script>
-                    </div>
-                    """
-                    components.html(tv_widget_code, height=660)
+                st.caption("💡 **繪圖工具列指南**：點擊右上方工具列「直線 (drawline)」、「筆刷」、「矩形 (drawrect)」、「📝 輸入文字 (drawtext)」即可在圖上繪製標記；點擊「橡皮擦 (eraseshape)」後選取畫線即可移除！")
+                
+                fig = make_subplots(rows=1, cols=1)
+                
+                # 繪製 K 線
+                fig.add_trace(go.Candlestick(
+                    x=date_strings, 
+                    open=df_chart['Open'].to_numpy().flatten().tolist(), 
+                    high=df_chart['High'].to_numpy().flatten().tolist(), 
+                    low=df_chart['Low'].to_numpy().flatten().tolist(), 
+                    close=df_chart['Close'].to_numpy().flatten().tolist(), 
+                    name="K線",
+                    hovertext=[f"日期：{d}" for d in date_strings]
+                ), row=1, col=1)
+                
+                # 繪製自訂均線
+                for ma in personal_ma_configs:
+                    p, c = ma["period"], ma["color"]
+                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                    if not ma_series.empty:
+                        ma_list = ma_series.to_numpy().flatten().tolist()
+                        fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
+                
+                fig.update_layout(
+                    xaxis_rangeslider_visible=False, 
+                    height=620, 
+                    margin=dict(l=10, r=40, t=10, b=10), 
+                    dragmode='pan', 
+                    showlegend=True, 
+                    # 💡【優化 2：將 X 軸類型設為 category 確保放大縮小時 K 棒不會變形放大/縮小】
+                    xaxis=dict(
+                        type='category',
+                        showgrid=True, 
+                        gridcolor="rgba(128,128,128,0.2)",
+                        nticks=15  # 自動顯示適當數量的 YYYY.MM 日期標籤
+                    ), 
+                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
+                    # 💡【優化 3 & 4：設定預設畫線樣式與自訂顏色】
+                    newshape=dict(
+                        line=dict(color=draw_color, width=2.5),
+                        fillcolor=draw_color,
+                        opacity=0.6
+                    )
+                )
+                
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    config={
+                        'modeBarButtonsToAdd': [
+                            'drawline',       # 直線 / 趨勢線
+                            'drawopenpath',   # 畫筆自由畫線
+                            'drawrect',       # 繪製矩形 (壓力/支撐/網格區間)
+                            'drawcircle',     # 繪製圓形
+                            'drawtext',       # 💡【優化 4：新增圖上輸入文字標註功能】
+                            'eraseshape'      # 💡【優化 3：橡皮擦點擊移除劃線】
+                        ],
+                        'displayModeBar': True,
+                        'scrollZoom': True
+                    }
+                )
             
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
