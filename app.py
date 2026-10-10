@@ -1272,6 +1272,154 @@ def recommend_dynamic_grid(price, history):
     )
     return lower, upper, grid_count, reason
 
+
+def calculate_money_weighted_return(cash_flows):
+    """Solve annualized return for dated cash flows; return None if no valid root exists."""
+    dated = {}
+    for date_value, amount in cash_flows:
+        date_value = pd.Timestamp(date_value)
+        if date_value.tzinfo is not None:
+            date_value = date_value.tz_localize(None)
+        dated[date_value.normalize()] = dated.get(date_value.normalize(), 0.0) + float(amount)
+    dated = sorted((day, amount) for day, amount in dated.items() if amount != 0)
+    if len(dated) < 2 or not any(amount < 0 for _, amount in dated) or not any(amount > 0 for _, amount in dated):
+        return None
+    start = dated[0][0]
+    years = np.asarray([(day - start).days / 365.25 for day, _ in dated], dtype=float)
+    amounts = np.asarray([amount for _, amount in dated], dtype=float)
+
+    def npv(rate):
+        try:
+            return float(np.sum(amounts / np.power(1.0 + rate, years)))
+        except (OverflowError, FloatingPointError, ZeroDivisionError):
+            return float("inf") if rate < 0 else float("-inf")
+
+    low, high = -0.9999, 1.0
+    low_value = npv(low)
+    high_value = npv(high)
+    while high_value > 0 and high < 1_000_000:
+        high = high * 2.0 + 1.0
+        high_value = npv(high)
+    if not np.isfinite(low_value) or not np.isfinite(high_value) or low_value * high_value > 0:
+        return None
+    for _ in range(120):
+        middle = (low + high) / 2.0
+        middle_value = npv(middle)
+        if abs(middle_value) < 1e-8:
+            return float(middle)
+        if middle_value > 0:
+            low = middle
+        else:
+            high = middle
+    return float((low + high) / 2.0)
+
+
+def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0):
+    """Buy at the first available price each month and report cash-flow-aware returns."""
+    if isinstance(price_series, pd.DataFrame):
+        if "Close" not in price_series.columns:
+            raise ValueError("定期定額需要收盤價資料。")
+        price_series = price_series["Close"]
+    prices = pd.to_numeric(price_series, errors="coerce").copy()
+    prices.index = pd.to_datetime(prices.index, errors="coerce")
+    if isinstance(prices.index, pd.DatetimeIndex) and prices.index.tz is not None:
+        prices.index = prices.index.tz_localize(None)
+    prices = prices.loc[~prices.index.isna()].dropna().sort_index()
+    prices = prices[prices > 0]
+    monthly_contribution = float(monthly_contribution)
+    commission_rate = max(0.0, float(commission_rate))
+    if prices.empty or monthly_contribution <= 0:
+        raise ValueError("請提供有效股價與大於零的每月投入金額。")
+
+    first_sessions = set(prices.groupby(prices.index.to_period("M"), sort=True).head(1).index)
+    shares = 0.0
+    total_contributed = 0.0
+    total_fees = 0.0
+    history_rows = []
+    cash_flows = []
+    time_weighted_growth = 1.0
+    previous_value = 0.0
+    for day, price in prices.items():
+        contribution = monthly_contribution if day in first_sessions else 0.0
+        if contribution > 0:
+            added_shares = contribution / (float(price) * (1.0 + commission_rate))
+            shares += added_shares
+            total_contributed += contribution
+            total_fees += contribution - added_shares * float(price)
+            cash_flows.append((day, -contribution))
+        portfolio_value = shares * float(price)
+        denominator = previous_value + contribution
+        period_growth = portfolio_value / denominator if denominator > 0 else 1.0
+        time_weighted_growth *= period_growth
+        history_rows.append({
+            "date": day,
+            "portfolio_value": portfolio_value,
+            "contribution": contribution,
+            "time_weighted_growth": time_weighted_growth,
+        })
+        previous_value = portfolio_value
+
+    history = pd.DataFrame(history_rows).set_index("date")
+    ending_value = float(history["portfolio_value"].iloc[-1])
+    cash_flows.append((history.index[-1], ending_value))
+    money_weighted_return = calculate_money_weighted_return(cash_flows)
+    twr_curve = history["time_weighted_growth"]
+    drawdown = twr_curve / twr_curve.cummax() - 1.0
+    return {
+        "history": history,
+        "metrics": {
+            "contribution_count": len(first_sessions),
+            "total_contributed": total_contributed,
+            "ending_value": ending_value,
+            "profit_loss": ending_value - total_contributed,
+            "money_weighted_return": money_weighted_return,
+            "mdd": float(drawdown.min()),
+            "fees": total_fees,
+        },
+    }
+
+
+def build_chip_flow_summary(price_history, institutional_trade=None, issued_shares=None):
+    """Summarize accessible trend, volume activity, and official institutional flow in plain language."""
+    summary = {}
+    if isinstance(price_history, pd.DataFrame) and "Close" in price_history.columns:
+        close = pd.to_numeric(price_history["Close"], errors="coerce").dropna()
+        if len(close) >= 20 and float(close.iloc[-1]) > 0:
+            average = float(close.tail(20).mean())
+            change = float(close.iloc[-1] / average - 1.0) if average > 0 else None
+            if change is not None:
+                tone = "偏強" if change >= 0.01 else "偏弱" if change <= -0.01 else "整理"
+                relation = "高於" if change > 0 else "低於" if change < 0 else "接近"
+                summary["trend"] = {
+                    "status": f"{tone}｜現價{relation}20日平均價",
+                    "detail": f"現價較近20筆收盤平均價 {change:+.2%}。這描述近期走勢，不代表未來方向。",
+                }
+        if isinstance(price_history, pd.DataFrame) and "Volume" in price_history.columns:
+            volume = pd.to_numeric(price_history["Volume"], errors="coerce").dropna()
+            if len(volume) >= 10:
+                recent = float(volume.tail(5).mean())
+                baseline_series = volume.iloc[-25:-5] if len(volume) >= 25 else volume.iloc[:-5]
+                baseline = float(baseline_series.mean()) if not baseline_series.empty else 0.0
+                if baseline > 0:
+                    ratio = recent / baseline
+                    tone = "交易變熱" if ratio >= 1.2 else "交易轉淡" if ratio <= 0.8 else "大致持平"
+                    summary["volume"] = {
+                        "status": tone,
+                        "detail": f"近5筆平均成交量是前段參考平均的 {ratio:.2f} 倍；只代表成交活躍度。",
+                    }
+
+    net_keys = ["外資買賣超股數", "投信買賣超股數", "自營商買賣超股數"]
+    if institutional_trade and issued_shares and issued_shares > 0:
+        net_values = [_finite_number(institutional_trade.get(key)) for key in net_keys]
+        if all(value is not None for value in net_values):
+            net_pct = sum(net_values) / float(issued_shares) * 100.0
+            direction = "法人當日偏買" if net_pct > 0 else "法人當日偏賣" if net_pct < 0 else "法人當日買賣接近"
+            summary["institutions"] = {
+                "status": direction,
+                "detail": f"三大法人合計買賣超佔已發行股數 {net_pct:+.4f}%；只看當日，單日變化不等於持股集中。",
+            }
+    return summary
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_institutional_market_data():
     """Fetch official latest daily institutional trades and issued share counts for TWSE/TPEx."""
@@ -2490,9 +2638,9 @@ else:
 
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
             "📊 彩色 K 線圖與成交量",
-            "🧭 籌碼集中度分析",
+            "📦 籌碼流向參考",
             "🤖 網格自動生成器",
-            "⚖️ 網格複利 vs 買進持有對比",
+            "⚖️ 網格／持有／定期定額比較",
             "🧪 技術指標自訂策略回測",
             "💸 配息複利策略",
             "🚀 華爾街機構級三核心策略雷達",
@@ -2634,80 +2782,40 @@ else:
                 render_dividend_tab(st, default_ticker=selected_stock)
             
             with tab2:
-                st.markdown("### 🧭 籌碼集中度分析")
-                st.caption("四項觀察：內部人持股、大戶與散戶持股、主力買賣與買賣家數差、籌碼集中度。來源更新頻率不同，請以各指標標示日期為準。")
+                st.markdown("### 📦 市場走勢與資金流向參考")
+                st.caption("改用較容易取得、一般人容易理解的價格趨勢、成交熱度與法人當日動向。資料暫缺時會直接標示，不把缺漏當成零。")
+                price_history = df_chart[[column for column in ("Close", "Volume") if column in df_chart.columns]].copy()
+                institutional_trade = None
+                issued_shares = None
+                inst_errors = []
                 if selected_stock.endswith(('.TW', '.TWO')):
                     with st.spinner('讀取官方法人交易與已發行股數資料…'):
                         inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
                     stock_code = selected_stock.replace('.TWO','').replace('.TW','')
-                    shares = inst_shares.get(stock_code)
-                    insider = fetch_mops_insider_holding(selected_stock)
-                    tdcc = None
-                    tdcc_error = None
-                    try:
-                        with st.spinner('讀取集保每週股權分散資料…'):
-                            tdcc = fetch_tdcc_concentration(selected_stock)
-                    except Exception as exc:
-                        tdcc_error = str(exc)
+                    institutional_trade = inst_trades.get(stock_code)
+                    issued_shares = inst_shares.get(stock_code)
 
-                    st.markdown("#### 1. 內部人持股（MOPS 月資料）")
-                    if insider and shares:
-                        insider_pct = insider['shares'] / shares * 100
-                        st.metric(f"內部人及關係人持股比｜{insider['date']}", f"{insider_pct:.2f}%", help="MOPS 董監事持股餘額彙總股數 ÷ 官方已發行普通股數。資料為月頻，非即時持股。")
-                    else:
-                        st.info("MOPS 尚未回傳可辨識的持股餘額，或缺少已發行普通股數。可由 MOPS 個別公司頁面確認最新月份。")
+                flow_summary = build_chip_flow_summary(price_history, institutional_trade, issued_shares)
+                flow_cards = [
+                    ("trend", "最近價格走勢"),
+                    ("volume", "最近成交熱度"),
+                    ("institutions", "法人當日方向"),
+                ]
+                flow_cols = st.columns(3)
+                available_statuses = []
+                for col, (key, label) in zip(flow_cols, flow_cards):
+                    item = flow_summary.get(key)
+                    with col:
+                        st.metric(label, item["status"] if item else "資料暫缺")
+                        st.caption(item["detail"] if item else "目前資料不足或來源沒有回傳；不以零代替。")
+                    if item:
+                        available_statuses.append(item["status"].split("｜")[0])
 
-                    st.markdown("#### 2. 大戶與散戶持股（集保週資料）")
-                    if tdcc:
-                        big_col, retail_col, big_change_col = st.columns(3)
-                        with big_col: st.metric(f"大戶 ≥ 400 張｜{tdcc['date']}", f"{tdcc['big_pct']:.2f}%")
-                        with retail_col: st.metric("散戶 ≤ 5 張", f"{tdcc['retail_pct']:.2f}%")
-                        with big_change_col: st.metric("大戶週變化", f"{tdcc['big_change_pp']:+.2f} 個百分點" if tdcc['big_change_pp'] is not None else "缺少前週資料")
-                    else:
-                        st.info("目前無法取得此股集保戶股權分散資料。")
-                        if tdcc_error: st.caption(f"集保來源暫時無法連線：{tdcc_error}")
-
-                    st.markdown("#### 3. 主力買賣超與買賣家數差")
-                    broker_file = st.file_uploader("上傳此股當日券商分點買賣 CSV（需含證券代號、買進股數、賣出股數）", type=['csv'], key=f'broker_csv_{selected_stock}')
-                    broker_summary = summarize_broker_branch_csv(broker_file, stock_code) if broker_file else None
-                    if broker_summary and broker_summary.get('error'):
-                        st.warning(broker_summary['error'])
-                    elif broker_summary:
-                        broker_cols = st.columns(4)
-                        with broker_cols[0]: st.metric("前 15 大買超分點淨買", f"{broker_summary['top_net_buy']:,.0f} 股")
-                        with broker_cols[1]: st.metric("前 15 大賣超分點淨賣", f"{broker_summary['top_net_sell']:,.0f} 股")
-                        with broker_cols[2]: st.metric("買超分點家數", f"{broker_summary['buyers']:,}")
-                        with broker_cols[3]: st.metric("買賣分點家數差", f"{broker_summary['count_diff']:+,}")
-                        if shares:
-                            st.caption(f"前 15 大買超分點淨買佔股本 {broker_summary['top_net_buy']/shares*100:.4f}%；前 15 大賣超分點淨賣佔股本 {broker_summary['top_net_sell']/shares*100:.4f}%。")
-                    else:
-                        st.info("券商分點交易檔需另行取得後上傳；此報表不會把三大法人淨買超冒充為主力分點資料。")
-
-                    st.markdown("#### 4. 籌碼集中度")
-                    if tdcc:
-                        concentration_cols = st.columns(3)
-                        concentration = tdcc['big_pct'] - tdcc['retail_pct']
-                        with concentration_cols[0]: st.metric("大戶－散戶持股差", f"{concentration:+.2f} 個百分點")
-                        with concentration_cols[1]: st.metric("大戶持股週變化", f"{tdcc['big_change_pp']:+.2f} 個百分點" if tdcc['big_change_pp'] is not None else "缺少前週資料")
-                        with concentration_cols[2]: st.metric("散戶持股週變化", f"{tdcc['retail_change_pp']:+.2f} 個百分點" if tdcc['retail_change_pp'] is not None else "缺少前週資料")
-                        st.caption("集中度觀察值定義為大戶持股比減散戶持股比；同時呈現大戶與散戶週變化，供比較趨勢，不是官方發布的單一指數。")
-                    else:
-                        st.info("集保週資料不足，暫無法計算集中度觀察值。")
-
-                    st.markdown("#### 三大法人買賣佔股本比（每日）")
-                    inst_one = build_institutional_screen(inst_trades, inst_shares, [selected_stock], '外資', -100000)
-                    if not inst_one.empty:
-                        view_cols = ['資料日期', '市場', '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
-                                     '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
-                                     '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
-                        st.dataframe(inst_one[view_cols].style.format({c: '{:+.4f}%' for c in view_cols if c.endswith('(%)')}), use_container_width=True)
-                        st.caption("分類口徑：外資含外陸資、不含外資自營商；自營商買賣股數合計自行買賣與避險。")
-                    else:
-                        st.info("目前無此股票的法人資料或官方已發行股數；可能是非交易日、資料尚未更新，或標的非普通股。")
-                    if inst_errors:
-                        st.caption("部分官方資料來源暫時無法連線，畫面僅顯示可取得的市場資料。")
-                else:
-                    st.info("集中度分析與三大法人資料目前適用台灣上市 `.TW` 與上櫃 `.TWO` 普通股。")
+                if available_statuses:
+                    st.info("簡單看：" + "；".join(available_statuses) + "。這些是近期市場狀況描述，不是單獨的買進或賣出訊號。")
+                if selected_stock.endswith(('.TW', '.TWO')) and inst_errors:
+                    st.caption("法人來源目前未完整回傳；上方只顯示實際取得的資料。")
+                st.caption("價格趨勢使用近 20 筆收盤價；成交熱度比較近 5 筆與前段平均成交量；法人方向使用當日三大法人資料。各項期間不同，請分開解讀。")
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
@@ -2845,9 +2953,10 @@ else:
             # 【Tab 4: 3.12 「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
             # ==============================================================================
             with tab4:
-                st.markdown(f"### ⚖️ 【{c_name}】「動態網格 vs 買進持有」歷史對比 (3.12 版)")
+                st.markdown(f"### ⚖️ 【{c_name}】網格、買進持有與定期定額歷史比較")
+                st.caption("三種方式使用同一標的、價格期間及交易費率。定期定額預設把相同總預算平均分到每個資料月份；年化報酬按每次實際投入日期計算。")
                 
-                st.markdown("#### ⚖️ 網格三大核心策略 vs 買進持有 (Buy & Hold) 歷史資產對比與手續費精算")
+                st.markdown("#### 網格策略、一次買進持有、每月定期定額")
                 
                 gc_col1, gc_col2, gc_col3 = st.columns(3)
                 with gc_col1:
@@ -2866,6 +2975,30 @@ else:
                     )
                 with g_opt2:
                     trigger_pct = st.number_input("📉 網格觸發間距 (%)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="sim_grid_trigger") / 100.0
+
+                comparison_prices = pd.to_numeric(df_chart["Close"], errors="coerce").dropna()
+                comparison_index = pd.to_datetime(comparison_prices.index, errors="coerce")
+                comparison_months = max(1, int(comparison_index[~comparison_index.isna()].to_period("M").nunique()))
+                default_dca_monthly = float(sim_capital) / comparison_months
+                if "sim_dca_monthly_input" not in st.session_state:
+                    st.session_state["sim_dca_monthly_input"] = default_dca_monthly
+                dca_cols = st.columns([2, 1])
+                with dca_cols[1]:
+                    if st.button("恢復相同總預算", key="sim_dca_reset"):
+                        st.session_state["sim_dca_monthly_input"] = default_dca_monthly
+                with dca_cols[0]:
+                    dca_monthly = st.number_input(
+                        "💵 定期定額每月投入金額",
+                        min_value=0.0, value=float(default_dca_monthly), step=1_000.0,
+                        key="sim_dca_monthly_input",
+                        help="預設把上方模擬本金平均分配至回測期間的每個月份；可自行更改。"
+                    )
+                dca_budget_preview = float(dca_monthly) * comparison_months
+                st.caption(f"期間包含 {comparison_months} 個資料月份；依目前月投入估算，定期定額累計投入約 {dca_budget_preview:,.0f} 元。預設與上方模擬本金相同。")
+                if selected_tf in ("1分鐘", "5分鐘", "30分鐘", "60分鐘"):
+                    st.info("目前是短線圖表，資料期間不到完整長期月扣款週期；定期定額只會在資料涵蓋月份的第一筆價格投入。若要比較長期月扣款，請切換日線、週線或月線。")
+                elif selected_tf in ("1季", "半年", "1年"):
+                    st.info("目前圖表是季線或更長週期，沒有每個月的價格；定期投入只能使用每個有資料月份的第一筆價格，並非逐月扣款。若要比較月扣款，請切換日線、週線或月線。")
 
                 closes_arr = df_chart['Close'].astype(float).to_numpy()
                 
@@ -2940,6 +3073,13 @@ else:
                     bh_cagr = ((bh_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if bh_final_val > 0 else -100.0
                     grid_cagr = ((grid_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if grid_final_val > 0 else -100.0
 
+                    dca_result = None
+                    try:
+                        dca_series = pd.Series(closes_arr, index=df_chart.index, name="Close")
+                        dca_result = simulate_monthly_dca(dca_series, float(dca_monthly), fee_rate)
+                    except Exception as dca_error:
+                        st.warning(f"定期定額暫時無法計算：{dca_error}")
+
                     def calc_mdd(curve):
                         arr = np.array(curve)
                         peak = np.maximum.accumulate(arr)
@@ -2949,23 +3089,57 @@ else:
                     bh_mdd = calc_mdd(bh_asset_curve)
                     grid_mdd = calc_mdd(grid_asset_curve)
 
-                    m1, m2, m3, m4 = st.columns(4)
-                    with m1:
-                        st.metric("持有策略 最終總資產", f"{bh_final_val:,.0f} 元", delta=f"總報酬 {bh_total_ret:+.2f}%")
-                    with m2:
-                        st.metric("選定網格 最終總資產", f"{grid_final_val:,.0f} 元", delta=f"總報酬 {grid_total_ret:+.2f}%")
-                    with m3:
-                        st.metric("CAGR 年化報酬 (買進 vs 網格)", f"{bh_cagr:+.1f}% / {grid_cagr:+.1f}%")
-                    with m4:
-                        st.metric("MDD 最大回撤 (買進 vs 網格)", f"{bh_mdd:.1f}% / {grid_mdd:.1f}%", delta="風險控制較佳" if abs(grid_mdd) < abs(bh_mdd) else "波動較大")
+                    st.markdown("#### 三種方式結果摘要")
+                    summary_cols = st.columns(4)
+                    summary_cols[0].metric("買進持有期末資產", f"{bh_final_val:,.0f} 元", delta=f"損益 {bh_final_val - sim_capital:+,.0f} 元")
+                    summary_cols[1].metric("網格策略期末資產", f"{grid_final_val:,.0f} 元", delta=f"損益 {grid_final_val - sim_capital:+,.0f} 元")
+                    if dca_result is not None:
+                        dca_metrics = dca_result["metrics"]
+                        summary_cols[2].metric("定期定額期末資產", f"{dca_metrics['ending_value']:,.0f} 元", delta=f"損益 {dca_metrics['profit_loss']:+,.0f} 元")
+                        summary_cols[3].metric("定期定額累計投入", f"{dca_metrics['total_contributed']:,.0f} 元", delta=f"{dca_metrics['contribution_count']} 次投入")
+
+                    comparison_rows = [
+                        {"投入方式": "一開始買進並持有", "累計投入(元)": float(sim_capital), "期末資產(元)": bh_final_val,
+                         "總損益(元)": bh_final_val - float(sim_capital), "年化報酬(%)": bh_cagr,
+                         "最大跌幅(%)": bh_mdd},
+                        {"投入方式": f"網格｜{grid_sim_strategy.split(' ')[1]}", "累計投入(元)": float(sim_capital), "期末資產(元)": grid_final_val,
+                         "總損益(元)": grid_final_val - float(sim_capital), "年化報酬(%)": grid_cagr,
+                         "最大跌幅(%)": grid_mdd},
+                    ]
+                    if dca_result is not None:
+                        dca_metrics = dca_result["metrics"]
+                        comparison_rows.append({
+                            "投入方式": "每月定期定額",
+                            "累計投入(元)": dca_metrics["total_contributed"],
+                            "期末資產(元)": dca_metrics["ending_value"],
+                            "總損益(元)": dca_metrics["profit_loss"],
+                            "年化報酬(%)": dca_metrics["money_weighted_return"] * 100 if dca_metrics["money_weighted_return"] is not None else None,
+                            "最大跌幅(%)": dca_metrics["mdd"] * 100,
+                        })
+                    st.dataframe(pd.DataFrame(comparison_rows).style.format({
+                        "累計投入(元)": "{:,.0f}", "期末資產(元)": "{:,.0f}", "總損益(元)": "{:+,.0f}",
+                        "年化報酬(%)": "{:+.2f}%", "最大跌幅(%)": "{:.2f}%",
+                    }, na_rep="—"), use_container_width=True, hide_index=True)
+                    st.caption("定期定額年化報酬依每次投入日期計算；最大跌幅先扣除新增投入的影響。其他兩種方式從期初投入全部預算。三者均未另計股息；買進持有與定期定額以持倉市值估值，未假設期末賣出。")
 
                     strat_display_name = grid_sim_strategy.split(" ")[1]
 
                     fig_compare = go.Figure()
                     fig_compare.add_trace(go.Scatter(x=date_strings, y=bh_asset_curve, mode='lines', name='單純買進持有 (Buy & Hold)', line=dict(color='#00CC66', width=2)))
                     fig_compare.add_trace(go.Scatter(x=date_strings, y=grid_asset_curve, mode='lines', name=strat_display_name, line=dict(color='#FF9900', width=2, dash='dash')))
+                    if dca_result is not None:
+                        if "分鐘" in selected_tf:
+                            dca_axis_dates = dca_result["history"].index.strftime("%m-%d %H:%M").tolist()
+                        else:
+                            dca_axis_dates = dca_result["history"].index.strftime("%Y-%m-%d").tolist()
+                        fig_compare.add_trace(go.Scatter(
+                            x=dca_axis_dates,
+                            y=dca_result["history"]["portfolio_value"],
+                            mode="lines", name="每月定期定額",
+                            line=dict(color="#4C78A8", width=2, dash="dot"),
+                        ))
                     fig_compare.update_layout(
-                        title=f"📈 【{c_name}】歷史走勢下，{strat_display_name} vs 買進持有之資產增長曲線 (扣除交易稅費)",
+                        title=f"📈 【{c_name}】網格、買進持有與定期定額資產變化（計入買進費用）",
                         height=380,
                         xaxis=dict(type='category', showgrid=True, gridcolor="rgba(128,128,128,0.2)", nticks=12),
                         yaxis=dict(title="資產總價值 (元)", showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
@@ -3302,9 +3476,9 @@ else:
     if not tabs_created:
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
             "📊 彩色 K 線圖與成交量",
-            "🧭 籌碼集中度分析",
+            "📦 籌碼流向參考",
             "🤖 網格自動生成器",
-            "⚖️ 網格複利 vs 買進持有對比",
+            "⚖️ 網格／持有／定期定額比較",
             "🧪 技術指標自訂策略回測",
             "💸 配息複利策略",
             "🚀 華爾街機構級三核心策略雷達",
