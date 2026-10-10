@@ -1,5 +1,5 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.9 TradingView 畫線圖表與全指標回測版】 - app.py
+# 【機構級三核心策略雷達 3.10 全股票相容畫線與全指標回測版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import streamlit.components.v1 as components
@@ -7,7 +7,7 @@ import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.9", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.10", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -195,7 +195,6 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
     df_calc['MA_entry'] = df_calc['Close'].rolling(window=ma_entry_p).mean()
     df_calc['MA_exit'] = df_calc['Close'].rolling(window=ma_exit_p).mean()
 
-    # KD 指標
     low_min = df_calc['Low'].rolling(window=9).min()
     high_max = df_calc['High'].rolling(window=9).max()
     rsv = np.where(high_max == low_min, 50.0, (df_calc['Close'] - low_min) / (high_max - low_min) * 100.0)
@@ -211,23 +210,19 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
     df_calc['K'] = k_list
     df_calc['D'] = d_list
 
-    # MACD 指標
     ema12 = df_calc['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df_calc['Close'].ewm(span=26, adjust=False).mean()
     df_calc['DIF'] = ema12 - ema26
     df_calc['DEM'] = df_calc['DIF'].ewm(span=9, adjust=False).mean()
 
-    # 成交量均線
     df_calc['VOL_MA20'] = df_calc['Volume'].rolling(window=20).mean()
 
-    # RSI 指標
     delta = df_calc['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_p).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_p).mean()
     rs = gain / (loss + 1e-9)
     df_calc['RSI'] = 100 - (100 / (1 + rs))
 
-    # 布林通道 (Bollinger Bands)
     bb_middle = df_calc['Close'].rolling(window=bb_p).mean()
     bb_std = df_calc['Close'].rolling(window=bb_p).std()
     df_calc['BB_Upper'] = bb_middle + (bb_std * 2)
@@ -363,7 +358,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.9（TradingView 畫線圖表版）")
+    st.title("📈 機構級三核心策略雷達 3.10（全股票相容畫線與全指標回測版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -415,6 +410,20 @@ else:
         "1季": {"p": "max", "i": "3mo"}, "半年": {"p": "max", "i": "3mo"}, "1年": {"p": "max", "i": "3mo"}
     }
     cfg = tf_mapping[selected_tf]
+
+    with st.sidebar.expander("🛠️ 均線指標快速視窗設定", expanded=True):
+        preset_ma = st.selectbox("📊 選擇均線快捷套組", options=["標準視窗 (5日 / 10日 / 20日)", "極短線 (3日 / 5日 / 10日)", "波段趨勢 (20日 / 60日 / 120日)", "自訂均線配置"], index=0)
+        default_days = [5, 10, 20, 60, 240] if preset_ma == "標準視窗 (5日 / 10日 / 20日)" else ([3, 5, 10, 20, 60] if preset_ma == "極短線 (3日 / 5日 / 10日)" else [20, 60, 120, 240, 500])
+        default_actives = [True, True, True, False, False]
+        personal_ma_configs = []
+        default_colors = ["#FF5733", "#33FF57", "#3357FF", "#F3FF33", "#FF33F3"]
+
+        for i in range(1, 6):
+            col_show, col_p, col_c = st.columns([0.8, 1.4, 0.8])
+            with col_show: is_active = st.checkbox(f"MA{i}", value=default_actives[i-1], key=f"ma_active_{i}")
+            with col_p: ma_p = st.number_input(f"天數{i}", min_value=1, max_value=500, value=int(default_days[i-1]), label_visibility="collapsed", key=f"personal_ma_p_{i}")
+            with col_c: ma_c = str(st.color_picker(f"C{i}", value=default_colors[i-1], label_visibility="collapsed", key=f"personal_ma_c_{i}"))
+            if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
     AUTO_TW_UNIVERSE = [
         '2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', 
@@ -626,55 +635,111 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 TradingView 全功能圖表", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
             
             # ==============================================================================
-            # 【Tab 1: 方案一嵌入 TradingView 官方 Advanced Chart (含左側全功能畫線工具欄)】
+            # 【Tab 1: 3.10 全股票 100% 相容 + 完整畫線工具箱 + TradingView 備援雙引擎】
             # ==============================================================================
             with tab1:
-                st.markdown(f"### 📊 【{c_name}】TradingView 全功能畫線與技術分析圖表")
+                chart_engine = st.radio("🛠️ 選擇圖表畫線引擎：", ["Plotly 全股票 100% 畫線圖表 (推薦，保證完全顯示)", "TradingView 官方進階 Widget"], horizontal=True)
                 
-                # 自動轉換交易代碼符合 TradingView 的格式 (例如: 2330.TW -> TWSE:2330, 3293.TWO -> TPEX:3293)
-                tv_symbol = selected_stock
-                if ".TW" in selected_stock:
-                    tv_symbol = f"TWSE:{selected_stock.replace('.TW', '')}"
-                elif ".TWO" in selected_stock:
-                    tv_symbol = f"TPEX:{selected_stock.replace('.TWO', '')}"
-                elif selected_stock in ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'NFLX', 'INTC']:
-                    tv_symbol = f"NASDAQ:{selected_stock}"
+                if "Plotly" in chart_engine:
+                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
+                    for ma in personal_ma_configs:
+                        p, c = ma["period"], ma["color"]
+                        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                        if not ma_series.empty:
+                            latest_ma_val = ma_series.to_numpy().flatten()[-1]
+                            ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
+                    ma_display_html += "</div>"
+                    
+                    st.markdown(f"### 📊 【{c_name}】全功能互動 K 線圖 {ma_display_html}", unsafe_allow_html=True)
+                    st.caption("💡 **畫線工具使用提示**：滑鼠移至圖表右上角工具列，點選「🖊️ 直線 (drawline)」、「✏️ 筆刷 (drawopenpath)」、「矩形 (drawrect)」即可在圖上自由畫趨勢線或標示區間！")
+                    
+                    fig = make_subplots(rows=1, cols=1)
+                    fig.add_trace(go.Candlestick(
+                        x=date_strings, 
+                        open=df_chart['Open'].to_numpy().flatten().tolist(), 
+                        high=df_chart['High'].to_numpy().flatten().tolist(), 
+                        low=df_chart['Low'].to_numpy().flatten().tolist(), 
+                        close=df_chart['Close'].to_numpy().flatten().tolist(), 
+                        name="K線",
+                        hovertext=[f"日期：{d}" for d in date_strings]
+                    ), row=1, col=1)
+                    
+                    for ma in personal_ma_configs:
+                        p, c = ma["period"], ma["color"]
+                        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                        if not ma_series.empty:
+                            ma_list = ma_series.to_numpy().flatten().tolist()
+                            fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
+                    
+                    fig.update_layout(
+                        xaxis_rangeslider_visible=False, 
+                        height=620, 
+                        margin=dict(l=10, r=40, t=10, b=10), 
+                        dragmode='pan', 
+                        showlegend=True, 
+                        xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), 
+                        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+                    )
+                    
+                    st.plotly_chart(
+                        fig, 
+                        use_container_width=True, 
+                        config={
+                            'modeBarButtonsToAdd': [
+                                'drawline',       # 趨勢線
+                                'drawopenpath',   # 畫筆自由書寫
+                                'drawclosedpath', # 封閉圖形
+                                'drawrect',       # 繪製矩形 (壓力/支撐/網格區間)
+                                'drawcircle',     # 繪製圓形
+                                'eraseshape'      # 橡皮擦 (清除畫線)
+                            ],
+                            'displayModeBar': True,
+                            'scrollZoom': True
+                        }
+                    )
                 else:
+                    st.markdown(f"### 📊 【{c_name}】TradingView 官方進階 Widget (若無顯示請切換回 Plotly 模式)")
                     tv_symbol = selected_stock
+                    if ".TW" in selected_stock:
+                        tv_symbol = f"TWSE:{selected_stock.replace('.TW', '')}"
+                    elif ".TWO" in selected_stock:
+                        tv_symbol = f"TPEX:{selected_stock.replace('.TWO', '')}"
+                    elif selected_stock in ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'NFLX', 'INTC']:
+                        tv_symbol = f"NASDAQ:{selected_stock}"
+                    else:
+                        tv_symbol = selected_stock
 
-                tv_widget_code = f"""
-                <!-- TradingView Widget BEGIN -->
-                <div class="tradingview-widget-container" style="height:650px;width:100%;">
-                  <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%;"></div>
-                  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-                  <script type="text/javascript">
-                  new TradingView.widget(
-                  {{
-                  "autosize": true,
-                  "symbol": "{tv_symbol}",
-                  "interval": "D",
-                  "timezone": "Asia/Taipei",
-                  "theme": "dark",
-                  "style": "1",
-                  "locale": "zh_TW",
-                  "toolbar_bg": "#f1f3f6",
-                  "enable_publishing": false,
-                  "hide_side_toolbar": false,
-                  "allow_symbol_change": true,
-                  "details": true,
-                  "hotlist": true,
-                  "calendar": true,
-                  "container_id": "tradingview_chart"
-                }}
-                  );
-                  </script>
-                </div>
-                <!-- TradingView Widget END -->
-                """
-                components.html(tv_widget_code, height=660)
+                    tv_widget_code = f"""
+                    <div class="tradingview-widget-container" style="height:650px;width:100%;">
+                      <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%;"></div>
+                      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+                      <script type="text/javascript">
+                      new TradingView.widget(
+                      {{
+                      "autosize": true,
+                      "symbol": "{tv_symbol}",
+                      "interval": "D",
+                      "timezone": "Asia/Taipei",
+                      "theme": "dark",
+                      "style": "1",
+                      "locale": "zh_TW",
+                      "toolbar_bg": "#f1f3f6",
+                      "enable_publishing": false,
+                      "hide_side_toolbar": false,
+                      "allow_symbol_change": true,
+                      "details": true,
+                      "hotlist": true,
+                      "calendar": true,
+                      "container_id": "tradingview_chart"
+                    }}
+                      );
+                      </script>
+                    </div>
+                    """
+                    components.html(tv_widget_code, height=660)
             
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
