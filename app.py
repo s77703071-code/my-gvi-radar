@@ -632,8 +632,11 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.12 操盤手教學版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
             
+            # ==============================================================================
+            # 【Tab 1: Plotly 原生 K 線圖 + 年.月日期 + 畫圖選色移除/文字註記 + K棒寬度固定】
+            # ==============================================================================
             with tab1:
                 col_title, col_draw_color = st.columns([3, 1])
                 with col_title:
@@ -711,9 +714,35 @@ else:
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
             
+            # ==============================================================================
+            # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
+            # ==============================================================================
             with tab3:
-                st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.7 版)")
+                st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.12 操盤手教學版)")
                 
+                with st.expander("📚 點擊展開：網格交易 3 大資金管理機制與適用場景解析", expanded=False):
+                    st.markdown("""
+                    ##### **1. 固定比例再平衡 (1:1 / 自訂比例)**
+                    * **核心機制**：動態維持「股票價值 : 現金」的固定的比例（如 50%:50%）。股票上漲過高即賣出補回現金；股票下跌過深即動用現金買進股票。
+                    * **優點**：紀律化控制曝險，下跌時永遠有預備現金可用。
+                    * **缺點**：持續單邊大漲時可能過早賣出；持續單邊大跌時會持續消耗預備現金。
+                    * **適合場景**：**控制風險**、偏好長期穩定波動、不希望承受全額持股回撤的投資人。
+
+                    ##### **2. 固定股數交易**
+                    * **核心機制**：每次觸發目標價時，買進或賣出「完全相同的股數」（如每次 1,000 股）。
+                    * **優點**：規則最直觀、容易進行歷史回測與預估手續費。
+                    * **缺點**：股價越高時每次交易金額越大，資金壓力呈線性成長；股價極低時交易金額過小。
+                    * **適合場景**：**建立簡單易執行的自動化交易規則**。
+
+                    ##### **3. 庫存百分比管理**
+                    * **核心機制**：每次買賣當前庫存的一定比例（如每次交易當前庫存的 10%）。
+                    * **優點**：庫存部位較大時調整幅度自動放大；庫存縮小（低位）時調整幅度隨之減少，降低爆倉風險。
+                    * **缺點**：庫存極低時賣出數量會指數型遞減，可能較難完全出清清倉。
+                    * **適合場景**：讓交易規模跟隨現有庫存規模動態調節。
+                    """)
+
+                st.markdown("---")
+
                 grid_p = float(price_val)
                 is_tw = ".TW" in selected_stock or ".TWO" in selected_stock
                 unit_label = "股" if not is_tw else "股 (台股預設)"
@@ -729,8 +758,6 @@ else:
                     )
                 with g_top3:
                     init_stock_ratio = st.slider("⚖️ 初始股票部位佔比 (%)", min_value=10, max_value=90, value=50, step=5, key="grid_init_ratio")
-
-                st.markdown("---")
 
                 g_col1, g_col2, g_col3 = st.columns(3)
                 with g_col1: 
@@ -788,18 +815,24 @@ else:
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
 
+                st.warning(
+                    "⚠️ **操盤手複利與風險特別提示：**\n"
+                    "1. **網格獲利 ≠ 長期投資正期望值**：網格在「箱型震盪行情」中最能發揮低買高賣優勢；但在「強勢單邊大漲」時，會因持續賣出股票而落後於買進持有 (Buy & Hold)；在「持續單邊下跌」時，則會逐步買進並累積帳面虧損。\n"
+                    "2. **交易成本與稅費影響**：頻繁再平衡會產生手續費與證券交易稅，長期運作下會侵蝕部分複利效益。\n"
+                    "3. **驗證建言**：若目標是建立長期複利系統，請切換至 **「Tab 4 策略自訂回測與網格複利對比」**，檢視歷史 **年化報酬率 (CAGR)**、**最大回撤 (MDD)** 與 **扣除稅費後的淨報酬率**。"
+                )
+
             # ==============================================================================
-            # 【Tab 4: 3.12 補回與升級：「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
+            # 【Tab 4: 3.12 「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
             # ==============================================================================
             with tab4:
                 st.markdown(f"### 🧪 【{c_name}】策略回測與「網格再平衡 vs 買進持有」歷史對比 (3.12 版)")
                 
-                # --- 第一區塊：網格再平衡 vs 買進持有 (Buy & Hold) 歷史資產動態試算 ---
                 st.markdown("#### ⚖️ 網格再平衡 (1:1) vs 買進持有 (Buy & Hold) 歷史資產對比與手續費精算")
                 
                 gc_col1, gc_col2, gc_col3 = st.columns(3)
                 with gc_col1:
-                    sim_capital = st.number_input("💵 模擬初始投入本金 (元/$)", value=100000, step=10000, key="sim_cap_input")
+                    sim_capital = st.number_input("💵 模擬初始投入本金 (元/\$)", value=100000, step=10000, key="sim_cap_input")
                 with gc_col2:
                     fee_rate = st.number_input("💸 單邊交易手續費率 (%)", value=0.1425, step=0.01, format="%.4f", key="sim_fee_input") / 100.0
                 with gc_col3:
@@ -808,20 +841,17 @@ else:
                 closes_arr = df_chart['Close'].astype(float).to_numpy()
                 
                 if len(closes_arr) >= 5:
-                    # 1. 計算 Buy & Hold (買進持有)
                     initial_p = closes_arr[0]
                     bh_shares = (sim_capital * (1.0 - fee_rate)) / initial_p
                     bh_asset_curve = bh_shares * closes_arr
                     bh_final_val = float(bh_asset_curve[-1])
                     bh_total_ret = ((bh_final_val - sim_capital) / sim_capital) * 100.0
 
-                    # 2. 計算 1:1 固定比例網格再平衡 (帶入交易成本)
                     stock_val = sim_capital * 0.5 * (1.0 - fee_rate)
                     cash_val = sim_capital * 0.5
                     grid_shares = stock_val / initial_p
                     grid_asset_curve = []
                     
-                    # 模擬按波段/月再平衡 (每 20 個 K棒 節點試算一次再平衡)
                     rebalance_freq = max(1, len(closes_arr) // 20)
                     
                     for step_idx, p in enumerate(closes_arr):
@@ -832,11 +862,11 @@ else:
                             target_stock_val = total_val * 0.5
                             diff = target_stock_val - curr_stock_val
                             
-                            if diff > 0: # 現金買股票 (扣手續費)
+                            if diff > 0: 
                                 buy_amt = diff * (1.0 - fee_rate)
                                 cash_val -= diff
                                 grid_shares += buy_amt / p
-                            elif diff < 0: # 賣股票變現 (扣手續費與證交稅)
+                            elif diff < 0: 
                                 sell_amt = abs(diff) * (1.0 - fee_rate - tax_rate)
                                 cash_val += sell_amt
                                 grid_shares -= abs(diff) / p
@@ -846,14 +876,12 @@ else:
                     grid_final_val = float(grid_asset_curve[-1])
                     grid_total_ret = ((grid_final_val - sim_capital) / sim_capital) * 100.0
 
-                    # 計算年化報酬率 (CAGR) 與 最大回撤 (MDD)
                     total_bars = len(closes_arr)
                     years_est = max(0.1, total_bars / 252.0) if "1日" in selected_tf else max(0.1, total_bars / 52.0)
                     
                     bh_cagr = ((bh_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if bh_final_val > 0 else -100.0
                     grid_cagr = ((grid_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if grid_final_val > 0 else -100.0
 
-                    # MDD 計算
                     def calc_mdd(curve):
                         arr = np.array(curve)
                         peak = np.maximum.accumulate(arr)
@@ -863,7 +891,6 @@ else:
                     bh_mdd = calc_mdd(bh_asset_curve)
                     grid_mdd = calc_mdd(grid_asset_curve)
 
-                    # 指標展示卡片
                     m1, m2, m3, m4 = st.columns(4)
                     with m1:
                         st.metric("持有策略 最終總資產", f"{bh_final_val:,.0f} 元", delta=f"總報酬 {bh_total_ret:+.2f}%")
@@ -874,7 +901,6 @@ else:
                     with m4:
                         st.metric("MDD 最大回撤 (買進 vs 網格)", f"{bh_mdd:.1f}% / {grid_mdd:.1f}%", delta="風險控制較佳" if abs(grid_mdd) < abs(bh_mdd) else "波動較大")
 
-                    # 圖表對比
                     fig_compare = go.Figure()
                     fig_compare.add_trace(go.Scatter(x=date_strings, y=bh_asset_curve, mode='lines', name='單純買進持有 (Buy & Hold)', line=dict(color='#00CC66', width=2)))
                     fig_compare.add_trace(go.Scatter(x=date_strings, y=grid_asset_curve, mode='lines', name='1:1 固定比例網格再平衡', line=dict(color='#FF9900', width=2, dash='dash')))
@@ -889,7 +915,6 @@ else:
 
                 st.markdown("---")
 
-                # --- 第二區塊：全指標多空量化策略與動態停損回測選單 ---
                 st.markdown("#### 🧪 技術指標多空策略與動態停損回測器")
                 bt_col1, bt_col2 = st.columns(2)
                 
