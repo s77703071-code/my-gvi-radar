@@ -1010,9 +1010,9 @@ else:
             # 【Tab 4: 3.12 「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
             # ==============================================================================
             with tab4:
-                st.markdown(f"### 🧪 【{c_name}】策略回測與「網格再平衡 vs 買進持有」歷史對比 (3.12 版)")
+                st.markdown(f"### 🧪 【{c_name}】策略回測與「動態網格 vs 買進持有」歷史對比 (3.12 版)")
                 
-                st.markdown("#### ⚖️ 網格再平衡 (1:1) vs 買進持有 (Buy & Hold) 歷史資產對比與手續費精算")
+                st.markdown("#### ⚖️ 網格三大核心策略 vs 買進持有 (Buy & Hold) 歷史資產對比與手續費精算")
                 
                 gc_col1, gc_col2, gc_col3 = st.columns(3)
                 with gc_col1:
@@ -1021,6 +1021,16 @@ else:
                     fee_rate = st.number_input("💸 單邊交易手續費率 (%)", value=0.1425, step=0.01, format="%.4f", key="sim_fee_input") / 100.0
                 with gc_col3:
                     tax_rate = st.number_input("🏛️ 賣出證券交易稅率 (%)", value=0.3000, step=0.05, format="%.4f", key="sim_tax_input") / 100.0
+
+                g_opt1, g_opt2 = st.columns(2)
+                with g_opt1:
+                    grid_sim_strategy = st.selectbox(
+                        "🎯 選擇網格模擬核心策略機制",
+                        options=["1. 固定比例再平衡 (1:1)", "2. 固定股數交易 (每次買賣初始部位 10%)", "3. 庫存百分比管理 (每次買賣現有庫存 10%)"],
+                        key="sim_grid_strat_select"
+                    )
+                with g_opt2:
+                    trigger_pct = st.number_input("📉 網格觸發間距 (%)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="sim_grid_trigger") / 100.0
 
                 closes_arr = df_chart['Close'].astype(float).to_numpy()
                 
@@ -1036,24 +1046,53 @@ else:
                     grid_shares = stock_val / initial_p
                     grid_asset_curve = []
                     
-                    rebalance_freq = max(1, len(closes_arr) // 20)
+                    last_trade_p = initial_p
+                    fixed_trade_shares = grid_shares * 0.1 # 策略2：固定交易初始持股的 10%
                     
                     for step_idx, p in enumerate(closes_arr):
                         curr_stock_val = grid_shares * p
                         total_val = curr_stock_val + cash_val
                         
-                        if step_idx % rebalance_freq == 0 and step_idx > 0:
-                            target_stock_val = total_val * 0.5
-                            diff = target_stock_val - curr_stock_val
-                            
-                            if diff > 0: 
-                                buy_amt = diff * (1.0 - fee_rate)
-                                cash_val -= diff
-                                grid_shares += buy_amt / p
-                            elif diff < 0: 
-                                sell_amt = abs(diff) * (1.0 - fee_rate - tax_rate)
-                                cash_val += sell_amt
-                                grid_shares -= abs(diff) / p
+                        # 網格價格波動觸發邏輯
+                        if p >= last_trade_p * (1.0 + trigger_pct) or p <= last_trade_p * (1.0 - trigger_pct):
+                            if "固定比例" in grid_sim_strategy:
+                                target_stock_val = total_val * 0.5
+                                diff = target_stock_val - curr_stock_val
+                                
+                                if diff > 0 and cash_val >= diff: # 買進
+                                    buy_amt = diff * (1.0 - fee_rate)
+                                    cash_val -= diff
+                                    grid_shares += buy_amt / p
+                                elif diff < 0 and grid_shares >= abs(diff)/p: # 賣出
+                                    sell_amt = abs(diff) * (1.0 - fee_rate - tax_rate)
+                                    cash_val += sell_amt
+                                    grid_shares -= abs(diff) / p
+                                    
+                            elif "固定股數" in grid_sim_strategy:
+                                trade_val = fixed_trade_shares * p
+                                if p >= last_trade_p * (1.0 + trigger_pct): # 上漲賣出
+                                    if grid_shares >= fixed_trade_shares:
+                                        cash_val += trade_val * (1.0 - fee_rate - tax_rate)
+                                        grid_shares -= fixed_trade_shares
+                                elif p <= last_trade_p * (1.0 - trigger_pct): # 下跌買進
+                                    if cash_val >= trade_val:
+                                        cash_val -= trade_val
+                                        grid_shares += (trade_val * (1.0 - fee_rate)) / p
+                                        
+                            elif "庫存百分比" in grid_sim_strategy:
+                                if p >= last_trade_p * (1.0 + trigger_pct): # 上漲賣出現有 10%
+                                    sell_shares = grid_shares * 0.1
+                                    if sell_shares > 0:
+                                        trade_val = sell_shares * p
+                                        cash_val += trade_val * (1.0 - fee_rate - tax_rate)
+                                        grid_shares -= sell_shares
+                                elif p <= last_trade_p * (1.0 - trigger_pct): # 下跌動用現金 10% 買進
+                                    use_cash = cash_val * 0.1
+                                    if use_cash > 0:
+                                        cash_val -= use_cash
+                                        grid_shares += (use_cash * (1.0 - fee_rate)) / p
+                                        
+                            last_trade_p = p # 更新最新交易參考價
                                 
                         grid_asset_curve.append(grid_shares * p + cash_val)
 
@@ -1079,17 +1118,19 @@ else:
                     with m1:
                         st.metric("持有策略 最終總資產", f"{bh_final_val:,.0f} 元", delta=f"總報酬 {bh_total_ret:+.2f}%")
                     with m2:
-                        st.metric("網格再平衡 最終總資產", f"{grid_final_val:,.0f} 元", delta=f"總報酬 {grid_total_ret:+.2f}%")
+                        st.metric("選定網格 最終總資產", f"{grid_final_val:,.0f} 元", delta=f"總報酬 {grid_total_ret:+.2f}%")
                     with m3:
-                        st.metric("CAGR 年化報酬率 (買進 vs 網格)", f"{bh_cagr:+.1f}% / {grid_cagr:+.1f}%")
+                        st.metric("CAGR 年化報酬 (買進 vs 網格)", f"{bh_cagr:+.1f}% / {grid_cagr:+.1f}%")
                     with m4:
                         st.metric("MDD 最大回撤 (買進 vs 網格)", f"{bh_mdd:.1f}% / {grid_mdd:.1f}%", delta="風險控制較佳" if abs(grid_mdd) < abs(bh_mdd) else "波動較大")
 
+                    strat_display_name = grid_sim_strategy.split(" ")[1]
+
                     fig_compare = go.Figure()
                     fig_compare.add_trace(go.Scatter(x=date_strings, y=bh_asset_curve, mode='lines', name='單純買進持有 (Buy & Hold)', line=dict(color='#00CC66', width=2)))
-                    fig_compare.add_trace(go.Scatter(x=date_strings, y=grid_asset_curve, mode='lines', name='1:1 固定比例網格再平衡', line=dict(color='#FF9900', width=2, dash='dash')))
+                    fig_compare.add_trace(go.Scatter(x=date_strings, y=grid_asset_curve, mode='lines', name=strat_display_name, line=dict(color='#FF9900', width=2, dash='dash')))
                     fig_compare.update_layout(
-                        title=f"📈 【{c_name}】歷史走勢下，網格再平衡 vs 買進持有之資產資產增長曲線 (扣除交易稅費)",
+                        title=f"📈 【{c_name}】歷史走勢下，{strat_display_name} vs 買進持有之資產增長曲線 (扣除交易稅費)",
                         height=380,
                         xaxis=dict(type='category', showgrid=True, gridcolor="rgba(128,128,128,0.2)", nticks=12),
                         yaxis=dict(title="資產總價值 (元)", showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
