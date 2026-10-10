@@ -1024,11 +1024,85 @@ st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wid
 # 📱 行動端手機螢幕顯示優化 CSS
 st.markdown("""
     <style>
-        .block-container { padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
+        .block-container { width: 100%; max-width: 100%; padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
         .js-plotly-plot .plotly .main-svg { border-radius: 8px; }
         @media (max-width: 768px) {
-            .stMetric { padding: 4px !important; }
-            .block-container { padding-top: 1rem !important; }
+            .block-container {
+                padding: 0.75rem 0.65rem 4rem !important;
+            }
+            h1 { font-size: 1.55rem !important; line-height: 1.25 !important; }
+            h2 { font-size: 1.3rem !important; line-height: 1.3 !important; }
+            h3 { font-size: 1.1rem !important; line-height: 1.35 !important; }
+            .stMetric { padding: 0.45rem !important; }
+            [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
+
+            /* Keep multi-column panels readable; use two columns, then one on very small phones. */
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                gap: 0.55rem !important;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex: 1 1 calc(50% - 0.55rem) !important;
+                width: calc(50% - 0.55rem) !important;
+                min-width: calc(50% - 0.55rem) !important;
+            }
+
+            /* The nine main tabs remain in one row and can be swiped horizontally. */
+            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+                display: flex !important;
+                flex-wrap: nowrap !important;
+                gap: 0.2rem !important;
+                overflow-x: auto !important;
+                overflow-y: hidden !important;
+                white-space: nowrap !important;
+                -webkit-overflow-scrolling: touch;
+                scroll-snap-type: x proximity;
+                scrollbar-width: thin;
+                touch-action: pan-x;
+            }
+            div[data-testid="stTabs"] button[role="tab"] {
+                flex: 0 0 auto !important;
+                min-height: 44px !important;
+                padding: 0.5rem 0.7rem !important;
+                font-size: 0.86rem !important;
+                white-space: nowrap !important;
+                scroll-snap-align: start;
+                touch-action: manipulation;
+            }
+
+            /* Larger controls are easier to tap, and 16px inputs avoid mobile browser zoom. */
+            div[data-testid="stButton"] button,
+            div[data-testid="stDownloadButton"] button,
+            div[data-testid="stFormSubmitButton"] button {
+                min-height: 44px !important;
+                width: 100% !important;
+                touch-action: manipulation;
+            }
+            input, textarea,
+            div[data-baseweb="select"] > div {
+                min-height: 44px !important;
+                font-size: 16px !important;
+            }
+            div[data-testid="stRadio"] [role="radiogroup"] {
+                flex-wrap: wrap !important;
+                gap: 0.35rem 0.75rem !important;
+            }
+            div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+                max-width: 100% !important;
+            }
+            .js-plotly-plot { max-width: 100% !important; }
+            .modebar-btn { min-width: 32px !important; min-height: 32px !important; }
+        }
+        @media (max-width: 420px) {
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex-basis: 100% !important;
+                width: 100% !important;
+                min-width: 100% !important;
+            }
+            div[data-testid="stTabs"] button[role="tab"] {
+                padding: 0.45rem 0.58rem !important;
+                font-size: 0.8rem !important;
+            }
         }
     </style>
 """, unsafe_allow_html=True)
