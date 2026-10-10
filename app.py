@@ -1913,6 +1913,16 @@ def signature_save_to_db(t):
     except Exception as e:
         st.error(f"❌ 數據寫入資料庫失敗 [{t}]: {e}")
 
+def _format_optional_cell(value, format_string):
+    """Format a numeric table cell without failing when the result is missing."""
+    try:
+        if value is None or pd.isna(value):
+            return "—"
+        return format_string.format(value)
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+
+
 def _normalize_ma_cross_pairs(pairs):
     """Return unique (fast, slow) periods where the fast average is shorter."""
     normalized = []
@@ -3625,17 +3635,27 @@ else:
                             comparison_rows.append({
                                 "做法": "網格（依比較頁設定）",
                                 "整段期間損益(%)": grid_advice_metrics["cumulative_return"] * 100,
-                                "平均每年報酬(%)": grid_advice_metrics["cagr"] * 100,
+                                "平均每年報酬(%)": grid_advice_metrics["cagr"] * 100 if grid_advice_metrics.get("cagr") is not None else None,
                                 "從高點算起最大跌幅(%)": grid_advice_metrics["mdd"] * 100,
                                 "資金起伏幅度(年化 %)": None,
                                 "起伏下的報酬參考值": None,
                                 "結束時資產(元)": float(bt_initial_capital) * (1.0 + grid_advice_metrics["cumulative_return"]),
                             })
                         comparison = pd.DataFrame(comparison_rows)
-                        st.dataframe(comparison.style.format({
-                            "整段期間損益(%)": "{:+.2f}%", "平均每年報酬(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%",
-                            "資金起伏幅度(年化 %)": "{:.2f}%", "起伏下的報酬參考值": "{:.2f}", "結束時資產(元)": "{:,.0f}",
-                        }), use_container_width=True, hide_index=True)
+                        comparison_formats = {
+                            "整段期間損益(%)": "{:+.2f}%",
+                            "平均每年報酬(%)": "{:+.2f}%",
+                            "從高點算起最大跌幅(%)": "{:.2f}%",
+                            "資金起伏幅度(年化 %)": "{:.2f}%",
+                            "起伏下的報酬參考值": "{:.2f}",
+                            "結束時資產(元)": "{:,.0f}",
+                        }
+                        comparison_formatters = {
+                            column: (lambda value, spec=spec: _format_optional_cell(value, spec))
+                            for column, spec in comparison_formats.items()
+                        }
+                        st.dataframe(comparison.style.format(comparison_formatters, na_rep="—"),
+                                     use_container_width=True, hide_index=True)
                         st.caption("策略與買進持有使用相同本金、期間和回測成本。定期定額把相同總預算分次投入，並將期末賣出成本計入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。網格報酬與最大跌幅沿用網格比較頁設定，期末資產按回測本金等比例換算；請確認期間與成本相同再比較。股息未計入。")
                         if selected_tf in ("1分鐘", "5分鐘", "30分鐘", "60分鐘"):
                             st.info("目前資料是短線週期，涵蓋時間不足以代表長期月扣款；定期定額只在資料涵蓋月份的第一筆價格投入。")
@@ -3720,9 +3740,18 @@ else:
                                         })
                             if period_rows:
                                 st.markdown("#### 較早資料和較晚資料的結果比較")
-                                st.dataframe(pd.DataFrame(period_rows).style.format({
-                                    "整段期間損益(%)": "{:+.2f}%", "平均每年報酬(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%", "賺錢交易比例": "{:.1%}",
-                                }), use_container_width=True, hide_index=True)
+                                period_formats = {
+                                    "整段期間損益(%)": "{:+.2f}%",
+                                    "平均每年報酬(%)": "{:+.2f}%",
+                                    "從高點算起最大跌幅(%)": "{:.2f}%",
+                                    "賺錢交易比例": "{:.1%}",
+                                }
+                                period_formatters = {
+                                    column: (lambda value, spec=spec: _format_optional_cell(value, spec))
+                                    for column, spec in period_formats.items()
+                                }
+                                st.dataframe(pd.DataFrame(period_rows).style.format(period_formatters, na_rep="—"),
+                                             use_container_width=True, hide_index=True)
                                 st.caption(f"以 {df_calc.index[split_index]:%Y-%m-%d} 分成前後兩段，各段從相同本金重新計算；跨過分界日的交易不列入。表中的損益、最大跌幅、交易筆數和賺錢比例，分別表示整體賺賠、曾經最深跌幅、買賣次數和賺錢交易占比。後段用來看看同一套設定在較晚資料的表現，但設定沒有另外調整，因此不代表未來一定能維持相同結果。")
 
                         dca_advice_metrics = backtest_dca_result["metrics"] if backtest_dca_result is not None else None
@@ -3918,11 +3947,21 @@ else:
                     "buy_hold_pct": "長期持有(%)", "dca_pct": "定期定額(%)", "grid_pct": "網格(%)",
                     "oos_pct": "較晚期間(%)", "profit_factor": "賺賠金額比", "status": "操盤手提示", "advice": "建議摘要",
                 })
-                st.dataframe(coach_view.style.format({
-                    "勝率(%)": "{:.1f}%", "整段報酬(%)": "{:+.2f}%", "長期持有(%)": "{:+.2f}%",
-                    "定期定額(%)": "{:+.2f}%", "網格(%)": "{:+.2f}%", "較晚期間(%)": "{:+.2f}%",
+                coach_formats = {
+                    "勝率(%)": "{:.1f}%",
+                    "整段報酬(%)": "{:+.2f}%",
+                    "長期持有(%)": "{:+.2f}%",
+                    "定期定額(%)": "{:+.2f}%",
+                    "網格(%)": "{:+.2f}%",
+                    "較晚期間(%)": "{:+.2f}%",
                     "賺賠金額比": "{:.2f}",
-                }, na_rep="—"), use_container_width=True, hide_index=True)
+                }
+                coach_formatters = {
+                    column: (lambda value, spec=spec: _format_optional_cell(value, spec))
+                    for column, spec in coach_formats.items()
+                }
+                st.dataframe(coach_view.style.format(coach_formatters, na_rep="—"),
+                             use_container_width=True, hide_index=True)
             else:
                 st.caption("目前觀察代碼中尚無技術指標回測紀錄；請先在回測頁執行條件測試。")
         else:
