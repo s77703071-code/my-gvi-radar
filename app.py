@@ -1,12 +1,13 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.8 下拉選單與全指標量化回測版】 - app.py
+# 【機構級三核心策略雷達 3.9 TradingView 畫線圖表與全指標回測版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
+import streamlit.components.v1 as components
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.8", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.9", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -231,7 +232,6 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
     bb_std = df_calc['Close'].rolling(window=bb_p).std()
     df_calc['BB_Upper'] = bb_middle + (bb_std * 2)
     df_calc['BB_Lower'] = bb_middle - (bb_std * 2)
-    df_calc['BB_Middle'] = bb_middle
 
     return df_calc
 
@@ -262,33 +262,27 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
         if not position:
             buy_checks = []
             
-            # 1. 均線進場
             if entry_conds['ma_mode'] == '突破均線':
                 buy_checks.append(not np.isnan(ma_entry[i-1]) and closes[i-1] <= ma_entry[i-1] and closes[i] > ma_entry[i])
             elif entry_conds['ma_mode'] == '站穩均線上':
                 buy_checks.append(not np.isnan(ma_entry[i]) and closes[i] > ma_entry[i])
 
-            # 2. KD 進場
             if entry_conds['kd_mode'] == '黃金交叉':
                 buy_checks.append(k_arr[i-1] <= d_arr[i-1] and k_arr[i] > d_arr[i])
 
-            # 3. MACD 進場
             if entry_conds['macd_mode'] == '黃金交叉':
                 buy_checks.append(dif_arr[i-1] <= dem_arr[i-1] and dif_arr[i] > dem_arr[i])
 
-            # 4. 成交量進場
             if entry_conds['vol_mode'] == '爆量 (大於20日均量1.5倍)':
                 buy_checks.append(not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 1.5)
             elif entry_conds['vol_mode'] == '爆量 (大於20日均量2.0倍)':
                 buy_checks.append(not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 2.0)
 
-            # 5. RSI 進場
             if entry_conds['rsi_mode'] == '超賣回升 (RSI向上突破30)':
                 buy_checks.append(rsi_arr[i-1] <= 30 and rsi_arr[i] > 30)
             elif entry_conds['rsi_mode'] == '強勢突破 (RSI向上突破50)':
                 buy_checks.append(rsi_arr[i-1] <= 50 and rsi_arr[i] > 50)
 
-            # 6. 布林通道進場
             if entry_conds['bb_mode'] == '突破布林上軌':
                 buy_checks.append(closes[i-1] <= bb_upper[i-1] and closes[i] > bb_upper[i])
             elif entry_conds['bb_mode'] == '觸及布林下軌反彈':
@@ -303,7 +297,6 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
             highest_price = max(highest_price, float(highs[i]))
             exit_reasons = []
 
-            # 固定停損與移動停利
             if exit_conds['stop_loss_pct'] > 0:
                 sl_price = entry_price * (1.0 - exit_conds['stop_loss_pct'] / 100.0)
                 if lows[i] <= sl_price or closes[i] <= sl_price:
@@ -314,32 +307,26 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                 if lows[i] <= trail_price or closes[i] <= trail_price:
                     exit_reasons.append(f"最高點回撤 (-{exit_conds['trailing_stop_pct']}%)")
 
-            # 1. 均線離場
             if exit_conds['ma_mode'] == '跌破均線' and not np.isnan(ma_exit[i-1]):
                 if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
                     exit_reasons.append(f"跌破 MA{exit_conds['ma_p']}")
 
-            # 2. KD 離場
             if exit_conds['kd_mode'] == '死亡交叉':
                 if k_arr[i-1] >= d_arr[i-1] and k_arr[i] < d_arr[i]:
                     exit_reasons.append("KD 死亡交叉")
 
-            # 3. MACD 離場
             if exit_conds['macd_mode'] == '死亡交叉':
                 if dif_arr[i-1] >= dem_arr[i-1] and dif_arr[i] < dem_arr[i]:
                     exit_reasons.append("MACD 死亡交叉")
 
-            # 4. 成交量離場
             if exit_conds['vol_mode'] == '極端爆量倒貨 (大於20日均量2.5倍)':
                 if not np.isnan(vol_ma20[i]) and vols[i] >= vol_ma20[i] * 2.5:
                     exit_reasons.append("觸發極端爆量離場")
 
-            # 5. RSI 離場
             if exit_conds['rsi_mode'] == '超買警戒 (RSI跌破70)':
                 if rsi_arr[i-1] >= 70 and rsi_arr[i] < 70:
                     exit_reasons.append("RSI 70 死亡交叉離場")
 
-            # 6. 布林通道離場
             if exit_conds['bb_mode'] == '跌破布林下軌':
                 if closes[i-1] >= bb_lower[i-1] and closes[i] < bb_lower[i]:
                     exit_reasons.append("跌破布林下軌離場")
@@ -376,7 +363,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.8（下拉選單與全指標量化回測版）")
+    st.title("📈 機構級三核心策略雷達 3.9（TradingView 畫線圖表版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -428,20 +415,6 @@ else:
         "1季": {"p": "max", "i": "3mo"}, "半年": {"p": "max", "i": "3mo"}, "1年": {"p": "max", "i": "3mo"}
     }
     cfg = tf_mapping[selected_tf]
-
-    with st.sidebar.expander("🛠️ 均線指標快速視窗設定", expanded=True):
-        preset_ma = st.selectbox("📊 選擇均線快捷套組", options=["標準視窗 (5日 / 10日 / 20日)", "極短線 (3日 / 5日 / 10日)", "波段趨勢 (20日 / 60日 / 120日)", "自訂均線配置"], index=0)
-        default_days = [5, 10, 20, 60, 240] if preset_ma == "標準視窗 (5日 / 10日 / 20日)" else ([3, 5, 10, 20, 60] if preset_ma == "極短線 (3日 / 5日 / 10日)" else [20, 60, 120, 240, 500])
-        default_actives = [True, True, True, False, False]
-        personal_ma_configs = []
-        default_colors = ["#FF5733", "#33FF57", "#3357FF", "#F3FF33", "#FF33F3"]
-
-        for i in range(1, 6):
-            col_show, col_p, col_c = st.columns([0.8, 1.4, 0.8])
-            with col_show: is_active = st.checkbox(f"MA{i}", value=default_actives[i-1], key=f"ma_active_{i}")
-            with col_p: ma_p = st.number_input(f"天數{i}", min_value=1, max_value=500, value=int(default_days[i-1]), label_visibility="collapsed", key=f"personal_ma_p_{i}")
-            with col_c: ma_c = str(st.color_picker(f"C{i}", value=default_colors[i-1], label_visibility="collapsed", key=f"personal_ma_c_{i}"))
-            if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
     AUTO_TW_UNIVERSE = [
         '2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', 
@@ -653,40 +626,55 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 TradingView 全功能圖表", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
             
+            # ==============================================================================
+            # 【Tab 1: 方案一嵌入 TradingView 官方 Advanced Chart (含左側全功能畫線工具欄)】
+            # ==============================================================================
             with tab1:
-                ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
-                for ma in personal_ma_configs:
-                    p, c = ma["period"], ma["color"]
-                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                    if not ma_series.empty:
-                        latest_ma_val = ma_series.to_numpy().flatten()[-1]
-                        ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:12px;'>■ {p}日均線: {latest_ma_val:,.2f}</span>"
-                ma_display_html += "</div>"
+                st.markdown(f"### 📊 【{c_name}】TradingView 全功能畫線與技術分析圖表")
                 
-                st.markdown(f"### 📊 【{c_name}】{selected_tf} K線視窗 {ma_display_html}", unsafe_allow_html=True)
-                
-                fig = make_subplots(rows=1, cols=1)
-                fig.add_trace(go.Candlestick(
-                    x=date_strings, 
-                    open=df_chart['Open'].to_numpy().flatten().tolist(), 
-                    high=df_chart['High'].to_numpy().flatten().tolist(), 
-                    low=df_chart['Low'].to_numpy().flatten().tolist(), 
-                    close=df_chart['Close'].to_numpy().flatten().tolist(), 
-                    name="K線",
-                    hovertext=[f"日期：{d}" for d in date_strings]
-                ), row=1, col=1)
-                
-                for ma in personal_ma_configs:
-                    p, c = ma["period"], ma["color"]
-                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                    if not ma_series.empty:
-                        ma_list = ma_series.to_numpy().flatten().tolist()
-                        fig.add_trace(go.Scatter(x=date_strings[-len(ma_list):], y=ma_list, mode='lines', name=f'{p}日均線 (MA{p})', line=dict(color=c, width=1.8)), row=1, col=1)
-                
-                fig.update_layout(xaxis_rangeslider_visible=False, height=580, margin=dict(l=10, r=40, t=10, b=10), dragmode='pan', showlegend=True, xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"), yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"))
-                st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'drawrect', 'drawcircle', 'eraseshape'], 'displayModeBar': True, 'scrollZoom': True})
+                # 自動轉換交易代碼符合 TradingView 的格式 (例如: 2330.TW -> TWSE:2330, 3293.TWO -> TPEX:3293)
+                tv_symbol = selected_stock
+                if ".TW" in selected_stock:
+                    tv_symbol = f"TWSE:{selected_stock.replace('.TW', '')}"
+                elif ".TWO" in selected_stock:
+                    tv_symbol = f"TPEX:{selected_stock.replace('.TWO', '')}"
+                elif selected_stock in ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'NFLX', 'INTC']:
+                    tv_symbol = f"NASDAQ:{selected_stock}"
+                else:
+                    tv_symbol = selected_stock
+
+                tv_widget_code = f"""
+                <!-- TradingView Widget BEGIN -->
+                <div class="tradingview-widget-container" style="height:650px;width:100%;">
+                  <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%;"></div>
+                  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+                  <script type="text/javascript">
+                  new TradingView.widget(
+                  {{
+                  "autosize": true,
+                  "symbol": "{tv_symbol}",
+                  "interval": "D",
+                  "timezone": "Asia/Taipei",
+                  "theme": "dark",
+                  "style": "1",
+                  "locale": "zh_TW",
+                  "toolbar_bg": "#f1f3f6",
+                  "enable_publishing": false,
+                  "hide_side_toolbar": false,
+                  "allow_symbol_change": true,
+                  "details": true,
+                  "hotlist": true,
+                  "calendar": true,
+                  "container_id": "tradingview_chart"
+                }}
+                  );
+                  </script>
+                </div>
+                <!-- TradingView Widget END -->
+                """
+                components.html(tv_widget_code, height=660)
             
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
@@ -768,9 +756,6 @@ else:
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
 
-            # ==============================================================================
-            # 【Tab 4: 升級版 3.8 全指標下拉式選單量化回測器】
-            # ==============================================================================
             with tab4:
                 st.markdown(f"### 🧪 【{c_name}】全指標多空量化策略與動態停損回測器 (3.8 版)")
                 
