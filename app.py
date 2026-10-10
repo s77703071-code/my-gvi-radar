@@ -973,10 +973,9 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
     """Render an additive, independent dividend strategy panel."""
     st.markdown("### 💸 配息複利投資策略（獨立模組）")
     st.caption("配息評分獨立計算，不讀寫原系統的 GVI、動能、QARP 或綜合評分。殖利率是近 12 個月現金股利／現價；股利發放率以近 12 個月股利與最新可得 EPS 估算。總報酬將價格變化與股息再投入分開處理。")
-    mode = st.radio("策略檢視模式", ["只使用原有策略", "只使用配息策略", "比較策略"], horizontal=True, key="dividend_strategy_mode")
-    if mode == "只使用原有策略":
-        st.info("目前檢視原有選股策略；此配息模組不會改寫或執行原有評分。原有策略表格仍在本頁下方原位置顯示。")
-        return
+    if st.session_state.get("dividend_strategy_mode") == "只使用原有策略":
+        st.session_state["dividend_strategy_mode"] = "只使用配息策略"
+    mode = st.radio("策略檢視模式", ["只使用配息策略", "比較策略"], index=0, horizontal=True, key="dividend_strategy_mode")
     raw = st.text_input("配息策略觀察名單（最多 50 檔，逗號分隔）", value=default_ticker, key="dividend_universe")
     tickers = list(dict.fromkeys(x.strip().upper() for x in raw.split(",") if x.strip()))[:50]
     if not tickers:
@@ -1614,6 +1613,7 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
     position = False
     entry_price = 0.0
     entry_date = ""
+    entry_index = None
     highest_price = 0.0
 
     closes = df_calc['Close'].to_numpy()
@@ -1666,6 +1666,7 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                 position = True
                 entry_price = float(closes[i])
                 entry_date = date_chinese_list[i]
+                entry_index = i
                 highest_price = float(highs[i])
         else:
             highest_price = max(highest_price, float(highs[i]))
@@ -1718,11 +1719,204 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list):
                     '賣出日期': exit_date,
                     '賣出價格 (元)': round(exit_price, 2),
                     '平倉報酬率 (%)': round(pnl_pct, 2),
-                    '離場觸發原因': " | ".join(exit_reasons)
+                    '離場觸發原因': " | ".join(exit_reasons),
+                    '持有K棒數': max(0, i - entry_index),
+                    '_entry_index': entry_index,
+                    '_exit_index': i,
                 })
                 position = False
 
+    # Include a still-open position at the final close so the reported result
+    # and exposure do not silently omit its unrealized gain or loss.
+    if position and len(df_calc) > 0 and entry_index is not None:
+        exit_index = len(df_calc) - 1
+        exit_price = float(closes[exit_index])
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0 if entry_price else 0.0
+        trades.append({
+            '買進日期': entry_date,
+            '買進價格 (元)': round(entry_price, 2),
+            '賣出日期': date_chinese_list[exit_index],
+            '賣出價格 (元)': round(exit_price, 2),
+            '平倉報酬率 (%)': round(pnl_pct, 2),
+            '離場觸發原因': '期末未平倉（以最後收盤價估值）',
+            '持有K棒數': max(0, exit_index - entry_index),
+            '_entry_index': entry_index,
+            '_exit_index': exit_index,
+        })
+
     return pd.DataFrame(trades)
+
+
+def _annualization_bars(timeframe_name, is_taiwan_stock):
+    session_minutes = 270 if is_taiwan_stock else 390
+    mapping = {
+        "1分鐘": 252 * session_minutes,
+        "5分鐘": 252 * (session_minutes // 5),
+        "30分鐘": 252 * (session_minutes // 30),
+        "60分鐘": 252 * (session_minutes // 60),
+        "1日": 252,
+        "1週": 52,
+        "1個月": 12,
+        # The current data mapping fetches quarterly bars for these choices.
+        "1季": 4,
+        "半年": 2,
+        "1年": 1,
+    }
+    return mapping.get(timeframe_name, 252)
+
+
+def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
+                               sell_tax_pct, slippage_pct, timeframe_name,
+                               is_taiwan_stock):
+    """Build a marked-to-market equity curve and comparable buy-and-hold metrics."""
+    if df_calc is None or df_calc.empty or 'Close' not in df_calc.columns:
+        return None
+
+    close = pd.to_numeric(df_calc['Close'], errors='coerce').astype(float)
+    close = close.replace([np.inf, -np.inf], np.nan)
+    if close.isna().any() or len(close) < 2 or (close <= 0).any():
+        return None
+
+    n = len(close)
+    price = close.to_numpy()
+    entry_fee_factor = max(0.0, 1.0 - (float(commission_pct) + float(slippage_pct)) / 100.0)
+    exit_fee_factor = max(0.0, 1.0 - (float(commission_pct) + float(sell_tax_pct) + float(slippage_pct)) / 100.0)
+    strategy_factors = np.ones(n, dtype=float)
+    in_market = np.zeros(n, dtype=bool)
+    trade_rows = []
+
+    if trades is not None and not trades.empty:
+        ordered = trades.sort_values('_entry_index') if '_entry_index' in trades.columns else trades
+        for _, trade in ordered.iterrows():
+            if '_entry_index' not in trade or '_exit_index' not in trade:
+                continue
+            entry_i, exit_i = int(trade['_entry_index']), int(trade['_exit_index'])
+            if not (0 <= entry_i < n and entry_i <= exit_i < n):
+                continue
+            strategy_factors[entry_i] *= entry_fee_factor
+            for i in range(entry_i + 1, exit_i + 1):
+                strategy_factors[i] *= price[i] / price[i - 1]
+            strategy_factors[exit_i] *= exit_fee_factor
+            in_market[entry_i:exit_i + 1] = True
+            gross_ratio = price[exit_i] / price[entry_i]
+            net_return = entry_fee_factor * gross_ratio * exit_fee_factor - 1.0
+            trade_rows.append({
+                '買進日期': trade.get('買進日期'),
+                '賣出日期': trade.get('賣出日期'),
+                '成本後報酬率 (%)': net_return * 100.0,
+                '持有K棒數': max(0, exit_i - entry_i),
+            })
+
+    strategy_equity = pd.Series(float(initial_capital) * np.cumprod(strategy_factors), index=close.index, name='技術策略資產')
+    strategy_returns = strategy_equity.pct_change().dropna()
+    bars_per_year = _annualization_bars(timeframe_name, is_taiwan_stock)
+    span_years = max((close.index[-1] - close.index[0]).total_seconds() / (365.25 * 24 * 60 * 60), 0.0)
+
+    def summarize(equity, returns):
+        cumulative = float(equity.iloc[-1] / float(initial_capital) - 1.0)
+        drawdown = equity / equity.cummax() - 1.0
+        mdd = float(drawdown.min())
+        min_observations = min(20, max(2, int(round(bars_per_year * 0.5))))
+        enough_history = span_years >= 0.5 and len(returns) >= min_observations
+        cagr = float((equity.iloc[-1] / float(initial_capital)) ** (1.0 / span_years) - 1.0) if enough_history and span_years > 0 and equity.iloc[-1] > 0 else None
+        ann_vol = float(returns.std(ddof=1) * np.sqrt(bars_per_year)) if enough_history and len(returns) > 1 else None
+        sharpe = float(returns.mean() / returns.std(ddof=1) * np.sqrt(bars_per_year)) if enough_history and len(returns) > 1 and returns.std(ddof=1) > 0 else None
+        downside = np.minimum(returns.to_numpy(dtype=float), 0.0)
+        downside_dev = float(np.sqrt(np.mean(np.square(downside)))) if len(downside) else 0.0
+        sortino = float(returns.mean() / downside_dev * np.sqrt(bars_per_year)) if enough_history and downside_dev > 0 else None
+        calmar = float(cagr / abs(mdd)) if cagr is not None and mdd < 0 else None
+        underwater = drawdown.to_numpy() < 0
+        longest_underwater = run = 0
+        for below_peak in underwater:
+            run = run + 1 if below_peak else 0
+            longest_underwater = max(longest_underwater, run)
+        return {
+            'cumulative_return': cumulative, 'cagr': cagr, 'mdd': mdd,
+            'annualized_volatility': ann_vol, 'sharpe': sharpe,
+            'sortino': sortino, 'calmar': calmar,
+            'longest_drawdown_bars': longest_underwater,
+            'ending_value': float(equity.iloc[-1]), 'drawdown': drawdown,
+        }
+
+    strategy_metrics = summarize(strategy_equity, strategy_returns)
+    strategy_metrics['exposure'] = float(in_market.mean()) if n else 0.0
+
+    benchmark_factors = np.ones(n, dtype=float)
+    benchmark_factors[0] *= entry_fee_factor
+    for i in range(1, n):
+        benchmark_factors[i] *= price[i] / price[i - 1]
+    benchmark_factors[-1] *= exit_fee_factor
+    benchmark_equity = pd.Series(float(initial_capital) * np.cumprod(benchmark_factors), index=close.index, name='同標的買進持有')
+    benchmark_metrics = summarize(benchmark_equity, benchmark_equity.pct_change().dropna())
+
+    trade_frame = pd.DataFrame(trade_rows)
+    net_returns = trade_frame['成本後報酬率 (%)'] if not trade_frame.empty else pd.Series(dtype=float)
+    wins = net_returns[net_returns > 0]
+    losses = net_returns[net_returns < 0]
+    # Profit factor is computed from sequential compounded dollar P&L.
+    winning_amounts, losing_amounts = [], []
+    capital_before = float(initial_capital)
+    if not trade_frame.empty:
+        for trade_return in net_returns:
+            pnl_amount = capital_before * (float(trade_return) / 100.0)
+            if pnl_amount > 0:
+                winning_amounts.append(pnl_amount)
+            elif pnl_amount < 0:
+                losing_amounts.append(pnl_amount)
+            capital_before += pnl_amount
+    profit_factor = (sum(winning_amounts) / abs(sum(losing_amounts))) if losing_amounts else None
+    consecutive_losses = longest_loss_streak = 0
+    for value in net_returns:
+        if value < 0:
+            consecutive_losses += 1
+            longest_loss_streak = max(longest_loss_streak, consecutive_losses)
+        else:
+            consecutive_losses = 0
+    strategy_metrics.update({
+        'trade_count': int(len(net_returns)),
+        'win_rate': float((net_returns > 0).mean()) if len(net_returns) else None,
+        'profit_factor': float(profit_factor) if profit_factor is not None else None,
+        'expectancy_pct': float(net_returns.mean()) if len(net_returns) else None,
+        'average_win_pct': float(wins.mean()) if len(wins) else None,
+        'average_loss_pct': float(losses.mean()) if len(losses) else None,
+        'payoff_ratio': float(wins.mean() / abs(losses.mean())) if len(wins) and len(losses) and losses.mean() != 0 else None,
+        'average_holding_bars': float(trade_frame['持有K棒數'].mean()) if len(trade_frame) else None,
+        'longest_loss_streak': longest_loss_streak,
+    })
+
+    if timeframe_name == "1季":
+        period_key = close.index.to_period("Q")
+        period_label, period_count, period_type = "季報酬", 4, "quarter"
+    elif timeframe_name == "半年":
+        period_key = pd.MultiIndex.from_arrays([close.index.year, (close.index.month - 1) // 6 + 1])
+        period_label, period_count, period_type = "半年報酬", 2, "half_year"
+    elif timeframe_name == "1年":
+        period_key = close.index.to_period("Y")
+        period_label, period_count, period_type = "年報酬", 1, "year"
+    else:
+        period_key = close.index.to_period("M")
+        period_label, period_count, period_type = "月報酬", 12, "month"
+    last_positions = pd.Series(np.arange(n), index=close.index).groupby(period_key).last().to_numpy(dtype=int)
+    period_ends = strategy_equity.iloc[last_positions]
+    period_returns = period_ends.pct_change()
+    if len(period_returns):
+        period_returns.iloc[0] = period_ends.iloc[0] / float(initial_capital) - 1.0
+    period_returns.name = period_label
+    return {
+        'strategy_equity': strategy_equity,
+        'strategy_drawdown': strategy_metrics.pop('drawdown'),
+        'strategy_metrics': strategy_metrics,
+        'benchmark_equity': benchmark_equity,
+        'benchmark_drawdown': benchmark_metrics.pop('drawdown'),
+        'benchmark_metrics': benchmark_metrics,
+        'trade_analysis': trade_frame,
+        'period_returns': period_returns,
+        'period_label': period_label,
+        'period_count': period_count,
+        'period_type': period_type,
+        'span_years': span_years,
+        'bars_per_year': bars_per_year,
+    }
 
 # 🔐 管理員操盤密碼固定為 7770
 st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
@@ -2651,6 +2845,25 @@ else:
                     exit_rsi_mode = st.selectbox("5. RSI 離場策略", ["停用", "超買警戒 (RSI跌破70)"], index=0, key="bt_exit_rsi_sel")
                     exit_bb_mode = st.selectbox("6. 布林通道離場策略", ["停用", "跌破布林下軌", "觸及上軌拉回"], index=0, key="bt_exit_bb_sel")
 
+                with st.expander("💰 績效分析設定（本金與交易成本）", expanded=False):
+                    cost_cols = st.columns(4)
+                    with cost_cols[0]:
+                        bt_initial_capital = st.number_input("回測初始資金", min_value=1000, max_value=1000000000,
+                                                              value=100000, step=10000, key="bt_initial_capital")
+                    with cost_cols[1]:
+                        bt_commission_pct = st.number_input("手續費（每邊，%）", min_value=0.0, max_value=5.0,
+                                                            value=0.1425 if is_tw_stock else 0.0, step=0.01,
+                                                            format="%.4f", key="bt_commission_pct")
+                    with cost_cols[2]:
+                        bt_sell_tax_pct = st.number_input("賣出交易稅（%）", min_value=0.0, max_value=5.0,
+                                                          value=0.3 if is_tw_stock else 0.0, step=0.01,
+                                                          format="%.3f", key="bt_sell_tax_pct")
+                    with cost_cols[3]:
+                        bt_slippage_pct = st.number_input("滑價（每邊，%）", min_value=0.0, max_value=5.0,
+                                                          value=0.05, step=0.01, format="%.2f",
+                                                          key="bt_slippage_pct")
+                    st.caption("成本按每次買進／賣出分別估算；台股預設值可依券商折扣、標的與交易方式調整。")
+
                 if st.button(f"🚀 開始執行【{c_name}】全指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
                     entry_conds = {
                         'ma_mode': entry_ma_mode,
@@ -2677,11 +2890,212 @@ else:
                     
                     df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
                     df_trades = run_strategy_backtest(df_calc, entry_conds, exit_conds, date_strings)
+                    analysis = analyze_indicator_backtest(
+                        df_calc, df_trades, float(bt_initial_capital), float(bt_commission_pct),
+                        float(bt_sell_tax_pct), float(bt_slippage_pct), selected_tf, is_tw_stock)
 
-                    if not df_trades.empty:
-                        st.dataframe(df_trades, use_container_width=True)
+                    if df_trades.empty:
+                        st.info("此區間沒有進出場交易；仍顯示策略持有現金與同標的買進持有基準。")
                     else:
-                        st.warning("⚠️ 在選定區間內未有符合條件的完整交易紀錄。")
+                        trade_display = df_trades.drop(columns=["_entry_index", "_exit_index"], errors="ignore")
+                        if analysis is not None and not analysis["trade_analysis"].empty:
+                            trade_display = trade_display.copy()
+                            trade_display["成本後報酬率 (%)"] = analysis["trade_analysis"]["成本後報酬率 (%)"].round(2).to_numpy()
+                        st.markdown("#### 逐筆交易結果")
+                        st.dataframe(trade_display, use_container_width=True, hide_index=True)
+
+                    if analysis is None:
+                        st.warning("價格資料不足或含有無效價格，無法計算回測分析。")
+                    else:
+                        strategy_metrics = analysis["strategy_metrics"]
+                        benchmark_metrics = analysis["benchmark_metrics"]
+                        st.markdown("#### 回測績效與風險摘要")
+
+                        def show_pct(value, signed=False):
+                            if value is None or not np.isfinite(value):
+                                return "—"
+                            return f"{value:+.2%}" if signed else f"{value:.2%}"
+
+                        def show_number(value, digits=2):
+                            return "—" if value is None or not np.isfinite(value) else f"{value:.{digits}f}"
+
+                        def show_percent_points(value):
+                            return "—" if value is None or not np.isfinite(value) else f"{value:+.2f}%"
+
+                        metric_row1 = st.columns(4)
+                        excess_return = strategy_metrics["cumulative_return"] - benchmark_metrics["cumulative_return"]
+                        metric_row1[0].metric("策略累積報酬（成本後）", show_pct(strategy_metrics["cumulative_return"], True),
+                                              delta=f"相對基準 {excess_return:+.2%}")
+                        metric_row1[1].metric("策略 CAGR", show_pct(strategy_metrics["cagr"], True))
+                        metric_row1[2].metric("最大回撤 MDD", show_pct(strategy_metrics["mdd"]))
+                        metric_row1[3].metric("Sharpe（無風險利率 0%）", show_number(strategy_metrics["sharpe"]))
+                        metric_row2 = st.columns(4)
+                        metric_row2[0].metric("Sortino", show_number(strategy_metrics["sortino"]))
+                        metric_row2[1].metric("勝率", show_pct(strategy_metrics["win_rate"]))
+                        metric_row2[2].metric("Profit Factor", show_number(strategy_metrics["profit_factor"]))
+                        metric_row2[3].metric("持倉時間比例", show_pct(strategy_metrics["exposure"]))
+
+                        st.markdown("#### 策略與同標的買進持有比較（相同本金與成本）")
+                        comparison = pd.DataFrame([
+                            {"方案": "技術指標策略", "累積報酬(%)": strategy_metrics["cumulative_return"] * 100,
+                             "CAGR(%)": strategy_metrics["cagr"] * 100 if strategy_metrics["cagr"] is not None else None,
+                             "MDD(%)": strategy_metrics["mdd"] * 100,
+                             "年化波動(%)": strategy_metrics["annualized_volatility"] * 100 if strategy_metrics["annualized_volatility"] is not None else None,
+                             "Sharpe": strategy_metrics["sharpe"], "期末資產": strategy_metrics["ending_value"]},
+                            {"方案": "同標的買進持有", "累積報酬(%)": benchmark_metrics["cumulative_return"] * 100,
+                             "CAGR(%)": benchmark_metrics["cagr"] * 100 if benchmark_metrics["cagr"] is not None else None,
+                             "MDD(%)": benchmark_metrics["mdd"] * 100,
+                             "年化波動(%)": benchmark_metrics["annualized_volatility"] * 100 if benchmark_metrics["annualized_volatility"] is not None else None,
+                             "Sharpe": benchmark_metrics["sharpe"], "期末資產": benchmark_metrics["ending_value"]},
+                        ])
+                        st.dataframe(comparison.style.format({
+                            "累積報酬(%)": "{:+.2f}%", "CAGR(%)": "{:+.2f}%", "MDD(%)": "{:.2f}%",
+                            "年化波動(%)": "{:.2f}%", "Sharpe": "{:.2f}", "期末資產": "{:,.0f}",
+                        }), use_container_width=True, hide_index=True)
+
+                        if not df_trades.empty and not analysis["trade_analysis"].empty:
+                            reason_frame = pd.DataFrame({
+                                "離場觸發組合": df_trades["離場觸發原因"].to_numpy(),
+                                "成本後報酬率 (%)": analysis["trade_analysis"]["成本後報酬率 (%)"].to_numpy(),
+                            })
+                            reason_summary = reason_frame.groupby("離場觸發組合", dropna=False).agg(
+                                交易筆數=("成本後報酬率 (%)", "size"),
+                                勝率=("成本後報酬率 (%)", lambda values: float((values > 0).mean())),
+                                平均成本後報酬=("成本後報酬率 (%)", "mean"),
+                            ).reset_index()
+                            st.markdown("#### 依離場觸發組合比較")
+                            st.dataframe(reason_summary.style.format({"勝率": "{:.1%}", "平均成本後報酬": "{:+.2f}%"}),
+                                         use_container_width=True, hide_index=True)
+                            st.caption("若同一筆交易同時觸發多個離場條件，會按觸發組合歸類；這是描述性統計，不代表單一指標的因果效果。")
+
+                        st.markdown("#### 交易成本敏感度")
+                        cost_rows = []
+                        for scenario_name, multiplier in (("設定成本", 1.0), ("成本提高 50%", 1.5), ("成本加倍", 2.0)):
+                            scenario_result = analyze_indicator_backtest(
+                                df_calc, df_trades, float(bt_initial_capital),
+                                float(bt_commission_pct) * multiplier,
+                                float(bt_sell_tax_pct) * multiplier,
+                                float(bt_slippage_pct) * multiplier,
+                                selected_tf, is_tw_stock)
+                            if scenario_result is not None:
+                                scenario_metrics = scenario_result["strategy_metrics"]
+                                cost_rows.append({
+                                    "成本情境": scenario_name,
+                                    "策略累積報酬(%)": scenario_metrics["cumulative_return"] * 100,
+                                    "最大回撤(%)": scenario_metrics["mdd"] * 100,
+                                    "期末資產": scenario_metrics["ending_value"],
+                                })
+                        if cost_rows:
+                            st.dataframe(pd.DataFrame(cost_rows).style.format({
+                                "策略累積報酬(%)": "{:+.2f}%", "最大回撤(%)": "{:.2f}%", "期末資產": "{:,.0f}",
+                            }), use_container_width=True, hide_index=True)
+
+                        if len(df_calc) >= 40:
+                            split_index = int(len(df_calc) * 0.7)
+                            period_rows = []
+                            if split_index >= 2 and len(df_calc) - split_index >= 2:
+                                if not df_trades.empty and {"_entry_index", "_exit_index"}.issubset(df_trades.columns):
+                                    in_sample_trades = df_trades[
+                                        (df_trades["_entry_index"] >= 0) & (df_trades["_exit_index"] < split_index)
+                                    ].copy()
+                                    oos_trades = df_trades[
+                                        (df_trades["_entry_index"] >= split_index) &
+                                        (df_trades["_exit_index"] < len(df_calc))
+                                    ].copy()
+                                else:
+                                    in_sample_trades = pd.DataFrame()
+                                    oos_trades = pd.DataFrame()
+                                oos_trades["_entry_index"] = oos_trades.get("_entry_index", pd.Series(dtype=float)) - split_index
+                                oos_trades["_exit_index"] = oos_trades.get("_exit_index", pd.Series(dtype=float)) - split_index
+                                for period_name, period_data, period_trades in (
+                                    ("樣本內（前 70%）", df_calc.iloc[:split_index], in_sample_trades),
+                                    ("樣本外（後 30%）", df_calc.iloc[split_index:], oos_trades),
+                                ):
+                                    period_result = analyze_indicator_backtest(
+                                        period_data, period_trades, float(bt_initial_capital),
+                                        float(bt_commission_pct), float(bt_sell_tax_pct), float(bt_slippage_pct),
+                                        selected_tf, is_tw_stock)
+                                    if period_result is not None:
+                                        period_metrics = period_result["strategy_metrics"]
+                                        period_rows.append({
+                                            "期間": period_name,
+                                            "累積報酬(%)": period_metrics["cumulative_return"] * 100,
+                                            "CAGR(%)": period_metrics["cagr"] * 100 if period_metrics["cagr"] is not None else None,
+                                            "MDD(%)": period_metrics["mdd"] * 100,
+                                            "交易筆數": period_metrics["trade_count"],
+                                            "勝率": period_metrics["win_rate"],
+                                        })
+                            if period_rows:
+                                st.markdown("#### 時間順序樣本內／樣本外比較")
+                                st.dataframe(pd.DataFrame(period_rows).style.format({
+                                    "累積報酬(%)": "{:+.2f}%", "CAGR(%)": "{:+.2f}%", "MDD(%)": "{:.2f}%", "勝率": "{:.1%}",
+                                }), use_container_width=True, hide_index=True)
+                                st.caption(f"以 {df_calc.index[split_index]:%Y-%m-%d} 為切分點；兩段各自以相同初始本金計算，跨越切分日的交易不計入兩段，樣本外仍使用同一組設定，不代表參數經過獨立最佳化。")
+
+                        st.markdown("#### 資產曲線與回撤")
+                        equity_fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                                                   row_heights=[0.68, 0.32],
+                                                   subplot_titles=("資產曲線（成本後）", "策略回撤"))
+                        equity_fig.add_trace(go.Scatter(x=analysis["strategy_equity"].index,
+                                                       y=analysis["strategy_equity"].values,
+                                                       name="技術指標策略", line=dict(color="#2E86DE", width=2)), row=1, col=1)
+                        equity_fig.add_trace(go.Scatter(x=analysis["benchmark_equity"].index,
+                                                       y=analysis["benchmark_equity"].values,
+                                                       name="同標的買進持有", line=dict(color="#7F8C8D", width=1.5)), row=1, col=1)
+                        equity_fig.add_trace(go.Scatter(x=analysis["strategy_drawdown"].index,
+                                                       y=analysis["strategy_drawdown"].values * 100,
+                                                       name="策略回撤", fill="tozeroy",
+                                                       line=dict(color="#E74C3C", width=1.5)), row=2, col=1)
+                        equity_fig.update_yaxes(title_text="資產", row=1, col=1)
+                        equity_fig.update_yaxes(title_text="回撤 (%)", ticksuffix="%", row=2, col=1)
+                        equity_fig.update_layout(height=560, hovermode="x unified", legend=dict(orientation="h", y=1.08),
+                                                 margin=dict(l=20, r=20, t=65, b=20))
+                        st.plotly_chart(equity_fig, use_container_width=True, config={"responsive": True})
+
+                        period_returns = analysis["period_returns"].dropna()
+                        if not period_returns.empty:
+                            period_frame = period_returns.rename("期間報酬").to_frame()
+                            period_frame["年度"] = period_frame.index.year
+                            period_type = analysis["period_type"]
+                            if period_type == "quarter":
+                                period_frame["期間"] = period_frame.index.quarter
+                                period_axis = [f"{period}季" for period in range(1, analysis["period_count"] + 1)]
+                            elif period_type == "half_year":
+                                period_frame["期間"] = (period_frame.index.month - 1) // 6 + 1
+                                period_axis = ["上半年", "下半年"]
+                            elif period_type == "year":
+                                period_frame["期間"] = 1
+                                period_axis = ["年度"]
+                            else:
+                                period_frame["期間"] = period_frame.index.month
+                                period_axis = [f"{period}月" for period in range(1, analysis["period_count"] + 1)]
+                            monthly_pivot = period_frame.pivot(index="年度", columns="期間", values="期間報酬").reindex(columns=range(1, analysis["period_count"] + 1))
+                            st.markdown(f"#### {analysis['period_label']}熱圖")
+                            heatmap = go.Figure(go.Heatmap(
+                                z=monthly_pivot.to_numpy() * 100,
+                                x=period_axis,
+                                y=[str(year) for year in monthly_pivot.index],
+                                colorscale="RdYlGn", zmid=0,
+                                colorbar=dict(title="報酬 %"),
+                                hovertemplate="%{y} %{x}<br>報酬 %{z:+.2f}%<extra></extra>",
+                            ))
+                            heatmap.update_layout(height=max(250, 48 * len(monthly_pivot) + 100),
+                                                  margin=dict(l=20, r=20, t=20, b=20))
+                            st.plotly_chart(heatmap, use_container_width=True, config={"responsive": True})
+
+                        st.caption(
+                            f"交易筆數 {strategy_metrics['trade_count']}；每筆期望報酬 {show_percent_points(strategy_metrics['expectancy_pct'])}；"
+                            f"平均獲利 {show_percent_points(strategy_metrics['average_win_pct'])}；平均虧損 {show_percent_points(strategy_metrics['average_loss_pct'])}；"
+                            f"盈虧比 {show_number(strategy_metrics['payoff_ratio'])}；最長連續虧損 {strategy_metrics['longest_loss_streak']} 筆；"
+                            f"最長回撤 {strategy_metrics['longest_drawdown_bars']} 根 K 棒。"
+                        )
+                        if strategy_metrics["cagr"] is None:
+                            st.info("回測時間跨度或有效 K 棒數不足，為避免年化數字失真，CAGR、年化波動率、Sharpe 與 Sortino 暫不顯示。")
+                        st.caption(
+                            "回測假設本金全額輪動且可零碎股，沿用原系統的收盤訊號／收盤價成交與日內高低價停損判斷；成本依上方設定估算，"
+                            "尚未模擬下一交易日成交、跳空滑價或單根 K 棒內的價格先後路徑。買進持有基準使用同一價格序列，"
+                            "不額外推定股息是否已調整。"
+                        )
 
     except Exception as ex_tab:
         st.error(f"❌ 畫面渲染異常：{ex_tab}")
