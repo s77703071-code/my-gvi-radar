@@ -1804,6 +1804,7 @@ else:
         
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
+    tabs_created = False
     df_chart = None
     if selected_stock:
         try:
@@ -2081,10 +2082,21 @@ else:
                 use_container_width=True
             )
 
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+            "📊 彩色 K 線圖與成交量",
+            "🧭 籌碼集中度分析",
+            "🤖 網格自動生成器",
+            "⚖️ 網格複利 vs 買進持有對比",
+            "🧪 技術指標自訂策略回測",
+            "💸 配息複利策略",
+            "🚀 華爾街機構級三核心策略雷達",
+            "🏦 台股三大法人獨立選股策略",
+            "📊 當日全市場三大法人佔股本比 Top 10",
+        ])
+        tabs_created = True
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 彩色 K 線圖與成交量", "🧭 籌碼集中度分析", "🤖 網格自動生成器", "⚖️ 網格複利 vs 買進持有對比", "🧪 技術指標自訂策略回測", "💸 配息複利策略"])
             
             # ==============================================================================
             # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 完整畫線與文字工具箱】
@@ -2600,230 +2612,248 @@ else:
     except Exception as ex_tab:
         st.error(f"❌ 畫面渲染異常：{ex_tab}")
 
-    st.markdown("---")
-    st.markdown("### 🚀 華爾街機構級三核心策略雷達")
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
-        st.caption("優點：結合 ROE 與淨值估值，重視安全邊際。\n\n限制：財報更新較慢，金融或特殊產業比較性較低。")
-    with col_s2:
-        strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
-        st.caption("優點：偏向強勢趨勢，可快速反映價格動能。\n\n限制：盤整時容易反覆訊號，追高風險較高。")
-    with col_s3:
-        strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
-        st.caption("優點：同時看自由現金流收益與 PEG，兼顧現金流和成長估值。\n\n限制：現金流與成長資料可能缺漏，週期性公司容易失真。")
+    # If stock-chart loading failed before the chart area, keep the strategy tabs available.
+    if not tabs_created:
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+            "📊 彩色 K 線圖與成交量",
+            "🧭 籌碼集中度分析",
+            "🤖 網格自動生成器",
+            "⚖️ 網格複利 vs 買進持有對比",
+            "🧪 技術指標自訂策略回測",
+            "💸 配息複利策略",
+            "🚀 華爾街機構級三核心策略雷達",
+            "🏦 台股三大法人獨立選股策略",
+            "📊 當日全市場三大法人佔股本比 Top 10",
+        ])
+        tabs_created = True
 
-    custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區：", value="2330.TW, 3293.TWO, 8069.TWO, NVDA, AAPL")
-    custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
+    with tab7:
+        st.markdown("---")
+        st.markdown("### 🚀 華爾街機構級三核心策略雷達")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
+            st.caption("優點：結合 ROE 與淨值估值，重視安全邊際。\n\n限制：財報更新較慢，金融或特殊產業比較性較低。")
+        with col_s2:
+            strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
+            st.caption("優點：偏向強勢趨勢，可快速反映價格動能。\n\n限制：盤整時容易反覆訊號，追高風險較高。")
+        with col_s3:
+            strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
+            st.caption("優點：同時看自由現金流收益與 PEG，兼顧現金流和成長估值。\n\n限制：現金流與成長資料可能缺漏，週期性公司容易失真。")
 
-    def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
-        conn = sqlite3.connect(DB_FILE)
-        try: df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
-        except Exception: df_db = pd.DataFrame()
-        conn.close()
+        custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區：", value="2330.TW, 3293.TWO, 8069.TWO, NVDA, AAPL")
+        custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
+
+        def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
+            conn = sqlite3.connect(DB_FILE)
+            try: df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
+            except Exception: df_db = pd.DataFrame()
+            conn.close()
         
-        for t in filter_list:
-            row_matches = df_db[df_db['ticker'] == t] if not df_db.empty else pd.DataFrame()
-            if row_matches.empty or not is_cache_valid(row_matches.iloc[0].get('updated_at')):
-                signature_save_to_db(t)
+            for t in filter_list:
+                row_matches = df_db[df_db['ticker'] == t] if not df_db.empty else pd.DataFrame()
+                if row_matches.empty or not is_cache_valid(row_matches.iloc[0].get('updated_at')):
+                    signature_save_to_db(t)
         
-        conn = sqlite3.connect(DB_FILE)
-        df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
-        conn.close()
+            conn = sqlite3.connect(DB_FILE)
+            df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
+            conn.close()
 
-        if df_db.empty: return
+            if df_db.empty: return
             
-        df_filtered = df_db[df_db['ticker'].isin(filter_list)].copy()
-        raw_portfolio = []
+            df_filtered = df_db[df_db['ticker'].isin(filter_list)].copy()
+            raw_portfolio = []
         
-        for idx, row in df_filtered.iterrows():
-            t = row['ticker']
-            try:
-                ch_name = STOCK_NAME_MAP.get(t, t)
-                df_hist = yf.download(t, period=cfg["p"], interval=cfg["i"], progress=False)
-                if isinstance(df_hist.columns, pd.MultiIndex): df_hist.columns = df_hist.columns.get_level_values(0)
-                if df_hist.index.tz is not None: df_hist.index = df_hist.index.tz_localize(None)
-                df_hist = df_hist.dropna(subset=['Close', 'Volume']).copy()
-                L = len(df_hist)
+            for idx, row in df_filtered.iterrows():
+                t = row['ticker']
+                try:
+                    ch_name = STOCK_NAME_MAP.get(t, t)
+                    df_hist = yf.download(t, period=cfg["p"], interval=cfg["i"], progress=False)
+                    if isinstance(df_hist.columns, pd.MultiIndex): df_hist.columns = df_hist.columns.get_level_values(0)
+                    if df_hist.index.tz is not None: df_hist.index = df_hist.index.tz_localize(None)
+                    df_hist = df_hist.dropna(subset=['Close', 'Volume']).copy()
+                    L = len(df_hist)
                 
-                close_today = float(row['close']) if (L == 0 or 'Close' not in df_hist.columns) else float(df_hist['Close'].to_numpy().flatten()[-1])
-                high_252d = close_today * 1.05 if L < 50 else float(df_hist['Close'].tail(min(252, L)).max())
+                    close_today = float(row['close']) if (L == 0 or 'Close' not in df_hist.columns) else float(df_hist['Close'].to_numpy().flatten()[-1])
+                    high_252d = close_today * 1.05 if L < 50 else float(df_hist['Close'].tail(min(252, L)).max())
                 
-                bv_val = float(row['book_value']) if (pd.notnull(row['book_value']) and float(row['book_value']) > 0) else None
-                roe_val = parse_roe(row['roe'])
+                    bv_val = float(row['book_value']) if (pd.notnull(row['book_value']) and float(row['book_value']) > 0) else None
+                    roe_val = parse_roe(row['roe'])
 
-                gvi_live = (bv_val / close_today) * ((1 + roe_val) ** 5) if (close_today > 0 and bv_val is not None and roe_val is not None) else None
+                    gvi_live = (bv_val / close_today) * ((1 + roe_val) ** 5) if (close_today > 0 and bv_val is not None and roe_val is not None) else None
 
-                stock_obj = yf.Ticker(t)
-                info_obj = stock_obj.info if hasattr(stock_obj, 'info') and stock_obj.info else {}
+                    stock_obj = yf.Ticker(t)
+                    info_obj = stock_obj.info if hasattr(stock_obj, 'info') and stock_obj.info else {}
                 
-                fcf = info_obj.get('freeCashflow')
-                mcap = info_obj.get('marketCap') or row['mcap']
+                    fcf = info_obj.get('freeCashflow')
+                    mcap = info_obj.get('marketCap') or row['mcap']
 
-                if (fcf is None or np.isnan(fcf)) and mcap and mcap > 0:
-                    try:
-                        cf = stock_obj.quarterly_cashflow
-                        if cf.empty: cf = stock_obj.cashflow
-                        if not cf.empty:
-                            ocf, capex = None, None
-                            for ocf_k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'Cash Flow From Continuing Operating Activities']:
-                                if ocf_k in cf.index:
-                                    s = cf.loc[ocf_k].dropna()
-                                    ocf = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                    break
-                            for cap_k in ['Capital Expenditure', 'Capital Expenditures']:
-                                if cap_k in cf.index:
-                                    s = cf.loc[cap_k].dropna()
-                                    capex = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                    break
-                            if ocf is not None:
-                                capex_val = abs(float(capex)) if capex is not None else 0.0
-                                fcf = float(ocf) - capex_val
-                    except Exception:
-                        pass
+                    if (fcf is None or np.isnan(fcf)) and mcap and mcap > 0:
+                        try:
+                            cf = stock_obj.quarterly_cashflow
+                            if cf.empty: cf = stock_obj.cashflow
+                            if not cf.empty:
+                                ocf, capex = None, None
+                                for ocf_k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'Cash Flow From Continuing Operating Activities']:
+                                    if ocf_k in cf.index:
+                                        s = cf.loc[ocf_k].dropna()
+                                        ocf = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
+                                        break
+                                for cap_k in ['Capital Expenditure', 'Capital Expenditures']:
+                                    if cap_k in cf.index:
+                                        s = cf.loc[cap_k].dropna()
+                                        capex = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
+                                        break
+                                if ocf is not None:
+                                    capex_val = abs(float(capex)) if capex is not None else 0.0
+                                    fcf = float(ocf) - capex_val
+                        except Exception:
+                            pass
 
-                fcf_yield = (float(fcf) / float(mcap) * 100.0) if (fcf and mcap and float(mcap) > 0) else None
+                    fcf_yield = (float(fcf) / float(mcap) * 100.0) if (fcf and mcap and float(mcap) > 0) else None
 
-                peg_raw = info_obj.get('pegRatio')
-                peg_val = float(peg_raw) if (peg_raw and not np.isnan(peg_raw) and peg_raw > 0) else None
+                    peg_raw = info_obj.get('pegRatio')
+                    peg_val = float(peg_raw) if (peg_raw and not np.isnan(peg_raw) and peg_raw > 0) else None
 
-                if peg_val is None:
-                    try:
-                        pe_val = info_obj.get('trailingPE') or info_obj.get('forwardPE')
-                        growth_val = info_obj.get('earningsGrowth') or info_obj.get('earningsQuarterlyGrowth')
-                        if pe_val and growth_val and float(pe_val) > 0 and float(growth_val) > 0:
-                            peg_val = float(pe_val) / (float(growth_val) * 100.0)
-                    except Exception:
-                        pass
+                    if peg_val is None:
+                        try:
+                            pe_val = info_obj.get('trailingPE') or info_obj.get('forwardPE')
+                            growth_val = info_obj.get('earningsGrowth') or info_obj.get('earningsQuarterlyGrowth')
+                            if pe_val and growth_val and float(pe_val) > 0 and float(growth_val) > 0:
+                                peg_val = float(pe_val) / (float(growth_val) * 100.0)
+                        except Exception:
+                            pass
 
-                df_hist, chip_status_text, _ = calculate_chip_and_backtest(t, df_hist, selected_tf)
+                    df_hist, chip_status_text, _ = calculate_chip_and_backtest(t, df_hist, selected_tf)
                 
-                raw_portfolio.append({
-                    '股票代碼': t, '股票名稱': ch_name, '目前股價': close_today, 
-                    'GVI值': gvi_live, 
-                    '動能分數': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
-                    '自由現金流收益': fcf_yield, 
-                    '本益成長比(PEG)': peg_val, 
-                    '⚡ 即時籌碼動能': chip_status_text, 
-                    'gvi_raw': gvi_live, 
-                    'mo_raw': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
-                    'fcf_raw': fcf_yield
-                })
-            except Exception as e_item: 
-                st.sidebar.caption(f"標的跳過 [{t}]: {e_item}")
+                    raw_portfolio.append({
+                        '股票代碼': t, '股票名稱': ch_name, '目前股價': close_today, 
+                        'GVI值': gvi_live, 
+                        '動能分數': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
+                        '自由現金流收益': fcf_yield, 
+                        '本益成長比(PEG)': peg_val, 
+                        '⚡ 即時籌碼動能': chip_status_text, 
+                        'gvi_raw': gvi_live, 
+                        'mo_raw': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
+                        'fcf_raw': fcf_yield
+                    })
+                except Exception as e_item: 
+                    st.sidebar.caption(f"標的跳過 [{t}]: {e_item}")
                 
-        if raw_portfolio:
-            df_res = pd.DataFrame(raw_portfolio)
+            if raw_portfolio:
+                df_res = pd.DataFrame(raw_portfolio)
             
-            if strat_gvi: df_res = df_res[df_res['gvi_raw'].notnull() & (df_res['gvi_raw'] >= 0.20)]
-            if strat_momentum: df_res = df_res[df_res['mo_raw'] >= 80.0]
-            if strat_qarp: df_res = df_res[df_res['fcf_raw'].notnull() & (df_res['fcf_raw'] >= 2.5) & df_res['本益成長比(PEG)'].notnull() & (df_res['本益成長比(PEG)'] <= 1.5)]
+                if strat_gvi: df_res = df_res[df_res['gvi_raw'].notnull() & (df_res['gvi_raw'] >= 0.20)]
+                if strat_momentum: df_res = df_res[df_res['mo_raw'] >= 80.0]
+                if strat_qarp: df_res = df_res[df_res['fcf_raw'].notnull() & (df_res['fcf_raw'] >= 2.5) & df_res['本益成長比(PEG)'].notnull() & (df_res['本益成長比(PEG)'] <= 1.5)]
             
-            if df_res.empty: df_res = pd.DataFrame(raw_portfolio)
+                if df_res.empty: df_res = pd.DataFrame(raw_portfolio)
                 
-            df_res['GVI_Rank'] = df_res['gvi_raw'].fillna(0).rank(pct=True)
-            df_res['MO_Rank'] = df_res['mo_raw'].fillna(0).rank(pct=True)
-            df_res['FCF_Rank'] = df_res['fcf_raw'].fillna(0).rank(pct=True)
-            df_res['綜合分數'] = 0.0
-            active_strats = 0
+                df_res['GVI_Rank'] = df_res['gvi_raw'].fillna(0).rank(pct=True)
+                df_res['MO_Rank'] = df_res['mo_raw'].fillna(0).rank(pct=True)
+                df_res['FCF_Rank'] = df_res['fcf_raw'].fillna(0).rank(pct=True)
+                df_res['綜合分數'] = 0.0
+                active_strats = 0
             
-            if strat_gvi: df_res['綜合分數'] += df_res['GVI_Rank']; active_strats += 1
-            if strat_momentum: df_res['綜合分數'] += df_res['MO_Rank']; active_strats += 1
-            if strat_qarp: df_res['綜合分數'] += df_res['FCF_Rank']; active_strats += 1
-            if active_strats == 0: df_res['綜合分數'] = df_res['GVI_Rank']; active_strats = 1
+                if strat_gvi: df_res['綜合分數'] += df_res['GVI_Rank']; active_strats += 1
+                if strat_momentum: df_res['綜合分數'] += df_res['MO_Rank']; active_strats += 1
+                if strat_qarp: df_res['綜合分數'] += df_res['FCF_Rank']; active_strats += 1
+                if active_strats == 0: df_res['綜合分數'] = df_res['GVI_Rank']; active_strats = 1
             
-            df_res['策略評分_num'] = ((df_res['綜合分數'] / active_strats) * 100).round(1)
-            df_res = df_res.sort_values(by='綜合分數', ascending=False).head(20).reset_index(drop=True)
+                df_res['策略評分_num'] = ((df_res['綜合分數'] / active_strats) * 100).round(1)
+                df_res = df_res.sort_values(by='綜合分數', ascending=False).head(20).reset_index(drop=True)
             
-            df_res['排名'] = [f"第 {i+1} 名" for i in range(len(df_res))]
-            df_res['策略評分'] = df_res['策略評分_num'].astype(str) + " 分"
-            df_res['GVI價值指標'] = df_res['GVI值'].apply(lambda x: f"{x:.4f}" if (pd.notnull(x) and x is not None) else "資料不足")
-            df_res['動能(創高距離)'] = df_res['動能分數'].round(1).astype(str) + "%"
-            df_res['自由現金流收益率'] = df_res['自由現金流收益'].apply(lambda x: f"{x:.2f}%" if (pd.notnull(x) and x is not None) else "資料不足")
-            df_res['本益成長比(PEG)'] = df_res['本益成長比(PEG)'].apply(lambda x: f"{x:.2f}" if (pd.notnull(x) and x is not None) else "資料不足")
+                df_res['排名'] = [f"第 {i+1} 名" for i in range(len(df_res))]
+                df_res['策略評分'] = df_res['策略評分_num'].astype(str) + " 分"
+                df_res['GVI價值指標'] = df_res['GVI值'].apply(lambda x: f"{x:.4f}" if (pd.notnull(x) and x is not None) else "資料不足")
+                df_res['動能(創高距離)'] = df_res['動能分數'].round(1).astype(str) + "%"
+                df_res['自由現金流收益率'] = df_res['自由現金流收益'].apply(lambda x: f"{x:.2f}%" if (pd.notnull(x) and x is not None) else "資料不足")
+                df_res['本益成長比(PEG)'] = df_res['本益成長比(PEG)'].apply(lambda x: f"{x:.2f}" if (pd.notnull(x) and x is not None) else "資料不足")
             
-            cols = ['排名', '股票代碼', '股票名稱', '目前股價', '策略評分']
-            if strat_gvi: cols.append('GVI價值指標')
-            if strat_momentum: cols.append('動能(創高距離)')
-            if strat_qarp: cols.extend(['自由現金流收益率', '本益成長比(PEG)'])
-            if not strat_gvi and not strat_momentum and not strat_qarp:
-                cols.extend(['GVI價值指標', '動能(創高距離)', '自由現金流收益率', '本益成長比(PEG)'])
-            cols.append('⚡ 即時籌碼動能')
+                cols = ['排名', '股票代碼', '股票名稱', '目前股價', '策略評分']
+                if strat_gvi: cols.append('GVI價值指標')
+                if strat_momentum: cols.append('動能(創高距離)')
+                if strat_qarp: cols.extend(['自由現金流收益率', '本益成長比(PEG)'])
+                if not strat_gvi and not strat_momentum and not strat_qarp:
+                    cols.extend(['GVI價值指標', '動能(創高距離)', '自由現金流收益率', '本益成長比(PEG)'])
+                cols.append('⚡ 即時籌碼動能')
             
-            df_final_view = df_res[cols]
-            st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
-            st.dataframe(df_final_view, use_container_width=True)
+                df_final_view = df_res[cols]
+                st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
+                st.dataframe(df_final_view, use_container_width=True)
 
-    col_btn1, col_btn2, col_btn3 = st.columns(3)
-    with col_btn1:
-        if st.button("🇹🇼 一鍵執行：全自動過濾全台股核心池", type="secondary", use_container_width=True):
-            load_data_from_sqlite_and_render(AUTO_TW_UNIVERSE, "🇹🇼 台灣股市核心策略篩選結果")
-    with col_btn2:
-        if st.button("🇺🇸 一鍵執行：全自動過濾全美股核心池", type="secondary", use_container_width=True):
-            load_data_from_sqlite_and_render(AUTO_US_UNIVERSE, "🇺🇸 美國股市核心策略篩選結果")
-    with col_btn3:
-        if st.button("🚀 執行：自訂名單多因子本地精準過濾", type="primary", use_container_width=True):
-            load_data_from_sqlite_and_render(custom_scan_list, "🎯 操盤手自訂名單策略篩選結果", is_custom_mode=True)
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
+        with col_btn1:
+            if st.button("🇹🇼 一鍵執行：全自動過濾全台股核心池", type="secondary", use_container_width=True):
+                load_data_from_sqlite_and_render(AUTO_TW_UNIVERSE, "🇹🇼 台灣股市核心策略篩選結果")
+        with col_btn2:
+            if st.button("🇺🇸 一鍵執行：全自動過濾全美股核心池", type="secondary", use_container_width=True):
+                load_data_from_sqlite_and_render(AUTO_US_UNIVERSE, "🇺🇸 美國股市核心策略篩選結果")
+        with col_btn3:
+            if st.button("🚀 執行：自訂名單多因子本地精準過濾", type="primary", use_container_width=True):
+                load_data_from_sqlite_and_render(custom_scan_list, "🎯 操盤手自訂名單策略篩選結果", is_custom_mode=True)
 
-    st.markdown("---")
-    st.markdown("### 🏦 台股三大法人獨立選股策略")
-    st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比。")
-    inst_col1, inst_col2 = st.columns([1, 2])
-    with inst_col1:
-        inst_investor = st.selectbox("篩選法人", ['外資', '投信', '自營商'], key='inst_screen_investor')
-        inst_min_net_pct = st.number_input("淨買賣超佔股本至少 (%)", min_value=-100.0, max_value=100.0, value=0.0, step=0.01, format='%.2f', key='inst_min_net_pct')
-    with inst_col2:
-        st.write("篩選條件：所選法人的「買賣超佔股本比」大於等於設定值。表格仍同時列出外資、投信、自營商三方買進、賣出及買賣超佔股本比。")
-    if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
-        taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
-        if not taiwan_tickers:
-            st.warning("請先在上方自訂觀察名單加入台股代碼，例如 2330.TW、3293.TWO。")
-        else:
-            with st.spinner("正在取得 TWSE／TPEx 官方法人交易與股數資料…"):
-                inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
-            inst_result = build_institutional_screen(inst_trades, inst_shares, taiwan_tickers, inst_investor, float(inst_min_net_pct))
-            if inst_result.empty:
-                st.info("此條件下沒有符合標的，或官方資料暫時缺漏。可調低淨買超門檻或檢查代碼格式。")
+    with tab8:
+        st.markdown("---")
+        st.markdown("### 🏦 台股三大法人獨立選股策略")
+        st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比。")
+        inst_col1, inst_col2 = st.columns([1, 2])
+        with inst_col1:
+            inst_investor = st.selectbox("篩選法人", ['外資', '投信', '自營商'], key='inst_screen_investor')
+            inst_min_net_pct = st.number_input("淨買賣超佔股本至少 (%)", min_value=-100.0, max_value=100.0, value=0.0, step=0.01, format='%.2f', key='inst_min_net_pct')
+        with inst_col2:
+            st.write("篩選條件：所選法人的「買賣超佔股本比」大於等於設定值。表格仍同時列出外資、投信、自營商三方買進、賣出及買賣超佔股本比。")
+        if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
+            taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
+            if not taiwan_tickers:
+                st.warning("請先在上方自訂觀察名單加入台股代碼，例如 2330.TW、3293.TWO。")
             else:
-                inst_display_cols = ['股票代碼', '股票名稱', '市場', '資料日期',
-                    '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
-                    '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
-                    '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
-                pct_cols = [c for c in inst_display_cols if c.endswith('(%)')]
-                st.dataframe(inst_result[inst_display_cols].style.format({c: '{:+.4f}%' for c in pct_cols}), use_container_width=True)
-                st.download_button("下載法人策略結果 CSV", inst_result[inst_display_cols].to_csv(index=False, encoding='utf-8-sig'),
-                                   file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
-            if inst_errors:
-                st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
+                with st.spinner("正在取得 TWSE／TPEx 官方法人交易與股數資料…"):
+                    inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
+                inst_result = build_institutional_screen(inst_trades, inst_shares, taiwan_tickers, inst_investor, float(inst_min_net_pct))
+                if inst_result.empty:
+                    st.info("此條件下沒有符合標的，或官方資料暫時缺漏。可調低淨買超門檻或檢查代碼格式。")
+                else:
+                    inst_display_cols = ['股票代碼', '股票名稱', '市場', '資料日期',
+                        '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
+                        '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
+                        '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
+                    pct_cols = [c for c in inst_display_cols if c.endswith('(%)')]
+                    st.dataframe(inst_result[inst_display_cols].style.format({c: '{:+.4f}%' for c in pct_cols}), use_container_width=True)
+                    st.download_button("下載法人策略結果 CSV", inst_result[inst_display_cols].to_csv(index=False, encoding='utf-8-sig'),
+                                       file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
+                if inst_errors:
+                    st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
 
-    st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
-    st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。")
-    if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
-        st.session_state['inst_top10_loaded'] = True
-        with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
-            market_trades, market_shares, market_errors = fetch_institutional_market_data()
-        ranking_data = build_institutional_rankings(market_trades, market_shares)
-        if ranking_data.empty:
-            st.info("目前無法取得可排序的法人資料與已發行股數。")
-        else:
-            ranking_data['股票名稱'] = ranking_data.apply(
-                lambda row: row.get('股票名稱') if row.get('股票名稱') and row.get('股票名稱') != row.get('股票代碼')
-                else STOCK_NAME_MAP.get(f"{row.get('股票代碼')}.TWO" if row.get('市場') == '上櫃' else f"{row.get('股票代碼')}.TW", row.get('股票代碼')),
-                axis=1)
-            investor_tabs = st.tabs(['外資', '投信', '自營商'])
-            for investor, investor_tab in zip(('外資', '投信', '自營商'), investor_tabs):
-                with investor_tab:
-                    sort_specs = [
-                        (f'{investor}買賣超佔股本比(%)', False, '買賣超佔股本比最高'),
-                        (f'{investor}買賣超佔股本比(%)', True, '買賣超佔股本比最低'),
-                        (f'{investor}買進佔股本比(%)', False, '買進佔股本比最高'),
-                        (f'{investor}賣出佔股本比(%)', False, '賣出佔股本比最高')]
-                    ranking_cols = st.columns(2)
-                    for index, (column, ascending, title) in enumerate(sort_specs):
-                        ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
-                        show = ranked[['股票代碼', '股票名稱', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
-                        with ranking_cols[index % 2]:
-                            st.markdown(f"**{title} Top 10**")
-                            st.dataframe(show.style.format({'佔股本比(%)':'{:+.4f}%'}), use_container_width=True, hide_index=True)
-            if market_errors:
-                st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))
+    with tab9:
+        st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
+        st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。")
+        if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
+            st.session_state['inst_top10_loaded'] = True
+            with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
+                market_trades, market_shares, market_errors = fetch_institutional_market_data()
+            ranking_data = build_institutional_rankings(market_trades, market_shares)
+            if ranking_data.empty:
+                st.info("目前無法取得可排序的法人資料與已發行股數。")
+            else:
+                ranking_data['股票名稱'] = ranking_data.apply(
+                    lambda row: row.get('股票名稱') if row.get('股票名稱') and row.get('股票名稱') != row.get('股票代碼')
+                    else STOCK_NAME_MAP.get(f"{row.get('股票代碼')}.TWO" if row.get('市場') == '上櫃' else f"{row.get('股票代碼')}.TW", row.get('股票代碼')),
+                    axis=1)
+                investor_tabs = st.tabs(['外資', '投信', '自營商'])
+                for investor, investor_tab in zip(('外資', '投信', '自營商'), investor_tabs):
+                    with investor_tab:
+                        sort_specs = [
+                            (f'{investor}買賣超佔股本比(%)', False, '買賣超佔股本比最高'),
+                            (f'{investor}買賣超佔股本比(%)', True, '買賣超佔股本比最低'),
+                            (f'{investor}買進佔股本比(%)', False, '買進佔股本比最高'),
+                            (f'{investor}賣出佔股本比(%)', False, '賣出佔股本比最高')]
+                        ranking_cols = st.columns(2)
+                        for index, (column, ascending, title) in enumerate(sort_specs):
+                            ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
+                            show = ranked[['股票代碼', '股票名稱', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
+                            with ranking_cols[index % 2]:
+                                st.markdown(f"**{title} Top 10**")
+                                st.dataframe(show.style.format({'佔股本比(%)':'{:+.4f}%'}), use_container_width=True, hide_index=True)
+                if market_errors:
+                    st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))
