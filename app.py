@@ -877,7 +877,7 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
     split = split_in_sample_oos(history)
     percent_keys = ("cagr", "mdd", "annualized_volatility", "cumulative_total_return")
     cols = st.columns(4)
-    labels = {"cagr": "年化報酬 CAGR", "mdd": "最大回撤 MDD", "annualized_volatility": "年化波動率", "sharpe": "Sharpe Ratio",
+    labels = {"cagr": "年化報酬率 CAGR", "mdd": "最大回撤 MDD", "annualized_volatility": "年化波動率", "sharpe": "夏普比率",
               "cumulative_total_return": "累積含息總報酬", "gross_dividends": "股息收入（稅前）", "reinvested_dividends": "股息再投入金額", "ending_value": "期末資產"}
     display_metrics = ["cagr", "mdd", "annualized_volatility", "sharpe", "cumulative_total_return", "gross_dividends", "reinvested_dividends", "ending_value"]
     for idx, key in enumerate(display_metrics):
@@ -891,7 +891,7 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
         with cols[idx % 4]:
             st.metric(labels[key], shown)
     st.line_chart(history[["portfolio_value"]], use_container_width=True)
-    st.caption(f"股價報酬、股息收入與含息總報酬已分開計算；價格使用拆股調整後收盤價，股息於除息日入帳。Sharpe 以 0 無風險利率估算。期末股數：{metrics['final_shares']}。")
+    st.caption(f"股價報酬、股息收入與含息總報酬已分開計算；價格使用拆股調整後收盤價，股息於除息日入帳。夏普比率（Sharpe）以 0 無風險利率估算。期末股數：{metrics['final_shares']}。")
     if split.get("error"):
         st.warning(split["error"])
     else:
@@ -2895,21 +2895,26 @@ else:
                         float(bt_sell_tax_pct), float(bt_slippage_pct), selected_tf, is_tw_stock)
 
                     if df_trades.empty:
-                        st.info("此區間沒有進出場交易；仍顯示策略持有現金與同標的買進持有基準。")
+                        st.info("這段期間沒有買賣訊號；下方仍會顯示策略資金變化，以及直接買進後持有的參考結果。")
                     else:
-                        trade_display = df_trades.drop(columns=["_entry_index", "_exit_index"], errors="ignore")
+                        trade_display = df_trades.drop(columns=["_entry_index", "_exit_index"], errors="ignore").rename(columns={
+                            "平倉報酬率 (%)": "未扣費用損益率 (%)",
+                            "持有K棒數": "持有資料筆數",
+                        })
                         if analysis is not None and not analysis["trade_analysis"].empty:
                             trade_display = trade_display.copy()
-                            trade_display["成本後報酬率 (%)"] = analysis["trade_analysis"]["成本後報酬率 (%)"].round(2).to_numpy()
+                            trade_display["扣除費用後損益 (%)"] = analysis["trade_analysis"]["成本後報酬率 (%)"].round(2).to_numpy()
                         st.markdown("#### 逐筆交易結果")
                         st.dataframe(trade_display, use_container_width=True, hide_index=True)
+                        st.caption("每列是一筆買進到賣出的模擬紀錄；損益率已扣除上方設定的交易費用。期末仍持有的股票，以最後收盤價估算。")
 
                     if analysis is None:
-                        st.warning("價格資料不足或含有無效價格，無法計算回測分析。")
+                        st.warning("價格資料不足或有缺漏，暫時無法計算這段回測結果。")
                     else:
                         strategy_metrics = analysis["strategy_metrics"]
                         benchmark_metrics = analysis["benchmark_metrics"]
-                        st.markdown("#### 回測績效與風險摘要")
+                        st.markdown("#### 回測結果重點")
+                        st.caption("以下是依目前設定回看歷史資料的模擬結果，不代表未來表現；「—」表示資料不足或該項目不適用。")
 
                         def show_pct(value, signed=False):
                             if value is None or not np.isfinite(value):
@@ -2924,51 +2929,60 @@ else:
 
                         metric_row1 = st.columns(4)
                         excess_return = strategy_metrics["cumulative_return"] - benchmark_metrics["cumulative_return"]
-                        metric_row1[0].metric("策略累積報酬（成本後）", show_pct(strategy_metrics["cumulative_return"], True),
-                                              delta=f"相對基準 {excess_return:+.2%}")
-                        metric_row1[1].metric("策略 CAGR", show_pct(strategy_metrics["cagr"], True))
-                        metric_row1[2].metric("最大回撤 MDD", show_pct(strategy_metrics["mdd"]))
-                        metric_row1[3].metric("Sharpe（無風險利率 0%）", show_number(strategy_metrics["sharpe"]))
+                        metric_row1[0].metric("整段期間損益（已扣費用）", show_pct(strategy_metrics["cumulative_return"], True),
+                                              delta=f"比直接持有多 {excess_return:+.2%}" if excess_return >= 0 else f"比直接持有少 {abs(excess_return):.2%}",
+                                              help="從回測開始到結束，資金總共增加或減少的比例；已扣除設定的交易費用。")
+                        metric_row1[1].metric("平均每年報酬", show_pct(strategy_metrics["cagr"], True),
+                                              help="把整段期間的資金變化換算成平均每年增減幅度，方便比較不同長度的回測；不是每一年都會有這個報酬。")
+                        metric_row1[2].metric("從高點算起最大跌幅", show_pct(strategy_metrics["mdd"]),
+                                              help="回測期間曾經從資產高點跌到多低。數字越接近零，代表歷史上最深的跌幅越小。")
+                        metric_row1[3].metric("整體起伏下的報酬表現", show_number(strategy_metrics["sharpe"]),
+                                              help="把報酬和整體上下起伏一起比較；同樣起伏下，數值越高通常代表報酬較好。本頁以利率 0% 作為比較基準。")
                         metric_row2 = st.columns(4)
-                        metric_row2[0].metric("Sortino", show_number(strategy_metrics["sortino"]))
-                        metric_row2[1].metric("勝率", show_pct(strategy_metrics["win_rate"]))
-                        metric_row2[2].metric("Profit Factor", show_number(strategy_metrics["profit_factor"]))
-                        metric_row2[3].metric("持倉時間比例", show_pct(strategy_metrics["exposure"]))
+                        metric_row2[0].metric("下跌時的報酬表現", show_number(strategy_metrics["sortino"]),
+                                              help="只把下跌幅度當作風險來比較，不會把上漲的起伏當成壞事；數值越高通常代表下跌風險下的報酬較好。")
+                        metric_row2[1].metric("賺錢交易比例", show_pct(strategy_metrics["win_rate"]),
+                                              help="所有交易中，扣除費用後仍賺錢的比例。比例高不一定代表總收益高，還要一起看每次賺多少、賠多少。")
+                        metric_row2[2].metric("賺賠金額比", show_number(strategy_metrics["profit_factor"]),
+                                              help="賺錢交易金額總和除以賠錢交易金額總和。若數值是 1.5，代表歷史模擬中每賠 1 元，約賺 1.5 元；已扣設定費用。沒有賠錢交易時不顯示。")
+                        metric_row2[3].metric("持有股票的時間比例", show_pct(strategy_metrics["exposure"]),
+                                              help="回測期間有持有股票的時間占全部時間多少；其餘時間策略資金留在現金。")
 
-                        st.markdown("#### 策略與同標的買進持有比較（相同本金與成本）")
+                        st.markdown("#### 按策略買賣，和直接買進持有比較")
                         comparison = pd.DataFrame([
-                            {"方案": "技術指標策略", "累積報酬(%)": strategy_metrics["cumulative_return"] * 100,
-                             "CAGR(%)": strategy_metrics["cagr"] * 100 if strategy_metrics["cagr"] is not None else None,
-                             "MDD(%)": strategy_metrics["mdd"] * 100,
-                             "年化波動(%)": strategy_metrics["annualized_volatility"] * 100 if strategy_metrics["annualized_volatility"] is not None else None,
-                             "Sharpe": strategy_metrics["sharpe"], "期末資產": strategy_metrics["ending_value"]},
-                            {"方案": "同標的買進持有", "累積報酬(%)": benchmark_metrics["cumulative_return"] * 100,
-                             "CAGR(%)": benchmark_metrics["cagr"] * 100 if benchmark_metrics["cagr"] is not None else None,
-                             "MDD(%)": benchmark_metrics["mdd"] * 100,
-                             "年化波動(%)": benchmark_metrics["annualized_volatility"] * 100 if benchmark_metrics["annualized_volatility"] is not None else None,
-                             "Sharpe": benchmark_metrics["sharpe"], "期末資產": benchmark_metrics["ending_value"]},
+                            {"做法": "依訊號買進或賣出", "整段期間損益(%)": strategy_metrics["cumulative_return"] * 100,
+                             "平均每年報酬(%)": strategy_metrics["cagr"] * 100 if strategy_metrics["cagr"] is not None else None,
+                             "從高點算起最大跌幅(%)": strategy_metrics["mdd"] * 100,
+                             "資金起伏幅度(年化 %)": strategy_metrics["annualized_volatility"] * 100 if strategy_metrics["annualized_volatility"] is not None else None,
+                             "起伏下的報酬參考值": strategy_metrics["sharpe"], "結束時資產(元)": strategy_metrics["ending_value"]},
+                            {"做法": "一開始買進並持有", "整段期間損益(%)": benchmark_metrics["cumulative_return"] * 100,
+                             "平均每年報酬(%)": benchmark_metrics["cagr"] * 100 if benchmark_metrics["cagr"] is not None else None,
+                             "從高點算起最大跌幅(%)": benchmark_metrics["mdd"] * 100,
+                             "資金起伏幅度(年化 %)": benchmark_metrics["annualized_volatility"] * 100 if benchmark_metrics["annualized_volatility"] is not None else None,
+                             "起伏下的報酬參考值": benchmark_metrics["sharpe"], "結束時資產(元)": benchmark_metrics["ending_value"]},
                         ])
                         st.dataframe(comparison.style.format({
-                            "累積報酬(%)": "{:+.2f}%", "CAGR(%)": "{:+.2f}%", "MDD(%)": "{:.2f}%",
-                            "年化波動(%)": "{:.2f}%", "Sharpe": "{:.2f}", "期末資產": "{:,.0f}",
+                            "整段期間損益(%)": "{:+.2f}%", "平均每年報酬(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%",
+                            "資金起伏幅度(年化 %)": "{:.2f}%", "起伏下的報酬參考值": "{:.2f}", "結束時資產(元)": "{:,.0f}",
                         }), use_container_width=True, hide_index=True)
+                        st.caption("兩種做法使用相同本金、相同期間和相同費用。整段損益是整體賺賠；平均每年報酬是換算後的年平均；最大跌幅是資產曾從高點跌最多的幅度；資金起伏幅度越大，代表過程越顛簸；最後一欄的參考值越高，通常表示承受相近起伏時取得的報酬較多。")
 
                         if not df_trades.empty and not analysis["trade_analysis"].empty:
                             reason_frame = pd.DataFrame({
-                                "離場觸發組合": df_trades["離場觸發原因"].to_numpy(),
-                                "成本後報酬率 (%)": analysis["trade_analysis"]["成本後報酬率 (%)"].to_numpy(),
+                                "離場時觸發的條件": df_trades["離場觸發原因"].to_numpy(),
+                                "扣除費用後損益 (%)": analysis["trade_analysis"]["成本後報酬率 (%)"].to_numpy(),
                             })
-                            reason_summary = reason_frame.groupby("離場觸發組合", dropna=False).agg(
-                                交易筆數=("成本後報酬率 (%)", "size"),
-                                勝率=("成本後報酬率 (%)", lambda values: float((values > 0).mean())),
-                                平均成本後報酬=("成本後報酬率 (%)", "mean"),
+                            reason_summary = reason_frame.groupby("離場時觸發的條件", dropna=False).agg(
+                                交易筆數=("扣除費用後損益 (%)", "size"),
+                                賺錢交易比例=("扣除費用後損益 (%)", lambda values: float((values > 0).mean())),
+                                每筆平均損益=("扣除費用後損益 (%)", "mean"),
                             ).reset_index()
-                            st.markdown("#### 依離場觸發組合比較")
-                            st.dataframe(reason_summary.style.format({"勝率": "{:.1%}", "平均成本後報酬": "{:+.2f}%"}),
+                            st.markdown("#### 不同離場條件下的交易結果")
+                            st.dataframe(reason_summary.style.format({"賺錢交易比例": "{:.1%}", "每筆平均損益": "{:+.2f}%"}),
                                          use_container_width=True, hide_index=True)
-                            st.caption("若同一筆交易同時觸發多個離場條件，會按觸發組合歸類；這是描述性統計，不代表單一指標的因果效果。")
+                            st.caption("交易筆數是符合該離場條件的次數；賺錢交易比例是扣費後仍賺錢的占比；每筆平均損益是這些交易平均賺或賠的幅度。同一筆交易若同時觸發數個條件，會合併歸類，這只是整理結果，不代表某一條件單獨造成盈虧。")
 
-                        st.markdown("#### 交易成本敏感度")
+                        st.markdown("#### 費用增加後，結果可能如何變化")
                         cost_rows = []
                         for scenario_name, multiplier in (("設定成本", 1.0), ("成本提高 50%", 1.5), ("成本加倍", 2.0)):
                             scenario_result = analyze_indicator_backtest(
@@ -2980,15 +2994,16 @@ else:
                             if scenario_result is not None:
                                 scenario_metrics = scenario_result["strategy_metrics"]
                                 cost_rows.append({
-                                    "成本情境": scenario_name,
-                                    "策略累積報酬(%)": scenario_metrics["cumulative_return"] * 100,
-                                    "最大回撤(%)": scenario_metrics["mdd"] * 100,
-                                    "期末資產": scenario_metrics["ending_value"],
+                                    "費用假設": scenario_name,
+                                    "整段期間損益(%)": scenario_metrics["cumulative_return"] * 100,
+                                    "從高點算起最大跌幅(%)": scenario_metrics["mdd"] * 100,
+                                    "結束時資產(元)": scenario_metrics["ending_value"],
                                 })
                         if cost_rows:
                             st.dataframe(pd.DataFrame(cost_rows).style.format({
-                                "策略累積報酬(%)": "{:+.2f}%", "最大回撤(%)": "{:.2f}%", "期末資產": "{:,.0f}",
+                                "整段期間損益(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%", "結束時資產(元)": "{:,.0f}",
                             }), use_container_width=True, hide_index=True)
+                            st.caption("這裡固定使用同一批買賣訊號，只調高手續費、稅費和滑價假設；用來觀察費用變貴時，獲利可能縮水多少。")
 
                         if len(df_calc) >= 40:
                             split_index = int(len(df_calc) * 0.7)
@@ -3008,8 +3023,8 @@ else:
                                 oos_trades["_entry_index"] = oos_trades.get("_entry_index", pd.Series(dtype=float)) - split_index
                                 oos_trades["_exit_index"] = oos_trades.get("_exit_index", pd.Series(dtype=float)) - split_index
                                 for period_name, period_data, period_trades in (
-                                    ("樣本內（前 70%）", df_calc.iloc[:split_index], in_sample_trades),
-                                    ("樣本外（後 30%）", df_calc.iloc[split_index:], oos_trades),
+                                    ("較早的前 70% 資料", df_calc.iloc[:split_index], in_sample_trades),
+                                    ("較晚的後 30% 資料", df_calc.iloc[split_index:], oos_trades),
                                 ):
                                     period_result = analyze_indicator_backtest(
                                         period_data, period_trades, float(bt_initial_capital),
@@ -3019,38 +3034,39 @@ else:
                                         period_metrics = period_result["strategy_metrics"]
                                         period_rows.append({
                                             "期間": period_name,
-                                            "累積報酬(%)": period_metrics["cumulative_return"] * 100,
-                                            "CAGR(%)": period_metrics["cagr"] * 100 if period_metrics["cagr"] is not None else None,
-                                            "MDD(%)": period_metrics["mdd"] * 100,
+                                            "整段期間損益(%)": period_metrics["cumulative_return"] * 100,
+                                            "平均每年報酬(%)": period_metrics["cagr"] * 100 if period_metrics["cagr"] is not None else None,
+                                            "從高點算起最大跌幅(%)": period_metrics["mdd"] * 100,
                                             "交易筆數": period_metrics["trade_count"],
-                                            "勝率": period_metrics["win_rate"],
+                                            "賺錢交易比例": period_metrics["win_rate"],
                                         })
                             if period_rows:
-                                st.markdown("#### 時間順序樣本內／樣本外比較")
+                                st.markdown("#### 較早資料和較晚資料的結果比較")
                                 st.dataframe(pd.DataFrame(period_rows).style.format({
-                                    "累積報酬(%)": "{:+.2f}%", "CAGR(%)": "{:+.2f}%", "MDD(%)": "{:.2f}%", "勝率": "{:.1%}",
+                                    "整段期間損益(%)": "{:+.2f}%", "平均每年報酬(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%", "賺錢交易比例": "{:.1%}",
                                 }), use_container_width=True, hide_index=True)
-                                st.caption(f"以 {df_calc.index[split_index]:%Y-%m-%d} 為切分點；兩段各自以相同初始本金計算，跨越切分日的交易不計入兩段，樣本外仍使用同一組設定，不代表參數經過獨立最佳化。")
+                                st.caption(f"以 {df_calc.index[split_index]:%Y-%m-%d} 分成前後兩段，各段從相同本金重新計算；跨過分界日的交易不列入。表中的損益、最大跌幅、交易筆數和賺錢比例，分別表示整體賺賠、曾經最深跌幅、買賣次數和賺錢交易占比。後段用來看看同一套設定在較晚資料的表現，但設定沒有另外調整，因此不代表未來一定能維持相同結果。")
 
-                        st.markdown("#### 資產曲線與回撤")
+                        st.markdown("#### 資產變化和從高點下跌的幅度")
                         equity_fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                                                    row_heights=[0.68, 0.32],
-                                                   subplot_titles=("資產曲線（成本後）", "策略回撤"))
+                                                   subplot_titles=("扣除費用後的資產變化", "距離過去高點的跌幅"))
                         equity_fig.add_trace(go.Scatter(x=analysis["strategy_equity"].index,
                                                        y=analysis["strategy_equity"].values,
-                                                       name="技術指標策略", line=dict(color="#2E86DE", width=2)), row=1, col=1)
+                                                       name="依訊號買賣", line=dict(color="#2E86DE", width=2)), row=1, col=1)
                         equity_fig.add_trace(go.Scatter(x=analysis["benchmark_equity"].index,
                                                        y=analysis["benchmark_equity"].values,
-                                                       name="同標的買進持有", line=dict(color="#7F8C8D", width=1.5)), row=1, col=1)
+                                                       name="直接買進並持有", line=dict(color="#7F8C8D", width=1.5)), row=1, col=1)
                         equity_fig.add_trace(go.Scatter(x=analysis["strategy_drawdown"].index,
                                                        y=analysis["strategy_drawdown"].values * 100,
-                                                       name="策略回撤", fill="tozeroy",
+                                                       name="低於過去高點的幅度", fill="tozeroy",
                                                        line=dict(color="#E74C3C", width=1.5)), row=2, col=1)
-                        equity_fig.update_yaxes(title_text="資產", row=1, col=1)
-                        equity_fig.update_yaxes(title_text="回撤 (%)", ticksuffix="%", row=2, col=1)
+                        equity_fig.update_yaxes(title_text="資產金額（元）", row=1, col=1)
+                        equity_fig.update_yaxes(title_text="比過去高點低（%）", ticksuffix="%", row=2, col=1)
                         equity_fig.update_layout(height=560, hovermode="x unified", legend=dict(orientation="h", y=1.08),
                                                  margin=dict(l=20, r=20, t=65, b=20))
                         st.plotly_chart(equity_fig, use_container_width=True, config={"responsive": True})
+                        st.caption("上圖比較策略資產和直接買進持有的資產變化；下圖顯示策略資產比之前最高點低多少，越往下代表當時跌得越深。")
 
                         period_returns = analysis["period_returns"].dropna()
                         if not period_returns.empty:
@@ -3070,7 +3086,7 @@ else:
                                 period_frame["期間"] = period_frame.index.month
                                 period_axis = [f"{period}月" for period in range(1, analysis["period_count"] + 1)]
                             monthly_pivot = period_frame.pivot(index="年度", columns="期間", values="期間報酬").reindex(columns=range(1, analysis["period_count"] + 1))
-                            st.markdown(f"#### {analysis['period_label']}熱圖")
+                            st.markdown(f"#### 每期報酬顏色表（{analysis['period_label']}）")
                             heatmap = go.Figure(go.Heatmap(
                                 z=monthly_pivot.to_numpy() * 100,
                                 x=period_axis,
@@ -3082,19 +3098,19 @@ else:
                             heatmap.update_layout(height=max(250, 48 * len(monthly_pivot) + 100),
                                                   margin=dict(l=20, r=20, t=20, b=20))
                             st.plotly_chart(heatmap, use_container_width=True, config={"responsive": True})
+                            st.caption("每格代表該月、該季、該半年或該年度的資產變化；綠色表示上漲，紅色表示下跌，顏色越深代表幅度越大。沒有顏色表示該期沒有資料。")
 
                         st.caption(
-                            f"交易筆數 {strategy_metrics['trade_count']}；每筆期望報酬 {show_percent_points(strategy_metrics['expectancy_pct'])}；"
-                            f"平均獲利 {show_percent_points(strategy_metrics['average_win_pct'])}；平均虧損 {show_percent_points(strategy_metrics['average_loss_pct'])}；"
-                            f"盈虧比 {show_number(strategy_metrics['payoff_ratio'])}；最長連續虧損 {strategy_metrics['longest_loss_streak']} 筆；"
-                            f"最長回撤 {strategy_metrics['longest_drawdown_bars']} 根 K 棒。"
+                            f"交易筆數 {strategy_metrics['trade_count']}；每筆平均損益 {show_percent_points(strategy_metrics['expectancy_pct'])}；"
+                            f"平均賺錢幅度 {show_percent_points(strategy_metrics['average_win_pct'])}；平均賠錢幅度 {show_percent_points(strategy_metrics['average_loss_pct'])}；"
+                            f"平均賺賠幅度比 {show_number(strategy_metrics['payoff_ratio'])}；最多連續賠錢 {strategy_metrics['longest_loss_streak']} 筆；"
+                            f"最長未回到先前高點的時間 {strategy_metrics['longest_drawdown_bars']} 根走勢資料。"
                         )
                         if strategy_metrics["cagr"] is None:
-                            st.info("回測時間跨度或有效 K 棒數不足，為避免年化數字失真，CAGR、年化波動率、Sharpe 與 Sortino 暫不顯示。")
+                            st.info("回測時間跨度或有效資料筆數不足，為避免年化數字失真，平均每年報酬和報酬起伏參考數值暫不顯示。")
                         st.caption(
-                            "回測假設本金全額輪動且可零碎股，沿用原系統的收盤訊號／收盤價成交與日內高低價停損判斷；成本依上方設定估算，"
-                            "尚未模擬下一交易日成交、跳空滑價或單根 K 棒內的價格先後路徑。買進持有基準使用同一價格序列，"
-                            "不額外推定股息是否已調整。"
+                            "模擬假設所有本金可投入且可買零碎股；依收盤資料產生訊號，並假設以同一收盤價買賣。停損參考當期最高價與最低價，"
+                            "但沒有模擬隔日開盤跳空、實際成交價或當日價格先後順序。直接買進持有使用相同價格資料，沒有另外估算股息。"
                         )
 
     except Exception as ex_tab:
