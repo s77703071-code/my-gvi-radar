@@ -1314,7 +1314,7 @@ def calculate_money_weighted_return(cash_flows):
     return float((low + high) / 2.0)
 
 
-def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0):
+def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0, exit_cost_rate=0.0):
     """Buy at the first available price each month and report cash-flow-aware returns."""
     if isinstance(price_series, pd.DataFrame):
         if "Close" not in price_series.columns:
@@ -1328,6 +1328,7 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
     prices = prices[prices > 0]
     monthly_contribution = float(monthly_contribution)
     commission_rate = max(0.0, float(commission_rate))
+    exit_cost_rate = min(1.0, max(0.0, float(exit_cost_rate)))
     if prices.empty or monthly_contribution <= 0:
         raise ValueError("請提供有效股價與大於零的每月投入金額。")
 
@@ -1360,6 +1361,11 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
         previous_value = portfolio_value
 
     history = pd.DataFrame(history_rows).set_index("date")
+    ending_value_before_exit_cost = float(history["portfolio_value"].iloc[-1])
+    exit_fee = ending_value_before_exit_cost * exit_cost_rate
+    if exit_fee:
+        history.iloc[-1, history.columns.get_loc("portfolio_value")] = ending_value_before_exit_cost - exit_fee
+        total_fees += exit_fee
     ending_value = float(history["portfolio_value"].iloc[-1])
     cash_flows.append((history.index[-1], ending_value))
     money_weighted_return = calculate_money_weighted_return(cash_flows)
@@ -1375,6 +1381,7 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
             "money_weighted_return": money_weighted_return,
             "mdd": float(drawdown.min()),
             "fees": total_fees,
+            "exit_fee": exit_fee,
         },
     }
 
@@ -1419,6 +1426,123 @@ def build_chip_flow_summary(price_history, institutional_trade=None, issued_shar
                 "detail": f"三大法人合計買賣超佔已發行股數 {net_pct:+.4f}%；只看當日，單日變化不等於持股集中。",
             }
     return summary
+
+
+def describe_backtest_conditions(entry_conds, exit_conds, risk_reward_ratio=None):
+    """Create a concise, readable label for a manually tested indicator setup."""
+    entry_labels = {
+        "ma_mode": "均線", "kd_mode": "KD", "macd_mode": "MACD",
+        "vol_mode": "成交量", "rsi_mode": "RSI", "bb_mode": "布林通道",
+    }
+    exit_labels = {
+        "ma_mode": "均線離場", "kd_mode": "KD離場", "macd_mode": "MACD離場",
+        "vol_mode": "成交量離場", "rsi_mode": "RSI離場", "bb_mode": "布林通道離場",
+    }
+    entries = []
+    for key, label in entry_labels.items():
+        value = entry_conds.get(key)
+        if value and value != "停用":
+            suffix = f"{entry_conds.get('ma_p')}日" if key == "ma_mode" else ""
+            entries.append(f"{label}{suffix}:{value}")
+    exits = []
+    for key, label in exit_labels.items():
+        value = exit_conds.get(key)
+        if value and value != "停用":
+            suffix = f"{exit_conds.get('ma_p')}日" if key == "ma_mode" else ""
+            exits.append(f"{label}{suffix}:{value}")
+    stop_loss = float(entry_conds.get("stop_loss_pct", exit_conds.get("stop_loss_pct", 0)) or 0)
+    trailing = float(exit_conds.get("trailing_stop_pct", 0) or 0)
+    if stop_loss > 0:
+        exits.append(f"固定停損{stop_loss:g}%")
+    if trailing > 0:
+        exits.append(f"移動停損{trailing:g}%")
+    if risk_reward_ratio is not None and (stop_loss > 0 or trailing > 0):
+        exits.append(f"風險報酬1:{float(risk_reward_ratio):g}")
+    elif risk_reward_ratio is not None:
+        exits.append("風險報酬停利未生效（沒有價格型停損）")
+    entry_text = "、".join(entries) if entries else "未啟用買進條件"
+    if entries:
+        entry_text += "（" + ("全部符合" if entry_conds.get("match_mode") == "ALL" else "任一符合") + "）"
+    exit_text = "、".join(exits) if exits else "未啟用離場條件"
+    return f"買進：{entry_text}；離場：{exit_text}"
+
+
+def build_backtest_coach_advice(strategy_metrics, benchmark_metrics, dca_metrics=None,
+                                grid_metrics=None, out_of_sample_metrics=None):
+    """Turn historical metrics into cautious, plain-language review notes."""
+    trade_count = int(strategy_metrics.get("trade_count") or 0)
+    cumulative = _finite_number(strategy_metrics.get("cumulative_return"))
+    win_rate = _finite_number(strategy_metrics.get("win_rate"))
+    profit_factor = _finite_number(strategy_metrics.get("profit_factor"))
+    expectancy = _finite_number(strategy_metrics.get("expectancy_pct"))
+    notes = []
+    if trade_count < 20:
+        status = "暫不建議直接採用" if (
+            cumulative is not None and cumulative <= 0
+            or expectancy is not None and expectancy <= 0
+            or profit_factor is not None and profit_factor < 1.0
+        ) else "樣本不足"
+        notes.append(f"目前只有 {trade_count} 筆完成交易，勝率容易被少數交易影響；先累積更多紀錄，不據此判定策略好壞。")
+    elif cumulative is None or expectancy is None or cumulative <= 0 or expectancy <= 0 or (profit_factor is not None and profit_factor < 1.0):
+        status = "暫不建議直接採用"
+        notes.append("扣除設定費用後，整段報酬或每筆平均損益不理想；先調整條件並重新檢查較晚期間的結果。")
+    elif trade_count >= 30 and profit_factor is not None and profit_factor >= 1.2 and win_rate is not None and win_rate >= 0.55:
+        status = "可優先列入觀察"
+        notes.append("交易筆數、勝率、整體報酬與賺賠金額比目前達到初步觀察條件；這是回測候選，不代表適合直接投入。")
+    else:
+        status = "繼續觀察"
+        notes.append("目前回測有正向跡象，但交易筆數或賺賠金額比仍不足以列為優先候選。")
+
+    if win_rate is not None:
+        if win_rate < 0.40:
+            status = "暫不建議直接採用"
+            notes.append("勝率低於 40%，目前不列為優先使用條件；即使總報酬為正，也要確認賺錢交易平均幅度明顯大於賠錢交易，並以更多樣本和樣本外結果再驗證。")
+        elif win_rate >= 0.55:
+            if profit_factor is not None and profit_factor < 1.0:
+                notes.append("勝率雖高，但賺賠金額比低於 1；少數較大的虧損可能抵銷多筆小獲利。")
+            else:
+                notes.append("勝率達到 55% 的參考線；仍須同時看賺賠金額比、總報酬及回撤，不能只看勝率。")
+        else:
+            notes.append("勝率未達 55% 參考線；請搭配賺賠金額比和每筆平均損益判讀。")
+
+    compare_values = [("一開始買進並持有", benchmark_metrics.get("cumulative_return"))]
+    if dca_metrics:
+        total_contributed = _finite_number(dca_metrics.get("total_contributed"))
+        ending_value = _finite_number(dca_metrics.get("ending_value"))
+        dca_return = (ending_value / total_contributed - 1.0) if total_contributed and ending_value is not None else None
+        compare_values.append(("定期定額", dca_return))
+    if grid_metrics:
+        compare_values.append(("網格（依比較頁設定）", grid_metrics.get("cumulative_return")))
+    underperformed = []
+    for label, value in compare_values:
+        value = _finite_number(value)
+        if cumulative is not None and value is not None and cumulative < value:
+            underperformed.append(label)
+    if underperformed:
+        if status == "可優先列入觀察" and compare_values and len(underperformed) == len(compare_values):
+            status = "繼續觀察"
+        notes.append("同期間報酬低於「" + "、".join(underperformed) + "」；若目標是追求資產成長，先比較簡單做法並確認風險、投入時點與費用設定一致。")
+    elif compare_values and cumulative is not None:
+        notes.append("目前策略整段報酬沒有落後可用的同期比較項目；仍需留意最大跌幅及不同市場期間的表現。")
+
+    oos_return = _finite_number(out_of_sample_metrics.get("cumulative_return")) if out_of_sample_metrics else None
+    oos_trades = int(out_of_sample_metrics.get("trade_count") or 0) if out_of_sample_metrics else 0
+    if out_of_sample_metrics:
+        if oos_trades < 10:
+            if status == "可優先列入觀察":
+                status = "繼續觀察"
+            notes.append(f"較晚 30% 資料只有 {oos_trades} 筆交易，樣本仍少，無法確認條件是否穩定。")
+        elif oos_return is not None and oos_return <= 0:
+            status = "暫不建議直接採用"
+            notes.append("較晚 30% 資料為負報酬；整段回測的好結果可能集中在較早期間。")
+        else:
+            notes.append("較晚 30% 資料仍為正報酬，提供一項穩定性參考，但不代表未來能維持。")
+    else:
+        if status == "可優先列入觀察":
+            status = "繼續觀察"
+        notes.append("歷史長度不足以切出較晚期間檢查；不要只憑整段回測選用條件。")
+
+    return {"status": status, "notes": notes}
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_institutional_market_data():
@@ -2359,6 +2483,7 @@ else:
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
     tabs_created = False
+    grid_advice_metrics = None
     df_chart = None
     if selected_stock:
         try:
@@ -2626,16 +2751,6 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
-        if df_chart is not None and not df_chart.empty:
-            csv_data = df_chart.to_csv().encode('utf-8-sig')
-            st.download_button(
-                label=f"📥 一鍵下載【{c_name}】歷史 K 線資料 (CSV)",
-                data=csv_data,
-                file_name=f"{selected_stock}_historical_data.csv",
-                mime='text/csv',
-                use_container_width=True
-            )
-
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
             "📊 彩色 K 線圖與成交量",
             "📦 籌碼流向參考",
@@ -3088,6 +3203,24 @@ else:
 
                     bh_mdd = calc_mdd(bh_asset_curve)
                     grid_mdd = calc_mdd(grid_asset_curve)
+                    grid_span_years = max(
+                        (pd.Timestamp(df_chart.index[-1]) - pd.Timestamp(df_chart.index[0])).total_seconds()
+                        / (365.25 * 24 * 60 * 60),
+                        0.0,
+                    )
+                    grid_advice_cagr = (
+                        (grid_final_val / float(sim_capital)) ** (1.0 / grid_span_years) - 1.0
+                        if grid_span_years >= 0.5 and grid_final_val > 0 and float(sim_capital) > 0 else None
+                    )
+                    grid_advice_metrics = {
+                        "cumulative_return": grid_total_ret / 100.0,
+                        "cagr": grid_advice_cagr,
+                        "mdd": grid_mdd / 100.0,
+                        "strategy": grid_sim_strategy,
+                        "capital": float(sim_capital),
+                        "fee_rate": float(fee_rate),
+                        "tax_rate": float(tax_rate),
+                    }
 
                     st.markdown("#### 三種方式結果摘要")
                     summary_cols = st.columns(4)
@@ -3283,6 +3416,21 @@ else:
                         def show_percent_points(value):
                             return "—" if value is None or not np.isfinite(value) else f"{value:+.2f}%"
 
+                        backtest_dca_result = None
+                        try:
+                            dca_prices = pd.to_numeric(df_calc["Close"], errors="coerce").dropna()
+                            dca_dates = pd.to_datetime(dca_prices.index, errors="coerce")
+                            dca_month_count = max(1, int(dca_dates[~dca_dates.isna()].to_period("M").nunique()))
+                            dca_monthly_amount = float(bt_initial_capital) / dca_month_count
+                            dca_buy_cost = (float(bt_commission_pct) + float(bt_slippage_pct)) / 100.0
+                            dca_exit_cost = (float(bt_commission_pct) + float(bt_sell_tax_pct) + float(bt_slippage_pct)) / 100.0
+                            backtest_dca_result = simulate_monthly_dca(
+                                dca_prices, dca_monthly_amount, commission_rate=dca_buy_cost,
+                                exit_cost_rate=dca_exit_cost,
+                            )
+                        except Exception as dca_compare_error:
+                            st.caption(f"定期定額參考結果暫時無法計算：{dca_compare_error}")
+
                         metric_row1 = st.columns(4)
                         excess_return = strategy_metrics["cumulative_return"] - benchmark_metrics["cumulative_return"]
                         metric_row1[0].metric("整段期間損益（已扣費用）", show_pct(strategy_metrics["cumulative_return"], True),
@@ -3304,8 +3452,8 @@ else:
                         metric_row2[3].metric("持有股票的時間比例", show_pct(strategy_metrics["exposure"]),
                                               help="回測期間有持有股票的時間占全部時間多少；其餘時間策略資金留在現金。")
 
-                        st.markdown("#### 按策略買賣，和直接買進持有比較")
-                        comparison = pd.DataFrame([
+                        st.markdown("#### 回測策略與長期持有、定期定額及網格比較")
+                        comparison_rows = [
                             {"做法": "依訊號買進或賣出", "整段期間損益(%)": strategy_metrics["cumulative_return"] * 100,
                              "平均每年報酬(%)": strategy_metrics["cagr"] * 100 if strategy_metrics["cagr"] is not None else None,
                              "從高點算起最大跌幅(%)": strategy_metrics["mdd"] * 100,
@@ -3316,12 +3464,39 @@ else:
                              "從高點算起最大跌幅(%)": benchmark_metrics["mdd"] * 100,
                              "資金起伏幅度(年化 %)": benchmark_metrics["annualized_volatility"] * 100 if benchmark_metrics["annualized_volatility"] is not None else None,
                              "起伏下的報酬參考值": benchmark_metrics["sharpe"], "結束時資產(元)": benchmark_metrics["ending_value"]},
-                        ])
+                        ]
+                        if backtest_dca_result is not None:
+                            dca_metrics = backtest_dca_result["metrics"]
+                            dca_return = dca_metrics["ending_value"] / dca_metrics["total_contributed"] - 1.0 if dca_metrics["total_contributed"] > 0 else None
+                            comparison_rows.append({
+                                "做法": "每月定期定額（同總投入）",
+                                "整段期間損益(%)": dca_return * 100 if dca_return is not None else None,
+                                "平均每年報酬(%)": dca_metrics["money_weighted_return"] * 100 if dca_metrics["money_weighted_return"] is not None else None,
+                                "從高點算起最大跌幅(%)": dca_metrics["mdd"] * 100,
+                                "資金起伏幅度(年化 %)": None,
+                                "起伏下的報酬參考值": None,
+                                "結束時資產(元)": dca_metrics["ending_value"],
+                            })
+                        if grid_advice_metrics is not None:
+                            comparison_rows.append({
+                                "做法": "網格（依比較頁設定）",
+                                "整段期間損益(%)": grid_advice_metrics["cumulative_return"] * 100,
+                                "平均每年報酬(%)": grid_advice_metrics["cagr"] * 100,
+                                "從高點算起最大跌幅(%)": grid_advice_metrics["mdd"] * 100,
+                                "資金起伏幅度(年化 %)": None,
+                                "起伏下的報酬參考值": None,
+                                "結束時資產(元)": float(bt_initial_capital) * (1.0 + grid_advice_metrics["cumulative_return"]),
+                            })
+                        comparison = pd.DataFrame(comparison_rows)
                         st.dataframe(comparison.style.format({
                             "整段期間損益(%)": "{:+.2f}%", "平均每年報酬(%)": "{:+.2f}%", "從高點算起最大跌幅(%)": "{:.2f}%",
                             "資金起伏幅度(年化 %)": "{:.2f}%", "起伏下的報酬參考值": "{:.2f}", "結束時資產(元)": "{:,.0f}",
                         }), use_container_width=True, hide_index=True)
-                        st.caption("兩種做法使用相同本金、相同期間和相同費用。整段損益是整體賺賠；平均每年報酬是換算後的年平均；最大跌幅是資產曾從高點跌最多的幅度；資金起伏幅度越大，代表過程越顛簸；最後一欄的參考值越高，通常表示承受相近起伏時取得的報酬較多。")
+                        st.caption("策略與買進持有使用相同本金、期間和回測成本。定期定額把相同總預算分次投入，並將期末賣出成本計入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。網格報酬與最大跌幅沿用網格比較頁設定，期末資產按回測本金等比例換算；請確認期間與成本相同再比較。股息未計入。")
+                        if selected_tf in ("1分鐘", "5分鐘", "30分鐘", "60分鐘"):
+                            st.info("目前資料是短線週期，涵蓋時間不足以代表長期月扣款；定期定額只在資料涵蓋月份的第一筆價格投入。")
+                        elif selected_tf in ("1季", "半年", "1年"):
+                            st.info("目前資料是季線或更長週期，沒有每個月的價格；定期投入只在有資料的月份執行，並非逐月扣款。")
 
                         if not df_trades.empty and not analysis["trade_analysis"].empty:
                             reason_frame = pd.DataFrame({
@@ -3361,6 +3536,7 @@ else:
                             }), use_container_width=True, hide_index=True)
                             st.caption("這裡固定使用同一批買賣訊號，只調高手續費、稅費和滑價假設；用來觀察費用變貴時，獲利可能縮水多少。")
 
+                        oos_advice_metrics = None
                         if len(df_calc) >= 40:
                             split_index = int(len(df_calc) * 0.7)
                             period_rows = []
@@ -3388,6 +3564,8 @@ else:
                                         selected_tf, is_tw_stock)
                                     if period_result is not None:
                                         period_metrics = period_result["strategy_metrics"]
+                                        if period_name == "較晚的後 30% 資料":
+                                            oos_advice_metrics = period_metrics.copy()
                                         period_rows.append({
                                             "期間": period_name,
                                             "整段期間損益(%)": period_metrics["cumulative_return"] * 100,
@@ -3403,6 +3581,48 @@ else:
                                 }), use_container_width=True, hide_index=True)
                                 st.caption(f"以 {df_calc.index[split_index]:%Y-%m-%d} 分成前後兩段，各段從相同本金重新計算；跨過分界日的交易不列入。表中的損益、最大跌幅、交易筆數和賺錢比例，分別表示整體賺賠、曾經最深跌幅、買賣次數和賺錢交易占比。後段用來看看同一套設定在較晚資料的表現，但設定沒有另外調整，因此不代表未來一定能維持相同結果。")
 
+                        dca_advice_metrics = backtest_dca_result["metrics"] if backtest_dca_result is not None else None
+                        backtest_advice = build_backtest_coach_advice(
+                            strategy_metrics, benchmark_metrics, dca_advice_metrics,
+                            grid_advice_metrics, oos_advice_metrics,
+                        )
+                        condition_label = describe_backtest_conditions(
+                            entry_conds, exit_conds,
+                            float(bt_rr_multiple) if bt_rr_enabled else None,
+                        )
+                        st.markdown("#### 🧭 操盤手回測條件提示")
+                        st.info(f"**判讀：{backtest_advice['status']}**\n\n" + "\n\n".join(f"- {note}" for note in backtest_advice["notes"]))
+                        st.caption("提示會一起參考交易筆數、賺錢交易比例、賺賠金額比、每筆平均損益、同期比較和較晚期間。40%／55% 勝率、20／30 筆、較晚期間 10 筆及 1.2 賺賠比只是畫面提示門檻，不是保證獲利標準。網格比較沿用另一頁的資金與成本設定；請先確認設定相同。")
+
+                        dca_total_return = None
+                        if dca_advice_metrics and dca_advice_metrics.get("total_contributed", 0) > 0:
+                            dca_total_return = (dca_advice_metrics["ending_value"] / dca_advice_metrics["total_contributed"] - 1.0) * 100.0
+                        grid_total_return_for_advice = grid_advice_metrics["cumulative_return"] * 100.0 if grid_advice_metrics else None
+                        advice_record = {
+                            "ticker": selected_stock,
+                            "stock_name": c_name,
+                            "condition": condition_label,
+                            "timeframe": selected_tf,
+                            "period": f"{df_calc.index[0]:%Y-%m-%d}～{df_calc.index[-1]:%Y-%m-%d}",
+                            "trade_count": int(strategy_metrics["trade_count"]),
+                            "win_rate_pct": strategy_metrics["win_rate"] * 100.0 if strategy_metrics["win_rate"] is not None else None,
+                            "total_return_pct": strategy_metrics["cumulative_return"] * 100.0,
+                            "profit_factor": strategy_metrics["profit_factor"],
+                            "buy_hold_pct": benchmark_metrics["cumulative_return"] * 100.0,
+                            "dca_pct": dca_total_return,
+                            "grid_pct": grid_total_return_for_advice,
+                            "oos_pct": oos_advice_metrics["cumulative_return"] * 100.0 if oos_advice_metrics else None,
+                            "status": backtest_advice["status"],
+                            "advice": "；".join(backtest_advice["notes"][:2]),
+                        }
+                        history_key = (advice_record["ticker"], advice_record["timeframe"], advice_record["period"], advice_record["condition"])
+                        history = list(st.session_state.get("trader_backtest_history", []))
+                        history = [item for item in history if (
+                            item.get("ticker"), item.get("timeframe"), item.get("period"), item.get("condition")
+                        ) != history_key]
+                        history.append(advice_record)
+                        st.session_state["trader_backtest_history"] = history[-50:]
+
                         st.markdown("#### 資產變化和從高點下跌的幅度")
                         equity_fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                                                    row_heights=[0.68, 0.32],
@@ -3413,6 +3633,11 @@ else:
                         equity_fig.add_trace(go.Scatter(x=analysis["benchmark_equity"].index,
                                                        y=analysis["benchmark_equity"].values,
                                                        name="直接買進並持有", line=dict(color="#7F8C8D", width=1.5)), row=1, col=1)
+                        if backtest_dca_result is not None:
+                            equity_fig.add_trace(go.Scatter(
+                                x=backtest_dca_result["history"].index,
+                                y=backtest_dca_result["history"]["portfolio_value"].values,
+                                name="每月定期定額", line=dict(color="#4C78A8", width=1.5, dash="dot")), row=1, col=1)
                         equity_fig.add_trace(go.Scatter(x=analysis["strategy_drawdown"].index,
                                                        y=analysis["strategy_drawdown"].values * 100,
                                                        name="低於過去高點的幅度", fill="tozeroy",
@@ -3501,8 +3726,63 @@ else:
             strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
             st.caption("優點：同時看自由現金流收益與 PEG，兼顧現金流和成長估值。\n\n限制：現金流與成長資料可能缺漏，週期性公司容易失真。")
 
-        custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區：", value="2330.TW, 3293.TWO, 8069.TWO, NVDA, AAPL")
-        custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
+        st.markdown("#### ✍️ 操盤手自訂觀察代碼掃描區")
+        st.caption("每個欄位輸入一檔股票代碼。台股上市請加 .TW、上櫃請加 .TWO；美股輸入代碼即可。下方掃描結果沿用台股／美股核心池的明細欄位與策略評分方式。")
+        watch_defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
+        watch_columns = st.columns(3)
+        custom_scan_list = []
+        duplicate_watch_codes = []
+        for watch_index in range(12):
+            with watch_columns[watch_index % 3]:
+                watch_code = st.text_input(
+                    f"觀察代碼 {watch_index + 1}",
+                    value=watch_defaults[watch_index],
+                    placeholder="例如 2330.TW 或 NVDA",
+                    key=f"trader_watch_ticker_{watch_index + 1}",
+                ).strip().upper()
+            if watch_code:
+                if watch_code in custom_scan_list:
+                    duplicate_watch_codes.append(watch_code)
+                else:
+                    custom_scan_list.append(watch_code)
+        if duplicate_watch_codes:
+            st.caption("重複代碼已自動略過：" + "、".join(dict.fromkeys(duplicate_watch_codes)))
+        st.caption(f"目前輸入 {len(custom_scan_list)} 檔；掃描結果會列出排名、股票代碼／名稱、股價、策略評分及已啟用指標明細。")
+
+        coach_history = st.session_state.get("trader_backtest_history", [])
+        if coach_history:
+            matched_history = [item for item in coach_history if item.get("ticker") in custom_scan_list]
+            if not matched_history:
+                matched_history = coach_history[-20:]
+                st.caption("目前觀察代碼沒有對應的回測紀錄，以下先顯示最近測試過的條件；加入該股票代碼後會一併列入觀察名單。")
+            if matched_history:
+                st.markdown("#### 🧭 技術指標回測條件觀察紀錄")
+                st.caption("僅整理您在回測頁手動執行過的條件；不會自動改動選股分數或替您下單。")
+                status_rank = {"可優先列入觀察": 0, "繼續觀察": 1, "樣本不足": 2, "暫不建議直接採用": 3}
+                matched_history.sort(key=lambda item: (
+                    status_rank.get(item.get("status"), 4),
+                    -(item.get("win_rate_pct") if item.get("win_rate_pct") is not None else -1),
+                    -(item.get("total_return_pct") if item.get("total_return_pct") is not None else -1),
+                ))
+                coach_view = pd.DataFrame(matched_history[:20])
+                coach_columns = ["ticker", "stock_name", "condition", "timeframe", "period", "trade_count", "win_rate_pct",
+                                 "total_return_pct", "buy_hold_pct", "dca_pct", "grid_pct", "oos_pct",
+                                 "profit_factor", "status", "advice"]
+                coach_view = coach_view[[column for column in coach_columns if column in coach_view.columns]].rename(columns={
+                    "ticker": "股票代碼", "stock_name": "股票名稱", "condition": "回測條件", "timeframe": "週期", "period": "資料期間",
+                    "trade_count": "交易筆數", "win_rate_pct": "勝率(%)", "total_return_pct": "整段報酬(%)",
+                    "buy_hold_pct": "長期持有(%)", "dca_pct": "定期定額(%)", "grid_pct": "網格(%)",
+                    "oos_pct": "較晚期間(%)", "profit_factor": "賺賠金額比", "status": "操盤手提示", "advice": "建議摘要",
+                })
+                st.dataframe(coach_view.style.format({
+                    "勝率(%)": "{:.1f}%", "整段報酬(%)": "{:+.2f}%", "長期持有(%)": "{:+.2f}%",
+                    "定期定額(%)": "{:+.2f}%", "網格(%)": "{:+.2f}%", "較晚期間(%)": "{:+.2f}%",
+                    "賺賠金額比": "{:.2f}",
+                }, na_rep="—"), use_container_width=True, hide_index=True)
+            else:
+                st.caption("目前觀察代碼中尚無技術指標回測紀錄；請先在回測頁執行條件測試。")
+        else:
+            st.caption("技術指標回測完成後，條件勝率與報酬建議會出現在此處；紀錄保留於目前工作階段。")
 
         def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
             conn = sqlite3.connect(DB_FILE)
