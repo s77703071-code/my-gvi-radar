@@ -583,27 +583,57 @@ else:
                 roe_src = db_row[5] if (db_row and db_row[5]) else "無數據"
                 cache_time_str = time.strftime('%Y-%m-%d %H:%M', time.localtime(db_row[6])) if (db_row and db_row[6]) else "未設定"
 
-                if price_val > 0 and bv_val is not None and roe_val is not None:
-                    pb_val = price_val / bv_val
-                    gvi_val = (bv_val / price_val) * ((1 + roe_val) ** 5)
-                    gvi_str = f"{gvi_val:.4f}"
-                    roe_str = f"{roe_val * 100:.2f}%"
-                    bv_str = f"{bv_val:,.2f} 元" if is_tw_stock else f"${bv_val:,.2f}"
-                    pb_str = f"{pb_val:.2f} 倍"
-                else:
-                    pb_val = None
-                    gvi_val = None
-                    gvi_str = "資料不足"
-                    roe_str = "資料不足"
-                    bv_str = "資料不足"
-                    pb_str = "資料不足"
+                st.markdown("### 🎛️ 戰術面板模式切換")
+                panel_mode = st.radio("選擇看盤模式：", ["📈 操盤/動能模式 (專注量價與短線動能)", "🏦 存股/價值模式 (專注基本面與估值)"], horizontal=True, label_visibility="collapsed")
+                
+                # 計算動能指標 (安全防呆)
+                prev_close = float(df_chart['Close'].iloc[-2]) if len(df_chart) > 1 else price_val
+                change = price_val - prev_close
+                change_pct = (change / prev_close) * 100 if prev_close > 0 else 0.0
+                
+                vol_today = float(df_chart['Volume'].iloc[-1]) if len(df_chart) > 0 else 0
+                vol_ma5 = float(df_chart['Volume'].rolling(5).mean().iloc[-1]) if len(df_chart) >= 5 else vol_today
+                vol_ratio = (vol_today / vol_ma5) if vol_ma5 > 0 else 1.0
+                
+                ma5_val = float(df_chart['Close'].rolling(5).mean().iloc[-1]) if len(df_chart) >= 5 else price_val
+                bias5 = ((price_val - ma5_val) / ma5_val) * 100 if ma5_val > 0 else 0.0
+                
+                high_today = float(df_chart['High'].iloc[-1]) if len(df_chart) > 0 else price_val
+                low_today = float(df_chart['Low'].iloc[-1]) if len(df_chart) > 0 else price_val
+                
+                if "價值" in panel_mode:
+                    if price_val > 0 and bv_val is not None and roe_val is not None:
+                        pb_val = price_val / bv_val
+                        gvi_val = (bv_val / price_val) * ((1 + roe_val) ** 5)
+                        gvi_str = f"{gvi_val:.4f}"
+                        roe_str = f"{roe_val * 100:.2f}%"
+                        bv_str = f"{bv_val:,.2f} 元" if is_tw_stock else f"${bv_val:,.2f}"
+                        pb_str = f"{pb_val:.2f} 倍"
+                    else:
+                        pb_val = None
+                        gvi_val = None
+                        gvi_str = "資料不足"
+                        roe_str = "資料不足"
+                        bv_str = "資料不足"
+                        pb_str = "資料不足"
 
-                gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
-                with gc2: st.metric(label="👑 GVI 成長價值指標", value=gvi_str); st.caption("📢 即時重算 (最新股價對位)")
-                with gc3: st.metric(label="📊 股東權益報酬率 ROE", value=roe_str); st.caption(f"📢 來源: {roe_src}")
-                with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption(f"📢 來源: {bv_src}")
-                with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度")
+                    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                    with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
+                    
+                    if bv_val is not None:
+                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str); st.caption("📢 最新重算")
+                        with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str); st.caption(f"📢 {roe_src}")
+                        with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption(f"📢 {bv_src}")
+                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度")
+                    else:
+                        with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
+                else:
+                    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                    with gc1: st.metric(label=f"⚡ 當前現價 ({selected_stock})", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)")
+                    with gc2: st.metric(label="🌊 今日成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off")
+                    with gc3: st.metric(label="🎯 5日均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off")
+                    with gc4: st.metric(label="🔺 今日最高價", value=f"{high_today:,.2f}")
+                    with gc5: st.metric(label="🔻 今日最低價", value=f"{low_today:,.2f}")
 
                 # ======= 升級：計算三大策略所需數值與交叉分析 =======
                 L = len(df_chart)
@@ -770,6 +800,16 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
+        if df_chart is not None and not df_chart.empty:
+            csv_data = df_chart.to_csv().encode('utf-8-sig')
+            st.download_button(
+                label=f"📥 一鍵下載【{c_name}】歷史 K 線資料 (CSV)",
+                data=csv_data,
+                file_name=f"{selected_stock}_historical_data.csv",
+                mime='text/csv',
+                use_container_width=True
+            )
+
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
