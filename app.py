@@ -601,22 +601,23 @@ else:
                 high_today = float(df_chart['High'].iloc[-1]) if len(df_chart) > 0 else price_val
                 low_today = float(df_chart['Low'].iloc[-1]) if len(df_chart) > 0 else price_val
                 
-                if "價值" in panel_mode:
-                    if price_val > 0 and bv_val is not None and roe_val is not None:
-                        pb_val = price_val / bv_val
-                        gvi_val = (bv_val / price_val) * ((1 + roe_val) ** 5)
-                        gvi_str = f"{gvi_val:.4f}"
-                        roe_str = f"{roe_val * 100:.2f}%"
-                        bv_str = f"{bv_val:,.2f} 元" if is_tw_stock else f"${bv_val:,.2f}"
-                        pb_str = f"{pb_val:.2f} 倍"
-                    else:
-                        pb_val = None
-                        gvi_val = None
-                        gvi_str = "資料不足"
-                        roe_str = "資料不足"
-                        bv_str = "資料不足"
-                        pb_str = "資料不足"
+                # 💡 修正：將變數計算獨立移出 UI 判斷區塊外，確保下方雷達圖程式永遠能讀取到 gvi_val
+                if price_val > 0 and bv_val is not None and roe_val is not None:
+                    pb_val = price_val / bv_val
+                    gvi_val = (bv_val / price_val) * ((1 + roe_val) ** 5)
+                    gvi_str = f"{gvi_val:.4f}"
+                    roe_str = f"{roe_val * 100:.2f}%"
+                    bv_str = f"{bv_val:,.2f} 元" if is_tw_stock else f"${bv_val:,.2f}"
+                    pb_str = f"{pb_val:.2f} 倍"
+                else:
+                    pb_val = None
+                    gvi_val = None
+                    gvi_str = "資料不足"
+                    roe_str = "資料不足"
+                    bv_str = "資料不足"
+                    pb_str = "資料不足"
 
+                if "價值" in panel_mode:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
                     with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
                     
