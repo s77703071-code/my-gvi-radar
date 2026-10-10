@@ -1,13 +1,12 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.11 全股票相容專業畫線與全指標回測版】 - app.py
+# 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
-import streamlit.components.v1 as components
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.11", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -117,7 +116,6 @@ def signature_save_to_db(t):
         roe_val = parse_roe(raw_roe)
         roe_source = "yfinance 財報" if roe_val is not None else None
 
-        # 🇹🇼 台灣股市備援邏輯
         if (".TW" in t or ".TWO" in t) and (book_value is None or roe_val is None):
             official_pb, official_pe = fetch_tw_official_pb_pe(t)
             if (book_value is None or book_value <= 0) and price and official_pb and official_pb > 0:
@@ -127,7 +125,6 @@ def signature_save_to_db(t):
                 roe_val = parse_roe(official_pb / official_pe)
                 roe_source = "TWSE/TPEx PB/PE代理值"
 
-        # 🇺🇸 美國股市備援邏輯
         if (".TW" not in t and ".TWO" not in t) and (book_value is None or roe_val is None):
             try:
                 bs = stock.quarterly_balance_sheet
@@ -358,7 +355,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.11（專業畫線與年.月簡化版）")
+    st.title("📈 機構級三核心策略雷達 3.12（網格複利對比與專業畫線全能版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -529,7 +526,6 @@ else:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
                 
-                # 💡【優化 1：日期改成年.月 (YYYY.MM) 格式】
                 date_strings = df_chart.index.strftime('%Y.%m').tolist()
                 c_name = STOCK_NAME_MAP.get(selected_stock, selected_stock)
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
@@ -636,11 +632,8 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測器 (3.8 全指標選單版)"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與畫線工具箱", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
             
-            # ==============================================================================
-            # 【Tab 1: 3.11 Plotly 原生 K 線圖 + 年.月日期 + 畫圖選色移除/文字註記 + K棒寬度固定】
-            # ==============================================================================
             with tab1:
                 col_title, col_draw_color = st.columns([3, 1])
                 with col_title:
@@ -655,14 +648,12 @@ else:
                     st.markdown(f"### 📊 【{c_name}】全功能互動 K 線圖 {ma_display_html}", unsafe_allow_html=True)
                 
                 with col_draw_color:
-                    # 💡【優化 3：動態自訂畫線筆劃顏色】
                     draw_color = st.color_picker("🎨 自訂畫線與文字顏色", value="#FF3333", key="draw_line_color_picker")
 
                 st.caption("💡 **繪圖工具列指南**：點擊右上方工具列「直線 (drawline)」、「筆刷」、「矩形 (drawrect)」、「📝 輸入文字 (drawtext)」即可在圖上繪製標記；點擊「橡皮擦 (eraseshape)」後選取畫線即可移除！")
                 
                 fig = make_subplots(rows=1, cols=1)
                 
-                # 繪製 K 線
                 fig.add_trace(go.Candlestick(
                     x=date_strings, 
                     open=df_chart['Open'].to_numpy().flatten().tolist(), 
@@ -673,7 +664,6 @@ else:
                     hovertext=[f"日期：{d}" for d in date_strings]
                 ), row=1, col=1)
                 
-                # 繪製自訂均線
                 for ma in personal_ma_configs:
                     p, c = ma["period"], ma["color"]
                     ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
@@ -687,15 +677,13 @@ else:
                     margin=dict(l=10, r=40, t=10, b=10), 
                     dragmode='pan', 
                     showlegend=True, 
-                    # 💡【優化 2：將 X 軸類型設為 category 確保放大縮小時 K 棒不會變形放大/縮小】
                     xaxis=dict(
                         type='category',
                         showgrid=True, 
                         gridcolor="rgba(128,128,128,0.2)",
-                        nticks=15  # 自動顯示適當數量的 YYYY.MM 日期標籤
+                        nticks=15
                     ), 
                     yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
-                    # 💡【優化 3 & 4：設定預設畫線樣式與自訂顏色】
                     newshape=dict(
                         line=dict(color=draw_color, width=2.5),
                         fillcolor=draw_color,
@@ -708,12 +696,12 @@ else:
                     use_container_width=True, 
                     config={
                         'modeBarButtonsToAdd': [
-                            'drawline',       # 直線 / 趨勢線
-                            'drawopenpath',   # 畫筆自由畫線
-                            'drawrect',       # 繪製矩形 (壓力/支撐/網格區間)
-                            'drawcircle',     # 繪製圓形
-                            'drawtext',       # 💡【優化 4：新增圖上輸入文字標註功能】
-                            'eraseshape'      # 💡【優化 3：橡皮擦點擊移除劃線】
+                            'drawline',       
+                            'drawopenpath',   
+                            'drawrect',       
+                            'drawcircle',     
+                            'drawtext',       
+                            'eraseshape'      
                         ],
                         'displayModeBar': True,
                         'scrollZoom': True
@@ -800,9 +788,109 @@ else:
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
 
+            # ==============================================================================
+            # 【Tab 4: 3.12 補回與升級：「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
+            # ==============================================================================
             with tab4:
-                st.markdown(f"### 🧪 【{c_name}】全指標多空量化策略與動態停損回測器 (3.8 版)")
+                st.markdown(f"### 🧪 【{c_name}】策略回測與「網格再平衡 vs 買進持有」歷史對比 (3.12 版)")
                 
+                # --- 第一區塊：網格再平衡 vs 買進持有 (Buy & Hold) 歷史資產動態試算 ---
+                st.markdown("#### ⚖️ 網格再平衡 (1:1) vs 買進持有 (Buy & Hold) 歷史資產對比與手續費精算")
+                
+                gc_col1, gc_col2, gc_col3 = st.columns(3)
+                with gc_col1:
+                    sim_capital = st.number_input("💵 模擬初始投入本金 (元/$)", value=100000, step=10000, key="sim_cap_input")
+                with gc_col2:
+                    fee_rate = st.number_input("💸 單邊交易手續費率 (%)", value=0.1425, step=0.01, format="%.4f", key="sim_fee_input") / 100.0
+                with gc_col3:
+                    tax_rate = st.number_input("🏛️ 賣出證券交易稅率 (%)", value=0.3000, step=0.05, format="%.4f", key="sim_tax_input") / 100.0
+
+                closes_arr = df_chart['Close'].astype(float).to_numpy()
+                
+                if len(closes_arr) >= 5:
+                    # 1. 計算 Buy & Hold (買進持有)
+                    initial_p = closes_arr[0]
+                    bh_shares = (sim_capital * (1.0 - fee_rate)) / initial_p
+                    bh_asset_curve = bh_shares * closes_arr
+                    bh_final_val = float(bh_asset_curve[-1])
+                    bh_total_ret = ((bh_final_val - sim_capital) / sim_capital) * 100.0
+
+                    # 2. 計算 1:1 固定比例網格再平衡 (帶入交易成本)
+                    stock_val = sim_capital * 0.5 * (1.0 - fee_rate)
+                    cash_val = sim_capital * 0.5
+                    grid_shares = stock_val / initial_p
+                    grid_asset_curve = []
+                    
+                    # 模擬按波段/月再平衡 (每 20 個 K棒 節點試算一次再平衡)
+                    rebalance_freq = max(1, len(closes_arr) // 20)
+                    
+                    for step_idx, p in enumerate(closes_arr):
+                        curr_stock_val = grid_shares * p
+                        total_val = curr_stock_val + cash_val
+                        
+                        if step_idx % rebalance_freq == 0 and step_idx > 0:
+                            target_stock_val = total_val * 0.5
+                            diff = target_stock_val - curr_stock_val
+                            
+                            if diff > 0: # 現金買股票 (扣手續費)
+                                buy_amt = diff * (1.0 - fee_rate)
+                                cash_val -= diff
+                                grid_shares += buy_amt / p
+                            elif diff < 0: # 賣股票變現 (扣手續費與證交稅)
+                                sell_amt = abs(diff) * (1.0 - fee_rate - tax_rate)
+                                cash_val += sell_amt
+                                grid_shares -= abs(diff) / p
+                                
+                        grid_asset_curve.append(grid_shares * p + cash_val)
+
+                    grid_final_val = float(grid_asset_curve[-1])
+                    grid_total_ret = ((grid_final_val - sim_capital) / sim_capital) * 100.0
+
+                    # 計算年化報酬率 (CAGR) 與 最大回撤 (MDD)
+                    total_bars = len(closes_arr)
+                    years_est = max(0.1, total_bars / 252.0) if "1日" in selected_tf else max(0.1, total_bars / 52.0)
+                    
+                    bh_cagr = ((bh_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if bh_final_val > 0 else -100.0
+                    grid_cagr = ((grid_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if grid_final_val > 0 else -100.0
+
+                    # MDD 計算
+                    def calc_mdd(curve):
+                        arr = np.array(curve)
+                        peak = np.maximum.accumulate(arr)
+                        drawdown = (arr - peak) / peak
+                        return float(np.min(drawdown)) * 100.0
+
+                    bh_mdd = calc_mdd(bh_asset_curve)
+                    grid_mdd = calc_mdd(grid_asset_curve)
+
+                    # 指標展示卡片
+                    m1, m2, m3, m4 = st.columns(4)
+                    with m1:
+                        st.metric("持有策略 最終總資產", f"{bh_final_val:,.0f} 元", delta=f"總報酬 {bh_total_ret:+.2f}%")
+                    with m2:
+                        st.metric("網格再平衡 最終總資產", f"{grid_final_val:,.0f} 元", delta=f"總報酬 {grid_total_ret:+.2f}%")
+                    with m3:
+                        st.metric("CAGR 年化報酬率 (買進 vs 網格)", f"{bh_cagr:+.1f}% / {grid_cagr:+.1f}%")
+                    with m4:
+                        st.metric("MDD 最大回撤 (買進 vs 網格)", f"{bh_mdd:.1f}% / {grid_mdd:.1f}%", delta="風險控制較佳" if abs(grid_mdd) < abs(bh_mdd) else "波動較大")
+
+                    # 圖表對比
+                    fig_compare = go.Figure()
+                    fig_compare.add_trace(go.Scatter(x=date_strings, y=bh_asset_curve, mode='lines', name='單純買進持有 (Buy & Hold)', line=dict(color='#00CC66', width=2)))
+                    fig_compare.add_trace(go.Scatter(x=date_strings, y=grid_asset_curve, mode='lines', name='1:1 固定比例網格再平衡', line=dict(color='#FF9900', width=2, dash='dash')))
+                    fig_compare.update_layout(
+                        title=f"📈 【{c_name}】歷史走勢下，網格再平衡 vs 買進持有之資產資產增長曲線 (扣除交易稅費)",
+                        height=380,
+                        xaxis=dict(type='category', showgrid=True, gridcolor="rgba(128,128,128,0.2)", nticks=12),
+                        yaxis=dict(title="資產總價值 (元)", showgrid=True, gridcolor="rgba(128,128,128,0.2)"),
+                        margin=dict(l=10, r=20, t=40, b=10)
+                    )
+                    st.plotly_chart(fig_compare, use_container_width=True)
+
+                st.markdown("---")
+
+                # --- 第二區塊：全指標多空量化策略與動態停損回測選單 ---
+                st.markdown("#### 🧪 技術指標多空策略與動態停損回測器")
                 bt_col1, bt_col2 = st.columns(2)
                 
                 with bt_col1:
@@ -831,8 +919,6 @@ else:
                     exit_vol_mode = st.selectbox("4. 成交量離場策略", ["停用", "極端爆量倒貨 (大於20日均量2.5倍)"], index=0, key="bt_exit_vol_sel")
                     exit_rsi_mode = st.selectbox("5. RSI 離場策略", ["停用", "超買警戒 (RSI跌破70)"], index=0, key="bt_exit_rsi_sel")
                     exit_bb_mode = st.selectbox("6. 布林通道離場策略", ["停用", "跌破布林下軌", "觸及上軌拉回"], index=0, key="bt_exit_bb_sel")
-
-                st.markdown("---")
 
                 if st.button(f"🚀 開始執行【{c_name}】全指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
                     entry_conds = {
