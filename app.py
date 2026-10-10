@@ -1,12 +1,12 @@
 # ==============================================================================
-# 【機構級三核心策略雷達 3.6 自動檢測下載與缺值診斷全能版】 - app.py
+# 【機構級三核心策略雷達 3.7 動態網格資產管理與複利回測版】 - app.py
 # ==============================================================================
 import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.6", layout="wide", page_icon="📈")
+st.set_page_config(page_title="機構級三核心策略雷達 3.7", layout="wide", page_icon="📈")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
@@ -126,7 +126,7 @@ def signature_save_to_db(t):
                 roe_val = parse_roe(official_pb / official_pe)
                 roe_source = "TWSE/TPEx PB/PE代理值"
 
-        # 🇺🇸 美國股市備援邏輯 (資產負債表 & 損益表 TTM 自動精算)
+        # 🇺🇸 美國股市備援邏輯
         if (".TW" not in t and ".TWO" not in t) and (book_value is None or roe_val is None):
             try:
                 bs = stock.quarterly_balance_sheet
@@ -304,7 +304,7 @@ else:
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
     selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.6（GVI 嚴謹校驗與策略回測版）")
+    st.title("📈 機構級三核心策略雷達 3.7（動態網格資產管理與複利回測版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -445,7 +445,6 @@ else:
     df_chart = None
     if selected_stock:
         try:
-            # 🔍【階段一：自動檢查 SQLite 資料庫】
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("SELECT book_value, roe, gvi, close, bv_source, roe_source, updated_at FROM market_data WHERE ticker=?", (selected_stock,))
@@ -457,16 +456,14 @@ else:
 
             if not db_row:
                 needs_sync = True
-                was_missing_in_db = True  # 標註：原本資料庫查無此股票
+                was_missing_in_db = True
             elif not is_cache_valid(db_row[6]):
-                needs_sync = True  # 標註：資料庫資料已逾期
+                needs_sync = True
 
-            # 📥【階段二：資料庫無資料或逾期，自動線上下載】
             if needs_sync:
                 with st.spinner(f"📥 資料庫未發現【{selected_stock}】或數據已逾期，正自動啟動線上下載並更新資料庫..."):
                     signature_save_to_db(selected_stock)
                 
-                # 重新由資料庫讀取下載後的數據
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute("SELECT book_value, roe, gvi, close, bv_source, roe_source, updated_at FROM market_data WHERE ticker=?", (selected_stock,))
@@ -511,49 +508,45 @@ else:
                 with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption(f"📢 來源: {bv_src}")
                 with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度")
 
-                # 💡【階段三：動態分析缺值具體原因與給予操盤手建議】
                 if gvi_val is not None and pb_val is not None:
                     if gvi_val >= 0.35 and pb_val <= 1.5:
                         valuation_color = "#00cc66"
                         valuation_status = "🔥 極度便宜（有安全邊際，機構瘋狂撿便宜區）"
-                        valuation_desc = "💡 <b>操盤手報告：</b>內在價值強勁但估值嚴重低估！屬於下檔風險鎖死、長線大送分的黃金買點。"
+                        valuation_desc = "💡 <b>操盤手報告：</b>內在價值強勁但估值嚴重低估！屬下檔風險鎖死黃金買點。"
                     elif gvi_val >= 0.20 or (pb_val > 1.5 and pb_val <= 3.5 and roe_val >= 0.12):
                         valuation_color = "#2baf2b"
                         valuation_status = "🟢 合理甜美（體質估值相稱，長線穩健布局期）"
-                        valuation_desc = "💡 <b>操盤手報告：</b>股價完美對位體質，沒有嚴重泡沫或主力刻意打壓，屬長線基金安全期。"
+                        valuation_desc = "💡 <b>操盤手報告：</b>股價完美對位體質，屬長線基金安全期。"
                     elif pb_val > 3.5 and pb_val <= 7.0:
                         valuation_color = "#ff9900"
                         valuation_status = "⚠️ 偏貴溢價（樂觀情緒透支，操盤手需嚴格風控）"
-                        valuation_desc = "💡 <b>操盤手報告：</b>股價已提前預支未來 1-2 年的獲利。追高性價比低，進場必須嚴守破均線短線停損。"
+                        valuation_desc = "💡 <b>操盤手報告：</b>股價已提前預支獲利，追高性價比低，嚴守停損。"
                     else:
                         valuation_color = "#cc0000"
                         valuation_status = "🚨 泡沫嚴重（全面避開提款機，估值嚴重偏離）"
-                        valuation_desc = "💡 <b>操盤手報告：</b>投機情緒沸騰！PB極高且ROE無法支撐，主力隨時可能倒貨提款，切勿盲目進場當接盤俠。"
+                        valuation_desc = "💡 <b>操盤手報告：</b>投機情緒沸騰！PB極高且ROE無法支撐，切勿當接盤俠。"
                 else:
                     valuation_color = "#888888"
                     valuation_status = "⚠️ 基本面資料不足（系統停止計算 GVI）"
 
                     reasons = []
-                    # 自動排查具體原因
                     if was_missing_in_db:
-                        reasons.append("📡 <b>自動連線下載結果</b>：系統剛已自動發起線上請求，但交易所/Yahoo Finance 未回傳完整財報數據。")
-
+                        reasons.append("📡 <b>自動連線下載結果</b>：線上請求完成，但交易所未回傳完整數據。")
                     if bv_val is None:
                         if "負股東權益" in bv_src or "庫藏股" in bv_src:
-                            reasons.append("📉 <b>美股負股東權益</b>：該美股長期執行巨額庫藏股註銷，導致股東權益 $BV \\le 0$（如 AAPL/SBUX），GVI 估值法天然不適用。")
+                            reasons.append("📉 <b>美股負股東權益</b>：長期註銷庫藏股導至 $BV \\le 0$（如 AAPL），GVI不適用。")
                         else:
-                            reasons.append("❌ <b>每股淨值 (BV) 缺失</b>：該標的可能為 ETF、債券、指數，或官方財報未揭露淨值。")
-                    
+                            reasons.append("❌ <b>每股淨值 (BV) 缺失</b>：可能為 ETF、債券，或財報未揭露。")
                     if roe_val is None:
-                        reasons.append("❌ <b>ROE 缺失/非正值</b>：當期公司處於虧損狀態 (EPS < 0) 或尚無分析師預估資料。")
+                        reasons.append("❌ <b>ROE 缺失/非正值</b>：當期公司虧損或尚無預估資料。")
 
                     reason_html = "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• " + "<br/>&nbsp;&nbsp;&nbsp;&nbsp;• ".join(reasons)
                     
                     valuation_desc = (
                         f"<b>【自動排查與缺值診斷】</b>{reason_html}<br/><br/>"
                         f"💡 <b>給操盤手的應變建議：</b><br/>"
-                        f"1. 若標的為美股巨額庫藏股巨頭（如蘋果 AAPL），請改為勾選下方 <b>「QARP 現金流雷達」</b>（關注 FCF 收益率與 PEG 比率）。<br/>"
-                        f"2. 若標的為飆股或技術面突破股，請改用 <b>「動能突破雷達」</b> 搭配 K 線圖均線操作。"
+                        f"1. 若標的為美股庫藏股巨頭（如 AAPL），請改用 <b>「QARP 現金流雷達」</b>。<br/>"
+                        f"2. 若標的為飆股或技術面突破股，請改用 <b>「動能突破雷達」</b> 搭配 K 線操作。"
                     )
 
                 st.markdown(
@@ -585,11 +578,10 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
-        # 🛡️ 安全機制：防範無效代碼導致渲染異常
         if df_chart is None or df_chart.empty:
-            st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否輸入正確（如台股請加上 .TW 或 .TWO）。")
+            st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 feature", "🧪 策略自訂回測器 feature"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖畫布", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.7 升級版)", "🧪 策略自訂回測器 (含網格複利對比)"])
             
             with tab1:
                 ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:6px 12px; border:1px solid #444; border-radius:8px; display:inline-block; font-family:monospace; font-size:14px; color:white; vertical-align:middle; margin-left:10px;'>"
@@ -627,35 +619,153 @@ else:
             with tab2:
                 st.plotly_chart(go.Figure(data=[go.Bar(x=['主力買超', '主力賣超', '散戶買超', '散戶賣超'], y=[float(df_chart['Volume'].to_numpy().flatten()[-1])*0.3, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.2, float(df_chart['Volume'].to_numpy().flatten()[-1])*0.25])]), use_container_width=True)
             
+            # ==============================================================================
+            # 【Tab 3: 升級版 3.7 智慧型動態網格資產管理與自動規劃器】
+            # ==============================================================================
             with tab3:
-                st.markdown("### 🎛️ 智慧型動態網格區間自動規劃器")
-                grid_p = float(price_val)
-                g_col1, g_col2, g_col3 = st.columns(3)
-                with g_col1: input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.85, 2))
-                with g_col2: input_upper = st.number_input("網格上限價格", value=round(grid_p * 1.15, 2))
-                with g_col3: input_num = st.number_input("規劃總格數", min_value=5, max_value=100, value=20, step=5)
+                st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.7 版)")
                 
-                levels = np.linspace(input_lower, input_upper, input_num)
-                grid_details = [{"網格編號": f"Grid #{idx+1:02d}", "掛單目標價": round(level, 2), "執行流派動作": "🟢 買進掛單" if level < grid_p else "🔴 賣出掛單"} for idx, level in enumerate(levels)]
-                st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=250)
+                grid_p = float(price_val)
+                is_tw = ".TW" in selected_stock or ".TWO" in selected_stock
+                unit_label = "股" if not is_tw else "股 (台股預設)"
 
+                # --- 第一層：總資金與策略選擇 ---
+                g_top1, g_top2, g_top3 = st.columns(3)
+                with g_top1:
+                    total_capital = st.number_input("💵 投入總資金 (元/$)", value=100000, step=10000, key="grid_capital")
+                with g_top2:
+                    grid_strategy = st.selectbox(
+                        "🎯 選擇網格核心策略機制", 
+                        options=["1. 固定比例再平衡 (例如 1:1)", "2. 固定股數交易", "3. 庫存百分比管理"],
+                        key="grid_strat_select"
+                    )
+                with g_top3:
+                    init_stock_ratio = st.slider("⚖️ 初始股票部位佔比 (%)", min_value=10, max_value=90, value=50, step=5, key="grid_init_ratio")
+
+                st.markdown("---")
+
+                # --- 第二層：網格參數設定 ---
+                g_col1, g_col2, g_col3 = st.columns(3)
+                with g_col1: 
+                    input_lower = st.number_input("網格下限價格", value=round(grid_p * 0.80, 2), key="grid_lower")
+                with g_col2: 
+                    input_upper = st.number_input("網格上限價格", value=round(grid_p * 1.20, 2), key="grid_upper")
+                with g_col3: 
+                    input_num = st.number_input("規劃總格數", min_value=3, max_value=50, value=10, step=1, key="grid_num")
+
+                # 計算初始資金配置
+                init_stock_cash = total_capital * (init_stock_ratio / 100.0)
+                init_shares = int(init_stock_cash // grid_p) if grid_p > 0 else 0
+                actual_init_stock_val = init_shares * grid_p
+                actual_init_cash = total_capital - actual_init_stock_val
+
+                st.info(
+                    f"💡 **初始建倉試算**：總資金 {total_capital:,.0f} 元 | "
+                    f"建倉購買 **{init_shares:,}** {unit_label} (約 {actual_init_stock_val:,.0f} 元，佔 {actual_init_stock_val/total_capital*100:.1f}%) | "
+                    f"保留預備現金 **{actual_init_cash:,.0f}** 元"
+                )
+
+                # 生成價格區間
+                levels = np.linspace(input_lower, input_upper, input_num)
+                grid_details = []
+
+                for idx, level in enumerate(levels):
+                    action = "🟢 買進掛單" if level < grid_p else ("🔴 賣出掛單" if level > grid_p else "⚪ 當前基準價")
+                    
+                    if "固定比例" in grid_strategy:
+                        est_stock_val = init_shares * level
+                        est_total = est_stock_val + actual_init_cash
+                        target_stock_val = est_total * (init_stock_ratio / 100.0)
+                        diff_val = target_stock_val - est_stock_val
+                        
+                        if diff_val > 0:
+                            trade_desc = f"動用現金買進約 {abs(diff_val):,.0f} 元股票"
+                        elif diff_val < 0:
+                            trade_desc = f"賣出約 {abs(diff_val):,.0f} 元股票補回現金"
+                        else:
+                            trade_desc = "平衡狀態"
+
+                    elif "固定股數" in grid_strategy:
+                        fixed_shares = max(1, int((init_shares or 1000) / input_num))
+                        trade_desc = f"固定交易 {fixed_shares:,} {unit_label} (約 {fixed_shares * level:,.0f} 元)"
+
+                    else: # 庫存百分比
+                        pct = round(100.0 / input_num, 1)
+                        trade_desc = f"交易當前庫存之 {pct}% (隨庫存規模動態增減)"
+
+                    grid_details.append({
+                        "網格層級": f"Grid #{idx+1:02d}",
+                        "目標觸發價": round(level, 2),
+                        "偏離現價 (%)": f"{((level - grid_p) / grid_p * 100):+.2f}%",
+                        "預計動作": action,
+                        "資金/部位管理機制": trade_desc
+                    })
+
+                st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
+
+                with st.expander("📌 操盤手提醒：網格交易與長期正期望值（點擊展開分析）"):
+                    st.markdown("""
+                    - **震盪市 vs 趨勢市**：網格交易本質是「用波動換取收益」。在單邊大漲的多頭行情中，固定比例與賣出網格會過早賣出優質資產；在單邊下跌行情中，則會太早把現金耗盡。
+                    - **手續費與稅費侵蝕**：頻繁交易會產生額外成本（台股證交稅 0.3% + 手續費 0.1425%），必須確保網格間距（Grid Spacing）高於交易成本 2 倍以上。
+                    - **長期複利建議**：若標的為具備強大 GVI / ROE 的長期成長股，建議以 **固定比例再平衡** 或 **買進持有 (Buy & Hold)** 為主，避免因網格過早離場而錯失長期複利成長。
+                    """)
+
+            # ==============================================================================
+            # 【Tab 4: 升級版 3.7 策略自訂回測器與網格複利對比】
+            # ==============================================================================
             with tab4:
-                st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器")
+                st.markdown(f"### 🧪 【{c_name}】多空量化策略與停損條件自動回測器 (含網格複利對比)")
+                
                 bt_col1, bt_col2 = st.columns(2)
                 with bt_col1:
-                    entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True)
-                    entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20)
-                    entry_kd_enable = st.checkbox("2. KD 黃金交叉", value=False)
-                    entry_macd_enable = st.checkbox("3. MACD 黃金交叉", value=False)
-                    entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0)
+                    entry_ma_enable = st.checkbox("1. 股價突破自訂均線", value=True, key="bt_entry_ma")
+                    entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
+                    entry_kd_enable = st.checkbox("2. KD 黃金交叉", value=False, key="bt_entry_kd")
+                    entry_macd_enable = st.checkbox("3. MACD 黃金交叉", value=False, key="bt_entry_macd")
+                    entry_match_mode = st.radio("買進訊號觸發邏輯", options=["同時滿足 (ALL)", "任一滿足 (ANY)"], index=0, key="bt_match")
 
                 with bt_col2:
-                    stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5)
-                    trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5)
-                    exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True)
-                    exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20)
+                    stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, key="bt_sl")
+                    trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5, key="bt_trail")
+                    exit_ma_enable = st.checkbox("4. 股價跌破自訂均線", value=True, key="bt_exit_ma")
+                    exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
 
-                if st.button(f"🚀 開始執行【{c_name}】策略量化回測", type="primary", use_container_width=True):
+                st.markdown("---")
+                st.markdown("#### ⚖️ 網格再平衡 (1:1) vs 買進持有 (Buy & Hold) 歷史累積資產對比")
+                
+                closes_arr = df_chart['Close'].astype(float).to_numpy()
+                if len(closes_arr) >= 2:
+                    init_cap = 100000.0
+                    
+                    # 1. Buy & Hold
+                    bh_shares = init_cap / closes_arr[0]
+                    bh_curve = bh_shares * closes_arr
+                    
+                    # 2. 1:1 固定比例再平衡 (模擬按月再平衡)
+                    stock_val = init_cap * 0.5
+                    cash_val = init_cap * 0.5
+                    rebalance_curve = []
+                    shares_held = stock_val / closes_arr[0]
+                    
+                    for step_idx, p in enumerate(closes_arr):
+                        stock_val = shares_held * p
+                        total_v = stock_val + cash_val
+                        # 每 20 個 K 線節點進行一次再平衡
+                        if step_idx % 20 == 0 and step_idx > 0:
+                            stock_val = total_v * 0.5
+                            cash_val = total_v * 0.5
+                            shares_held = stock_val / p
+                        rebalance_curve.append(total_v)
+                        
+                    bh_final_ret = ((bh_curve[-1] - init_cap) / init_cap) * 100.0
+                    reb_final_ret = ((rebalance_curve[-1] - init_cap) / init_cap) * 100.0
+                    
+                    res_m1, res_m2, res_m3 = st.columns(3)
+                    with res_m1: st.metric("初始投資本金", f"{init_cap:,.0f} 元")
+                    with res_m2: st.metric("單純買進持有 (Buy & Hold) 累積報酬率", f"{bh_final_ret:+.2f}%", delta=f"{bh_curve[-1] - init_cap:+,.0f} 元")
+                    with res_m3: st.metric("1:1 固定比例網格再平衡 累積報酬率", f"{reb_final_ret:+.2f}%", delta=f"{rebalance_curve[-1] - init_cap:+,.0f} 元")
+
+                if st.button(f"🚀 開始執行【{c_name}】技術指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
                     entry_conds = {'ma_enable': entry_ma_enable, 'ma_p': entry_ma_p, 'kd_enable': entry_kd_enable, 'macd_enable': entry_macd_enable, 'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'}
                     exit_conds = {'stop_loss_pct': stop_loss_pct, 'trailing_stop_pct': trailing_stop_pct, 'ma_enable': exit_ma_enable, 'ma_p': exit_ma_p, 'kd_enable': False, 'macd_enable': False}
                     df_calc = compute_backtest_indicators(df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p)
