@@ -1,7 +1,8 @@
 # ==============================================================================
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
-import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
+import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
+from email.message import EmailMessage
 try:
     from google import genai
 except ImportError:
@@ -1184,6 +1185,35 @@ def generate_content_with_retry(prompt_text, api_key_val):
             if not retryable or attempt == 2:
                 raise
             time.sleep(2 ** (attempt + 1))
+
+def get_gmail_secret_values(secret_store):
+    """Read Gmail sender credentials without exposing them in the interface."""
+    try:
+        settings = secret_store["gmail"]
+        sender_email = str(settings.get("sender_email", "")).strip()
+        app_password = re.sub(r"\s+", "", str(settings.get("app_password", "")))
+        return sender_email, app_password
+    except Exception:
+        return "", ""
+
+def send_gmail_report(recipient_email, subject, report_text, sender_email, app_password):
+    """Send a plain-text report through Gmail SMTP using a Google App Password."""
+    required = (recipient_email, subject, report_text, sender_email, app_password)
+    if any(not str(value).strip() for value in required):
+        raise ValueError("收件地址、報告內容或 Gmail 寄件設定不完整。")
+
+    message = EmailMessage()
+    message["From"] = sender_email.strip()
+    message["To"] = recipient_email.strip()
+    message["Subject"] = subject.strip()
+    message.set_content(report_text)
+
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
+        smtp.ehlo()
+        smtp.starttls(context=ssl.create_default_context())
+        smtp.ehlo()
+        smtp.login(sender_email.strip(), re.sub(r"\s+", "", app_password))
+        smtp.send_message(message)
 
 def fetch_tw_official_pb_pe(ticker):
     clean_code = ticker.replace(".TW", "").replace(".TWO", "")
@@ -2890,7 +2920,49 @@ else:
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
                     st.success(f"📋 AI 【{c_name}】核心投資分析報告")
-                    st.markdown(st.session_state[f"ai_report_{selected_stock}"])
+                    ai_report = st.session_state[f"ai_report_{selected_stock}"]
+                    st.markdown(ai_report)
+                    recipient_email = st.text_input(
+                        "寄送分析報告到 Email",
+                        key=f"ai_report_email_recipient_{selected_stock}",
+                        placeholder="請輸入收件信箱",
+                    )
+                    if st.button(
+                        "✉️ 用 Gmail 寄出這份分析",
+                        key=f"send_ai_report_email_{selected_stock}",
+                        use_container_width=True,
+                    ):
+                        if not recipient_email.strip() or "@" not in recipient_email:
+                            st.error("請輸入有效的收件 Email 地址。")
+                        else:
+                            try:
+                                gmail_sender, gmail_app_password = get_gmail_secret_values(st.secrets)
+                            except Exception:
+                                gmail_sender, gmail_app_password = "", ""
+                            if not gmail_sender or not gmail_app_password:
+                                st.error(
+                                    "尚未設定 Gmail 寄件資料。請在 Streamlit Cloud 的 App Settings → Secrets "
+                                    "加入 [gmail] 區段（sender_email、app_password），儲存後重新啟動。"
+                                )
+                            else:
+                                email_subject = f"Gemini 個股分析｜{selected_stock} {c_name}"
+                                email_body = (
+                                    f"個股：{selected_stock} {c_name}\n"
+                                    f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                                    f"Gemini AI 分析結果：\n\n{ai_report}"
+                                )
+                                try:
+                                    with st.spinner("正在透過 Gmail 寄送分析報告…"):
+                                        send_gmail_report(
+                                            recipient_email,
+                                            email_subject,
+                                            email_body,
+                                            gmail_sender,
+                                            gmail_app_password,
+                                        )
+                                    st.success(f"分析報告已寄送至 {recipient_email.strip()}。")
+                                except Exception as mail_error:
+                                    st.error(f"寄信失敗：{mail_error}")
                     st.markdown("---")
         except Exception as e:
             st.error(f"數據載入異常：{e}")
