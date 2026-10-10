@@ -1208,12 +1208,25 @@ def send_gmail_report(recipient_email, subject, report_text, sender_email, app_p
     message["Subject"] = subject.strip()
     message.set_content(report_text)
 
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
-        smtp.ehlo()
-        smtp.starttls(context=ssl.create_default_context())
-        smtp.ehlo()
-        smtp.login(sender_email.strip(), re.sub(r"\s+", "", app_password))
-        smtp.send_message(message)
+    stage = "連接 Gmail 安全郵件通道（SSL 465）"
+    try:
+        with smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465,
+            timeout=30,
+            context=ssl.create_default_context(),
+        ) as smtp:
+            stage = "驗證 Gmail 寄件帳號"
+            smtp.login(sender_email.strip(), re.sub(r"\s+", "", app_password))
+            stage = "寄送分析郵件"
+            smtp.send_message(message)
+    except smtplib.SMTPAuthenticationError as error:
+        raise RuntimeError(
+            "Gmail 帳號驗證失敗，請確認 Secrets 的 sender_email 是完整 Gmail 地址，"
+            "app_password 是兩步驟驗證產生的應用程式密碼。"
+        ) from error
+    except Exception as error:
+        raise RuntimeError(f"{stage}時失敗：{error}") from error
 
 def fetch_tw_official_pb_pe(ticker):
     clean_code = ticker.replace(".TW", "").replace(".TWO", "")
