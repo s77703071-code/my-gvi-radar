@@ -129,8 +129,9 @@ def fetch_institutional_market_data():
     result = {}
     errors = []
     # TWSE T86 is date based. Walk back over weekends/holidays to the latest report.
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo('Asia/Taipei')).date()
     twse_payload = None
     twse_date = None
     for offset in range(8):
@@ -238,6 +239,125 @@ def build_institutional_screen(trades, shares_by_code, tickers, investor, min_ne
                 row[f'{name}{label}佔股本比(%)'] = value / shares * 100 if value is not None else None
         if row.get(f'{investor}買賣超佔股本比(%)') is not None and row[f'{investor}買賣超佔股本比(%)'] >= min_net_pct:
             rows.append(row)
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_tdcc_concentration(ticker):
+    """Fetch weekly TDCC shareholding distribution; return big-holder/retail ratios and dates."""
+    code = ticker.replace('.TWO', '').replace('.TW', '').strip()
+    response = requests.get('https://openapi.tdcc.com.tw/v1/opendata/5-9', timeout=20,
+                            headers={'User-Agent': 'Mozilla/5.0'})
+    response.raise_for_status()
+    payload = response.json()
+    rows = []
+    for raw in payload if isinstance(payload, list) else []:
+        raw_code = str(raw.get('證券代號') or raw.get('股票代號') or raw.get('SecuritiesCompanyCode') or raw.get('Code') or '').strip()
+        if raw_code != code:
+            continue
+        level = str(raw.get('持股分級') or raw.get('持股級距') or raw.get('股數/單位數級距') or raw.get('Level') or '')
+        date_value = str(raw.get('資料日期') or raw.get('資料年月') or raw.get('Date') or '')
+        ratio = _to_number(raw.get('占集保庫存數比例%') or raw.get('占集保庫存數比例') or raw.get('持股比例') or raw.get('Ratio'))
+        if ratio is None:
+            continue
+        digits = [int(x.replace(',', '')) for x in re.findall(r'\d[\d,]*', level)]
+        if not digits:
+            continue
+        low = digits[0]
+        high = digits[1] if len(digits) > 1 else None
+        rows.append({'date': date_value, 'low': low, 'high': high, 'ratio': ratio})
+    if not rows:
+        return None
+    frame = pd.DataFrame(rows)
+    dates = sorted(frame['date'].dropna().unique(), reverse=True)
+    if not dates:
+        return None
+    summaries = []
+    for date_value in dates[:2]:
+        day = frame[frame['date'] == date_value]
+        retail = day[day['high'].notna() & (day['high'] <= 5000)]['ratio'].sum()
+        big = day[(day['low'] >= 400001) | (day['high'].isna() & (day['low'] >= 400001))]['ratio'].sum()
+        summaries.append({'date': date_value, 'retail_pct': float(retail), 'big_pct': float(big)})
+    latest = summaries[0]
+    previous = summaries[1] if len(summaries) > 1 else None
+    return {'date': latest['date'], 'retail_pct': latest['retail_pct'], 'big_pct': latest['big_pct'],
+            'big_change_pp': latest['big_pct'] - previous['big_pct'] if previous else None,
+            'retail_change_pp': latest['retail_pct'] - previous['retail_pct'] if previous else None,
+            'previous_date': previous['date'] if previous else None}
+
+def fetch_mops_insider_holding(ticker):
+    """Read latest MOPS monthly director/insider holding table for a single Taiwan company."""
+    code = ticker.replace('.TWO', '').replace('.TW', '').strip()
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('Asia/Taipei'))
+    headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded'}
+    url = 'https://mopsov.twse.com.tw/mops/web/ajax_stapap1'
+    for month_offset in range(0, 4):
+        month_date = now.replace(day=1) - timedelta(days=month_offset * 28)
+        roc_year = month_date.year - 1911
+        payload = {'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','keyword4':'','code1':'','TYPEK2':'',
+                   'checkbtn':'1','queryName':'co_id','inpuType':'co_id','TYPEK':'all','isnew':'false',
+                   'co_id':code,'year':str(roc_year),'month':f'{month_date.month:02d}'}
+        try:
+            response = requests.post(url, data=payload, headers=headers, timeout=15)
+            response.raise_for_status()
+            tables = pd.read_html(io.StringIO(response.text))
+            for table in tables:
+                columns = [' '.join(str(part) for part in col if str(part) != 'nan') if isinstance(col, tuple) else str(col) for col in table.columns]
+                normalized = [c.replace(' ', '').replace('\n', '') for c in columns]
+                table.columns = normalized
+                insider_cols = [c for c in normalized if '內部人關係人目前持股合計' in c]
+                direct_cols = [c for c in normalized if ('目前持股' in c or '持有股數' in c) and '設質' not in c]
+                if insider_cols:
+                    amount = _to_number(table[insider_cols[0]].iloc[-1])
+                elif direct_cols:
+                    amount = pd.to_numeric(table[direct_cols[0]].astype(str).str.replace(',', ''), errors='coerce').sum()
+                else:
+                    continue
+                if amount and amount > 0:
+                    return {'shares': float(amount), 'date': f'{roc_year}/{month_date.month:02d}', 'source':'MOPS 董監事持股餘額'}
+        except Exception:
+            continue
+    return None
+
+def summarize_broker_branch_csv(uploaded_file, stock_code):
+    """Summarize optional official broker-branch CSV supplied by the user."""
+    if uploaded_file is None:
+        return None
+    try:
+        frame = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+    except Exception:
+        uploaded_file.seek(0)
+        frame = pd.read_csv(uploaded_file, encoding='big5', encoding_errors='replace')
+    code_col = next((c for c in frame.columns if '代號' in str(c) and ('證券' in str(c) or '股票' in str(c))), None)
+    buy_col = next((c for c in frame.columns if '買進' in str(c) and ('股數' in str(c) or '數量' in str(c))), None)
+    sell_col = next((c for c in frame.columns if '賣出' in str(c) and ('股數' in str(c) or '數量' in str(c))), None)
+    if not all((code_col, buy_col, sell_col)):
+        return {'error':'檔案需包含證券代號、買進股數、賣出股數欄位。'}
+    selected = frame[frame[code_col].astype(str).str.strip() == str(stock_code)].copy()
+    if selected.empty:
+        return {'error':'上傳檔案找不到目前分析股票。'}
+    selected['_buy'] = pd.to_numeric(selected[buy_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    selected['_sell'] = pd.to_numeric(selected[sell_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    selected['_net'] = selected['_buy'] - selected['_sell']
+    buyers = int((selected['_net'] > 0).sum())
+    sellers = int((selected['_net'] < 0).sum())
+    return {'net_shares': float(selected['_net'].sum()), 'buyers':buyers, 'sellers':sellers,
+            'count_diff':buyers-sellers, 'top_net_buy':float(selected.nlargest(15, '_net')['_net'].clip(lower=0).sum()),
+            'top_net_sell':float(selected.nsmallest(15, '_net')['_net'].clip(upper=0).sum())}
+
+def build_institutional_rankings(trades, shares_by_code, limit=10):
+    rows = []
+    for code, trade in trades.items():
+        shares = shares_by_code.get(code)
+        if not shares:
+            continue
+        row = {'股票代碼':code, '市場':trade.get('市場'), '資料日期':trade.get('日期')}
+        for investor in ('外資','投信','自營商'):
+            for measure, label in (('買進股數','買進'),('賣出股數','賣出'),('買賣超股數','買賣超')):
+                value = trade.get(f'{investor}{measure}')
+                row[f'{investor}{label}佔股本比(%)'] = value / shares * 100 if value is not None else None
+        rows.append(row)
     return pd.DataFrame(rows)
 
 def signature_save_to_db(t):
@@ -944,7 +1064,7 @@ else:
         if df_chart is None or df_chart.empty:
             st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 彩色 K 線圖與成交量", "💰 法人散戶流向報告", "🤖 網格自動生成器", "⚖️ 網格複利 vs 買進持有對比", "🧪 技術指標自訂策略回測"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 彩色 K 線圖與成交量", "🧭 籌碼集中度分析", "🤖 網格自動生成器", "⚖️ 網格複利 vs 買進持有對比", "🧪 技術指標自訂策略回測"])
             
             # ==============================================================================
             # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 完整畫線與文字工具箱】
@@ -1067,24 +1187,80 @@ else:
                 )
             
             with tab2:
-                st.markdown("### 🏦 三大法人買賣超與股本比")
-                st.caption("使用 TWSE T86／TPEx OpenAPI 個股每日成交股數；比率 = 法人買進、賣出或買賣超股數 ÷ 官方已發行普通股數 × 100%。")
+                st.markdown("### 🧭 籌碼集中度分析")
+                st.caption("四項觀察：內部人持股、大戶與散戶持股、主力買賣與買賣家數差、籌碼集中度。來源更新頻率不同，請以各指標標示日期為準。")
                 if selected_stock.endswith(('.TW', '.TWO')):
                     with st.spinner('讀取官方法人交易與已發行股數資料…'):
                         inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
+                    stock_code = selected_stock.replace('.TWO','').replace('.TW','')
+                    shares = inst_shares.get(stock_code)
+                    insider = fetch_mops_insider_holding(selected_stock)
+                    tdcc = None
+                    tdcc_error = None
+                    try:
+                        with st.spinner('讀取集保每週股權分散資料…'):
+                            tdcc = fetch_tdcc_concentration(selected_stock)
+                    except Exception as exc:
+                        tdcc_error = str(exc)
+
+                    st.markdown("#### 1. 內部人持股（MOPS 月資料）")
+                    if insider and shares:
+                        insider_pct = insider['shares'] / shares * 100
+                        st.metric(f"內部人及關係人持股比｜{insider['date']}", f"{insider_pct:.2f}%", help="MOPS 董監事持股餘額彙總股數 ÷ 官方已發行普通股數。資料為月頻，非即時持股。")
+                    else:
+                        st.info("MOPS 尚未回傳可辨識的持股餘額，或缺少已發行普通股數。可由 MOPS 個別公司頁面確認最新月份。")
+
+                    st.markdown("#### 2. 大戶與散戶持股（集保週資料）")
+                    if tdcc:
+                        big_col, retail_col, big_change_col = st.columns(3)
+                        with big_col: st.metric(f"大戶 ≥ 400 張｜{tdcc['date']}", f"{tdcc['big_pct']:.2f}%")
+                        with retail_col: st.metric("散戶 ≤ 5 張", f"{tdcc['retail_pct']:.2f}%")
+                        with big_change_col: st.metric("大戶週變化", f"{tdcc['big_change_pp']:+.2f} 個百分點" if tdcc['big_change_pp'] is not None else "缺少前週資料")
+                    else:
+                        st.info("目前無法取得此股集保戶股權分散資料。")
+                        if tdcc_error: st.caption(f"集保來源暫時無法連線：{tdcc_error}")
+
+                    st.markdown("#### 3. 主力買賣超與買賣家數差")
+                    broker_file = st.file_uploader("上傳此股當日券商分點買賣 CSV（需含證券代號、買進股數、賣出股數）", type=['csv'], key=f'broker_csv_{selected_stock}')
+                    broker_summary = summarize_broker_branch_csv(broker_file, stock_code) if broker_file else None
+                    if broker_summary and broker_summary.get('error'):
+                        st.warning(broker_summary['error'])
+                    elif broker_summary:
+                        broker_cols = st.columns(4)
+                        with broker_cols[0]: st.metric("前 15 大買超分點淨買", f"{broker_summary['top_net_buy']:,.0f} 股")
+                        with broker_cols[1]: st.metric("前 15 大賣超分點淨賣", f"{broker_summary['top_net_sell']:,.0f} 股")
+                        with broker_cols[2]: st.metric("買超分點家數", f"{broker_summary['buyers']:,}")
+                        with broker_cols[3]: st.metric("買賣分點家數差", f"{broker_summary['count_diff']:+,}")
+                        if shares:
+                            st.caption(f"前 15 大買超分點淨買佔股本 {broker_summary['top_net_buy']/shares*100:.4f}%；前 15 大賣超分點淨賣佔股本 {broker_summary['top_net_sell']/shares*100:.4f}%。")
+                    else:
+                        st.info("券商分點交易檔需另行取得後上傳；此報表不會把三大法人淨買超冒充為主力分點資料。")
+
+                    st.markdown("#### 4. 籌碼集中度")
+                    if tdcc:
+                        concentration_cols = st.columns(3)
+                        concentration = tdcc['big_pct'] - tdcc['retail_pct']
+                        with concentration_cols[0]: st.metric("大戶－散戶持股差", f"{concentration:+.2f} 個百分點")
+                        with concentration_cols[1]: st.metric("大戶持股週變化", f"{tdcc['big_change_pp']:+.2f} 個百分點" if tdcc['big_change_pp'] is not None else "缺少前週資料")
+                        with concentration_cols[2]: st.metric("散戶持股週變化", f"{tdcc['retail_change_pp']:+.2f} 個百分點" if tdcc['retail_change_pp'] is not None else "缺少前週資料")
+                        st.caption("集中度觀察值定義為大戶持股比減散戶持股比；同時呈現大戶與散戶週變化，供比較趨勢，不是官方發布的單一指數。")
+                    else:
+                        st.info("集保週資料不足，暫無法計算集中度觀察值。")
+
+                    st.markdown("#### 三大法人買賣佔股本比（每日）")
                     inst_one = build_institutional_screen(inst_trades, inst_shares, [selected_stock], '外資', -100000)
                     if not inst_one.empty:
                         view_cols = ['資料日期', '市場', '外資買進佔股本比(%)', '外資賣出佔股本比(%)', '外資買賣超佔股本比(%)',
                                      '投信買進佔股本比(%)', '投信賣出佔股本比(%)', '投信買賣超佔股本比(%)',
                                      '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
                         st.dataframe(inst_one[view_cols].style.format({c: '{:+.4f}%' for c in view_cols if c.endswith('(%)')}), use_container_width=True)
-                        st.caption("分類口徑：外資含外陸資、不含外資自營商；自營商買賣股數合計自行買賣與避險。股本分母採 TWSE／TPEx 公司基本資料的已發行普通股數。")
+                        st.caption("分類口徑：外資含外陸資、不含外資自營商；自營商買賣股數合計自行買賣與避險。")
                     else:
                         st.info("目前無此股票的法人資料或官方已發行股數；可能是非交易日、資料尚未更新，或標的非普通股。")
                     if inst_errors:
                         st.caption("部分官方資料來源暫時無法連線，畫面僅顯示可取得的市場資料。")
                 else:
-                    st.info("三大法人選股資料目前適用台灣上市 `.TW` 與上櫃 `.TWO` 普通股。")
+                    st.info("集中度分析與三大法人資料目前適用台灣上市 `.TW` 與上櫃 `.TWO` 普通股。")
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
@@ -1398,9 +1574,15 @@ else:
     st.markdown("---")
     st.markdown("### 🚀 華爾街機構級三核心策略雷達")
     col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1: strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
-    with col_s2: strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
-    with col_s3: strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
+    with col_s1:
+        strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
+        st.caption("優點：結合 ROE 與淨值估值，重視安全邊際。\n\n限制：財報更新較慢，金融或特殊產業比較性較低。")
+    with col_s2:
+        strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
+        st.caption("優點：偏向強勢趨勢，可快速反映價格動能。\n\n限制：盤整時容易反覆訊號，追高風險較高。")
+    with col_s3:
+        strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
+        st.caption("優點：同時看自由現金流收益與 PEG，兼顧現金流和成長估值。\n\n限制：現金流與成長資料可能缺漏，週期性公司容易失真。")
 
     custom_input_pool = st.text_area("✍️ 操盤手自訂觀察代碼掃描區：", value="2330.TW, 3293.TWO, 8069.TWO, NVDA, AAPL")
     custom_scan_list = [c.strip().upper() for c in custom_input_pool.split(",") if c.strip()]
@@ -1584,3 +1766,31 @@ else:
                                    file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
             if inst_errors:
                 st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
+
+    st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
+    st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。")
+    if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
+        st.session_state['inst_top10_loaded'] = True
+        with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
+            market_trades, market_shares, market_errors = fetch_institutional_market_data()
+        ranking_data = build_institutional_rankings(market_trades, market_shares)
+        if ranking_data.empty:
+            st.info("目前無法取得可排序的法人資料與已發行股數。")
+        else:
+            investor_tabs = st.tabs(['外資', '投信', '自營商'])
+            for investor, investor_tab in zip(('外資', '投信', '自營商'), investor_tabs):
+                with investor_tab:
+                    sort_specs = [
+                        (f'{investor}買賣超佔股本比(%)', False, '買賣超佔股本比最高'),
+                        (f'{investor}買賣超佔股本比(%)', True, '買賣超佔股本比最低'),
+                        (f'{investor}買進佔股本比(%)', False, '買進佔股本比最高'),
+                        (f'{investor}賣出佔股本比(%)', False, '賣出佔股本比最高')]
+                    ranking_cols = st.columns(2)
+                    for index, (column, ascending, title) in enumerate(sort_specs):
+                        ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
+                        show = ranked[['股票代碼', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
+                        with ranking_cols[index % 2]:
+                            st.markdown(f"**{title} Top 10**")
+                            st.dataframe(show.style.format({'佔股本比(%)':'{:+.4f}%'}), use_container_width=True, hide_index=True)
+            if market_errors:
+                st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))
