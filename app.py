@@ -471,7 +471,7 @@ else:
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df.dropna(subset=['Close', 'Low', 'Volume']).copy()
         
-        # 修正：針對特定級別重採樣，避開非必要的 Resample 造成 K 棒過度擠壓
+        # 避開不必要的 Resample，防止時間軸被擠壓成單一 K 棒
         if timeframe_name == "半年": df = df.resample('6ME').last().dropna()
         elif timeframe_name == "1年": df = df.resample('12ME').last().dropna()
         
@@ -541,7 +541,7 @@ else:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
                 
-                # 📅 日期格式動態適應：分時圖精確到分，日線精確到日
+                # 📅 日期格式適應性調整
                 if "分鐘" in selected_tf:
                     date_strings = df_chart.index.strftime('%m-%d %H:%M').tolist()
                 else:
@@ -655,7 +655,7 @@ else:
             tab1, tab2, tab3, tab4 = st.tabs(["📊 彩色 K 線圖與成交量", "💰 法人散戶流向報告", "🤖 網格自動生成器 (3.12 操盤手教學版)", "🧪 策略自訂回測與網格複利對比 (3.12 版)"])
             
             # ==============================================================================
-            # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 手機/行動版視角優化】
+            # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 完整畫線與文字工具箱】
             # ==============================================================================
             with tab1:
                 col_title, col_draw_color = st.columns([3, 1])
@@ -671,11 +671,14 @@ else:
                     st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
                 
                 with col_draw_color:
-                    draw_color = st.color_picker("🎨 自訂畫線顏色", value="#FF3333", key="draw_line_color_picker")
+                    draw_color = st.color_picker("🎨 自訂畫線/文字顏色", value="#FF3333", key="draw_line_color_picker")
 
-                st.caption("💡 **行動與桌面端操作提示**：圖表雙指縮放/雙擊重置；右上方支援畫線、文字標記與橡皮擦功能！")
+                st.info("💡 **工具列指南**（請看圖表右上方的懸浮工具列，手機端微滑圖表即可看到）：\n"
+                        "• 📝 **Draw text**：點擊後在圖上點擊即可直接輸入文字標記\n"
+                        "• 🧹 **Erase shape**：點擊後選取圖上的線條或文字即可直接擦除\n"
+                        "• ✏️ **Draw line / rect / circle**：畫直線、矩形框與圓形圈選")
                 
-                # 📊 建立 2 行 1 列雙子圖，共用 X 軸（上 K線 75% 高度，下 成交量 25% 高度）
+                # 📊 建立 2 行 1 列雙子圖
                 fig = make_subplots(
                     rows=2, cols=1, 
                     shared_xaxes=True, 
@@ -691,8 +694,8 @@ else:
                     low=df_chart['Low'].to_numpy().flatten().tolist(), 
                     close=df_chart['Close'].to_numpy().flatten().tolist(), 
                     name="K線",
-                    increasing_line_color='#ef5350', # 台股習慣：漲紅
-                    decreasing_line_color='#26a69a', # 台股習慣：跌綠
+                    increasing_line_color='#ef5350', # 漲紅
+                    decreasing_line_color='#26a69a', # 跌綠
                     hovertext=[f"日期：{d}" for d in date_strings]
                 ), row=1, col=1)
                 
@@ -723,15 +726,15 @@ else:
                     opacity=0.8
                 ), row=2, col=1)
 
-                # 🚀 優化 X 軸休市日斷層與手機介面排版
+                # 🚀 排版設定與畫線/文字預設色彩配置
                 fig.update_layout(
-                    xaxis_rangeslider_visible=False, # 隱藏大滑塊以釋放手機空間
-                    height=580, 
-                    margin=dict(l=10, r=10, t=10, b=10), 
+                    xaxis_rangeslider_visible=False,
+                    height=600, 
+                    margin=dict(l=10, r=10, t=25, b=10), 
                     dragmode='pan', 
-                    showlegend=False, # 簡化圖例，節省視覺空間
+                    showlegend=False,
                     xaxis=dict(
-                        type='category', # 避免非交易日空白拉長時間軸
+                        type='category',
                         showgrid=True, 
                         gridcolor="rgba(128,128,128,0.2)",
                         nticks=10
@@ -756,14 +759,16 @@ else:
                     use_container_width=True, 
                     config={
                         'modeBarButtonsToAdd': [
-                            'drawline',       
-                            'drawopenpath',   
-                            'drawrect',       
-                            'drawcircle',     
-                            'drawtext',       
-                            'eraseshape'      
+                            'drawline',       # 直線工具
+                            'drawopenpath',   # 畫筆工具
+                            'drawrect',       # 矩形
+                            'drawcircle',     # 圓形
+                            'drawtext',       # 📝 文字標記工具
+                            'eraseshape'      # 🧹 橡皮擦擦除工具
                         ],
-                        'displayModeBar': True,
+                        'displayModeBar': True, # 強制固定顯示右上角 ModeBar 工具列
+                        'displaylogo': False,
+                        'editable': True,       # 開放圖上文字與形狀可點擊編輯
                         'scrollZoom': True,
                         'responsive': True
                     }
