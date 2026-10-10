@@ -5,6 +5,7 @@ import sys, os, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json
 import google.generativeai as genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import plotly.express as px
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
@@ -711,13 +712,41 @@ else:
                 else:
                     advice += "&nbsp;&nbsp;&nbsp;&nbsp;三大核心策略目前皆無強烈進場訊號，建議**暫時觀望**或縮小部位應對。"
 
-                st.markdown(
-                    f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px;'>"
-                    f"<h5 style='margin:0; color:white;'>⚖️ 華爾街三大核心策略交叉診斷（智能備援版）</h5>"
-                    f"<p style='margin:10px 0 0 0; font-size:14px; color:#cccccc;'>{advice}</p>"
-                    f"</div>", 
-                    unsafe_allow_html=True
-                )
+                # ======= 視覺化圖表整合 (Radar Chart) =======
+                diag_c1, diag_c2 = st.columns([1.5, 1])
+                with diag_c1:
+                    st.markdown(
+                        f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px; height: 100%;'>"
+                        f"<h5 style='margin:0; color:white;'>⚖️ 華爾街三大核心策略交叉診斷（智能備援版）</h5>"
+                        f"<p style='margin:10px 0 0 0; font-size:14px; color:#cccccc;'>{advice}</p>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+                with diag_c2:
+                    categories = ['GVI 價值雷達', '動能突破雷達', 'QARP 現金流雷達']
+                    radar_scores = [scores['GVI 價值雷達'], scores['動能突破雷達'], scores['QARP 現金流雷達']]
+                    
+                    fig_radar = go.Figure()
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=radar_scores,
+                        theta=categories,
+                        fill='toself',
+                        name=c_name,
+                        line_color=valuation_color,
+                        fillcolor=valuation_color.replace(')', ', 0.2)').replace('rgb', 'rgba') if 'rgb' in valuation_color else f"{valuation_color}33" 
+                    ))
+                    fig_radar.update_layout(
+                        polar=dict(
+                            radialaxis=dict(visible=True, range=[0, 100], gridcolor="rgba(128,128,128,0.2)"),
+                            angularaxis=dict(gridcolor="rgba(128,128,128,0.2)")
+                        ),
+                        showlegend=False,
+                        margin=dict(l=30, r=30, t=30, b=30),
+                        height=300,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
                 
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
 
