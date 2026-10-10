@@ -2,7 +2,7 @@
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
 import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests
-import google.generativeai as genai
+from google import genai
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import plotly.express as px
@@ -1150,24 +1150,30 @@ def is_cache_valid(updated_at):
     return (time.time() - float(updated_at)) < CACHE_TTL
 
 def generate_content_with_retry(prompt_text, api_key_val):
-    genai.configure(api_key=api_key_val)
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
-    last_exception = None
-    
-    for model_name in models_to_try:
-        for attempt in range(3):
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt_text)
-                return response.text.strip()
-            except Exception as e:
-                last_exception = e
-                if "503" in str(e) or "high demand" in str(e).lower() or "busy" in str(e).lower():
-                    sleep_time = 2 ** (attempt + 1)
-                    time.sleep(sleep_time)
-                    continue
-                break
-    raise last_exception
+    client = genai.Client(api_key=api_key_val)
+    for attempt in range(3):
+        try:
+            interaction = client.interactions.create(
+                model="gemini-3.8-flash",
+                input=prompt_text,
+            )
+            response_text = getattr(interaction, "output_text", None)
+            if not response_text or not response_text.strip():
+                raise RuntimeError("Gemini API 已回應，但沒有提供文字內容。")
+            return response_text.strip()
+        except Exception as error:
+            message = str(error).lower()
+            retryable = any(
+                marker in message
+                for marker in (
+                    "429", "500", "502", "503", "504",
+                    "resource_exhausted", "rate limit", "unavailable",
+                    "high demand", "busy", "deadline exceeded",
+                )
+            )
+            if not retryable or attempt == 2:
+                raise
+            time.sleep(2 ** (attempt + 1))
 
 def fetch_tw_official_pb_pe(ticker):
     clean_code = ticker.replace(".TW", "").replace(".TWO", "")
@@ -2870,7 +2876,7 @@ else:
                                 success_report = generate_content_with_retry(ai_prompt, api_key_input)
                                 st.session_state[f"ai_report_{selected_stock}"] = success_report
                             except Exception as ai_e: 
-                                st.error(f"Google 雲端機房繁忙或金鑰異常: {ai_e}")
+                                st.error(f"Gemini API 分析失敗：{ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
                     st.success(f"📋 AI 【{c_name}】核心投資分析報告")
