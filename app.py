@@ -1940,6 +1940,53 @@ def _normalize_ma_cross_pairs(pairs):
     return normalized
 
 
+def _count_ma_cross_events(df, pairs, direction="golden"):
+    """Count actual moving-average crosses in the supplied backtest rows."""
+    normalized = _normalize_ma_cross_pairs(pairs)
+    if not normalized or df is None or df.empty or "Close" not in df.columns:
+        return [(fast, slow, 0) for fast, slow in normalized]
+
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    counts = []
+    for fast_period, slow_period in normalized:
+        fast_column, slow_column = f"MA_CROSS_{fast_period}", f"MA_CROSS_{slow_period}"
+        fast_ma = (
+            pd.to_numeric(df[fast_column], errors="coerce").to_numpy(dtype=float)
+            if fast_column in df.columns else close.rolling(fast_period).mean().to_numpy(dtype=float)
+        )
+        slow_ma = (
+            pd.to_numeric(df[slow_column], errors="coerce").to_numpy(dtype=float)
+            if slow_column in df.columns else close.rolling(slow_period).mean().to_numpy(dtype=float)
+        )
+        events = np.zeros(len(df), dtype=bool)
+        if len(df) > 1:
+            valid = (
+                np.isfinite(fast_ma[:-1]) & np.isfinite(slow_ma[:-1])
+                & np.isfinite(fast_ma[1:]) & np.isfinite(slow_ma[1:])
+            )
+            if direction == "golden":
+                events[1:] = valid & (fast_ma[:-1] <= slow_ma[:-1]) & (fast_ma[1:] > slow_ma[1:])
+            elif direction == "death":
+                events[1:] = valid & (fast_ma[:-1] >= slow_ma[:-1]) & (fast_ma[1:] < slow_ma[1:])
+            else:
+                raise ValueError("direction must be 'golden' or 'death'")
+        counts.append((fast_period, slow_period, int(events.sum())))
+    return counts
+
+
+def _slice_history_for_date_range(history, start_date, end_date):
+    """Return bars inside an inclusive calendar-date range."""
+    if history is None or history.empty:
+        return history.copy() if history is not None else pd.DataFrame()
+    index = pd.DatetimeIndex(pd.to_datetime(history.index, errors="coerce"))
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    start = pd.Timestamp(start_date)
+    end_exclusive = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+    mask = (index >= start) & (index < end_exclusive)
+    return history.iloc[np.asarray(mask)].copy()
+
+
 def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=20,
                                 entry_ma_cross_pairs=None, exit_ma_cross_pairs=None):
     df_calc = df.copy()
@@ -3364,15 +3411,38 @@ else:
 
             # ==============================================================================
             # 【Tab 5: 3.12 技術指標多空策略與動態停損回測器】
-            # ==============================================================================
+            # ============================================================================== 
             with tab5:
                 st.markdown(f"### 🧪 【{c_name}】技術指標多空策略與動態停損回測器 (3.12 版)")
+                default_bt_start = pd.Timestamp(df_chart.index[0]).date()
+                default_bt_end = pd.Timestamp(df_chart.index[-1]).date()
+                bt_date_selection = st.date_input(
+                    "本次回測資料起訖日",
+                    value=(default_bt_start, default_bt_end),
+                    key=f"bt_date_range_{selected_stock}_{selected_tf}",
+                    help="預設使用目前圖表已有資料的完整期間；若輸入範圍超出圖表資料，系統會按目前 K 線週期重新下載。",
+                )
+                if isinstance(bt_date_selection, (tuple, list)):
+                    if len(bt_date_selection) >= 2:
+                        bt_start_date, bt_end_date = bt_date_selection[0], bt_date_selection[1]
+                    elif len(bt_date_selection) == 1:
+                        bt_start_date, bt_end_date = bt_date_selection[0], default_bt_end
+                    else:
+                        bt_start_date, bt_end_date = default_bt_start, default_bt_end
+                else:
+                    bt_start_date, bt_end_date = bt_date_selection, bt_date_selection
+                if bt_start_date > bt_end_date:
+                    st.warning("起始日期晚於結束日期，已自動對調日期。")
+                    bt_start_date, bt_end_date = bt_end_date, bt_start_date
+                st.caption(
+                    f"目前 K 線週期：{selected_tf}；均線數字代表 K 棒資料根數，例如週線的 20 根是 20 週線，不是 20 個日曆天。"
+                )
                 bt_col1, bt_col2 = st.columns(2)
                 
                 with bt_col1:
                     st.markdown("##### 🟢 進場 (買進) 策略下拉式選單")
                     entry_ma_mode = st.selectbox("1. 均線策略 (MA)", ["停用", "突破均線", "站穩均線上"], index=1, key="bt_entry_ma_sel")
-                    entry_ma_p = st.number_input("買進均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
+                    entry_ma_p = st.number_input("買進均線資料根數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
 
                     entry_ma_cross_pairs = []
                     with st.expander("新增多組均線黃金交叉買進條件", expanded=False):
@@ -3391,13 +3461,13 @@ else:
                             pair_cols = st.columns(2)
                             with pair_cols[0]:
                                 fast_period = st.number_input(
-                                    f"第 {pair_index + 1} 組快線天數",
+                                    f"第 {pair_index + 1} 組快線資料根數",
                                     min_value=1, max_value=240, value=fast_default, step=1,
                                     key=f"bt_entry_ma_cross_fast_{pair_index + 1}",
                                 )
                             with pair_cols[1]:
                                 slow_period = st.number_input(
-                                    f"第 {pair_index + 1} 組慢線天數",
+                                    f"第 {pair_index + 1} 組慢線資料根數",
                                     min_value=1, max_value=240, value=slow_default, step=1,
                                     key=f"bt_entry_ma_cross_slow_{pair_index + 1}",
                                 )
@@ -3438,7 +3508,7 @@ else:
                         st.caption("初始風險取固定停損與移動停損中較靠近進場價的價格型停損；目標價在買點成立時鎖定，移動停損後續上移不會改寫目標價。")
                     
                     exit_ma_mode = st.selectbox("1. 均線平倉策略 (MA)", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel")
-                    exit_ma_p = st.number_input("賣出均線天數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
+                    exit_ma_p = st.number_input("賣出均線資料根數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
 
                     exit_ma_cross_pairs = []
                     with st.expander("新增多組均線死亡交叉平倉條件", expanded=False):
@@ -3453,13 +3523,13 @@ else:
                             pair_cols = st.columns(2)
                             with pair_cols[0]:
                                 fast_period = st.number_input(
-                                    f"第 {pair_index + 1} 組快線天數",
+                                    f"第 {pair_index + 1} 組快線資料根數",
                                     min_value=1, max_value=240, value=fast_default, step=1,
                                     key=f"bt_exit_ma_cross_fast_{pair_index + 1}",
                                 )
                             with pair_cols[1]:
                                 slow_period = st.number_input(
-                                    f"第 {pair_index + 1} 組慢線天數",
+                                    f"第 {pair_index + 1} 組慢線資料根數",
                                     min_value=1, max_value=240, value=slow_default, step=1,
                                     key=f"bt_exit_ma_cross_slow_{pair_index + 1}",
                                 )
@@ -3497,6 +3567,46 @@ else:
                     st.caption("成本按每次買進／賣出分別估算；台股預設值可依券商折扣、標的與交易方式調整。")
 
                 if st.button(f"🚀 開始執行【{c_name}】全指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
+                    chart_start = pd.Timestamp(df_chart.index[0]).date()
+                    chart_end = pd.Timestamp(df_chart.index[-1]).date()
+                    requested_start = pd.Timestamp(bt_start_date)
+                    requested_end = pd.Timestamp(bt_end_date)
+                    if bt_start_date < chart_start or bt_end_date > chart_end:
+                        try:
+                            with st.spinner("正在下載您指定日期範圍的歷史 K 線資料…"):
+                                raw_backtest = yf.download(
+                                    selected_stock,
+                                    start=requested_start.strftime("%Y-%m-%d"),
+                                    end=(requested_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                                    interval=cfg["i"], progress=False,
+                                )
+                            if isinstance(raw_backtest.columns, pd.MultiIndex):
+                                raw_backtest.columns = raw_backtest.columns.get_level_values(0)
+                            if not raw_backtest.empty and raw_backtest.index.tz is not None:
+                                raw_backtest.index = raw_backtest.index.tz_localize(None)
+                            if raw_backtest.empty:
+                                df_backtest = df_chart.iloc[0:0].copy()
+                                st.warning("資料來源沒有回傳這段期間的 K 線；請確認日期範圍或目前週期的歷史資料限制。")
+                            else:
+                                df_backtest, _, _ = calculate_chip_and_backtest(
+                                    selected_stock, raw_backtest, selected_tf
+                                )
+                                df_backtest = _slice_history_for_date_range(
+                                    df_backtest, bt_start_date, bt_end_date
+                                )
+                        except Exception as period_download_error:
+                            df_backtest = df_chart.iloc[0:0].copy()
+                            st.warning(f"指定期間資料下載失敗：{period_download_error}")
+                    else:
+                        df_backtest = _slice_history_for_date_range(
+                            df_chart, bt_start_date, bt_end_date
+                        )
+
+                    if "分鐘" in selected_tf:
+                        backtest_date_strings = df_backtest.index.strftime("%m-%d %H:%M").tolist()
+                    else:
+                        backtest_date_strings = df_backtest.index.strftime("%Y-%m-%d").tolist()
+
                     entry_conds = {
                         'ma_mode': entry_ma_mode,
                         'ma_p': entry_ma_p,
@@ -3523,12 +3633,18 @@ else:
                     }
                     
                     df_calc = compute_backtest_indicators(
-                        df_chart, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p,
+                        df_backtest, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p,
                         entry_ma_cross_pairs=entry_ma_cross_pairs,
                         exit_ma_cross_pairs=exit_ma_cross_pairs,
                     )
+                    entry_cross_counts = _count_ma_cross_events(
+                        df_calc, entry_ma_cross_pairs, "golden"
+                    )
+                    exit_cross_counts = _count_ma_cross_events(
+                        df_calc, exit_ma_cross_pairs, "death"
+                    )
                     df_trades = run_strategy_backtest(
-                        df_calc, entry_conds, exit_conds, date_strings,
+                        df_calc, entry_conds, exit_conds, backtest_date_strings,
                         risk_reward_ratio=float(bt_rr_multiple) if bt_rr_enabled else None,
                     )
                     analysis = analyze_indicator_backtest(
@@ -3537,6 +3653,28 @@ else:
 
                     if df_trades.empty:
                         st.info("這段期間沒有買賣訊號；下方仍會顯示策略資金變化，以及直接買進後持有的參考結果。")
+                        if entry_ma_cross_pairs:
+                            cross_count_summary = "、".join(
+                                f"MA{fast}/MA{slow}：{count} 次"
+                                for fast, slow, count in entry_cross_counts
+                            )
+                            st.caption(f"所選日期內黃金交叉次數：{cross_count_summary}。交叉只在快線穿越慢線的當根 K 棒成立。")
+                            if not any(count for _fast, _slow, count in entry_cross_counts):
+                                st.warning("所選日期範圍內沒有出現設定的黃金交叉；可延長回測期間、縮短均線根數，或確認目前 K 線週期。")
+                            else:
+                                other_entry_enabled = any((
+                                    entry_ma_mode != "停用", entry_kd_mode != "停用",
+                                    entry_macd_mode != "停用", entry_vol_mode != "停用",
+                                    entry_rsi_mode != "停用", entry_bb_mode != "停用",
+                                ))
+                                if entry_conds["match_mode"] == "ALL" and other_entry_enabled:
+                                    st.warning("期間內有黃金交叉，但買進判定為 ALL，還必須同一根 K 棒符合其他啟用的買進條件。若只想測交叉，請把原均線策略及其他買進條件設為「停用」；若希望任一條件成立就買進，請改成 ANY。")
+                        if exit_ma_cross_pairs:
+                            cross_count_summary = "、".join(
+                                f"MA{fast}/MA{slow}：{count} 次"
+                                for fast, slow, count in exit_cross_counts
+                            )
+                            st.caption(f"所選日期內死亡交叉次數：{cross_count_summary}。若沒有任何買進訊號，平倉交叉不會單獨產生交易。")
                     else:
                         trade_display = df_trades.drop(columns=[
                             "_entry_index", "_exit_index", "_entry_fill_price", "_exit_fill_price"
