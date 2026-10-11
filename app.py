@@ -2,6 +2,7 @@
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
 import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
+import streamlit.components.v1 as components
 from email.message import EmailMessage
 try:
     from google import genai
@@ -9,6 +10,12 @@ except ImportError:
     # Keep the dashboard usable if a hosting environment has not installed
     # the Gemini SDK; the AI action reports the missing dependency.
     genai = None
+try:
+    from openai import OpenAI
+except ImportError:
+    # Keep existing market features available even when the optional ChatGPT
+    # API client is missing from a local or hosted environment.
+    OpenAI = None
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import plotly.express as px
@@ -1041,15 +1048,28 @@ st.markdown("""
             .stMetric { padding: 0.45rem !important; }
             [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
 
-            /* Keep multi-column panels readable; use two columns, then one on very small phones. */
+            /* Keep metric/input panels readable, while giving chart panels the full phone width. */
             div[data-testid="stHorizontalBlock"] {
                 flex-wrap: wrap !important;
                 gap: 0.55rem !important;
             }
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: 0 !important;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
                 flex: 1 1 calc(50% - 0.55rem) !important;
                 width: calc(50% - 0.55rem) !important;
                 min-width: calc(50% - 0.55rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(div[data-testid="stPlotlyChart"]),
+            div[data-testid="stHorizontalBlock"]:has(.js-plotly-plot) {
+                align-items: stretch !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(div[data-testid="stPlotlyChart"]) > div[data-testid="column"],
+            div[data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > div[data-testid="column"] {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                min-width: 100% !important;
             }
 
             /* The nine main tabs remain in one row and can be swiped horizontally. */
@@ -1095,7 +1115,15 @@ st.markdown("""
             div[data-testid="stDataFrame"], div[data-testid="stTable"] {
                 max-width: 100% !important;
             }
-            .js-plotly-plot { max-width: 100% !important; }
+            div[data-testid="stPlotlyChart"],
+            .stPlotlyChart,
+            .js-plotly-plot,
+            .js-plotly-plot .plot-container,
+            .js-plotly-plot .svg-container {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
             .modebar-btn { min-width: 32px !important; min-height: 32px !important; }
         }
         @media (max-width: 420px) {
@@ -1185,6 +1213,294 @@ def generate_content_with_retry(prompt_text, api_key_val):
             if not retryable or attempt == 2:
                 raise
             time.sleep(2 ** (attempt + 1))
+
+def get_openai_secret_values(secret_store):
+    """Read optional ChatGPT API settings without displaying stored credentials."""
+    try:
+        settings = secret_store.get("openai", {})
+        api_key = str(settings.get("api_key", "") or secret_store.get("OPENAI_API_KEY", "")).strip()
+        model = str(settings.get("model", "") or secret_store.get("OPENAI_MODEL", "gpt-5.5")).strip()
+        return api_key, model or "gpt-5.5"
+    except Exception:
+        return "", "gpt-5.5"
+
+def generate_openai_research(prompt_text, api_key_val, model_name="gpt-5.5"):
+    """Generate a web-researched report with clickable source links."""
+    if OpenAI is None:
+        raise RuntimeError(
+            "找不到 openai 套件。請將 openai 套件加入部署環境的 requirements.txt，重新部署後再使用 ChatGPT 分析。"
+        )
+    client = OpenAI(api_key=api_key_val, timeout=120.0, max_retries=2)
+    response = client.responses.create(
+        model=model_name or "gpt-5.5",
+        tools=[{"type": "web_search"}],
+        tool_choice="required",
+        input=prompt_text,
+    )
+    response_text = str(getattr(response, "output_text", "") or "").strip()
+    if not response_text:
+        raise RuntimeError("ChatGPT API 已回應，但沒有提供文字內容。")
+
+    sources = []
+    for output_item in getattr(response, "output", []) or []:
+        content_items = output_item.get("content", []) if isinstance(output_item, dict) else getattr(output_item, "content", [])
+        for content_item in content_items or []:
+            annotations = content_item.get("annotations", []) if isinstance(content_item, dict) else getattr(content_item, "annotations", [])
+            for annotation in annotations or []:
+                if isinstance(annotation, dict):
+                    url = annotation.get("url")
+                    title = annotation.get("title")
+                    nested = annotation.get("url_citation", {})
+                else:
+                    url = getattr(annotation, "url", None)
+                    title = getattr(annotation, "title", None)
+                    nested = getattr(annotation, "url_citation", None)
+                if not url and nested:
+                    url = nested.get("url") if isinstance(nested, dict) else getattr(nested, "url", None)
+                    title = title or (nested.get("title") if isinstance(nested, dict) else getattr(nested, "title", None))
+                if url and all(existing[1] != url for existing in sources):
+                    sources.append((str(title or url), str(url)))
+    if sources:
+        response_text += "\n\n#### 網路研究來源\n" + "\n".join(
+            f"- [{title}]({url})" for title, url in sources[:12]
+        )
+    return response_text, sources
+
+def collect_stock_research_context(stock_obj, info_obj, market_snapshot):
+    """Build an evidence-only context from the quote provider for either AI."""
+    info_obj = info_obj or {}
+    fields = {
+        "產業": info_obj.get("industry"),
+        "產業分類": info_obj.get("sector"),
+        "公司簡介": info_obj.get("longBusinessSummary"),
+        "市值": info_obj.get("marketCap"),
+        "本益比": info_obj.get("trailingPE") or info_obj.get("forwardPE"),
+        "營收成長率": info_obj.get("revenueGrowth"),
+        "盈餘成長率": info_obj.get("earningsGrowth") or info_obj.get("earningsQuarterlyGrowth"),
+        "毛利率": info_obj.get("grossMargins"),
+        "營業利益率": info_obj.get("operatingMargins"),
+        "自由現金流": info_obj.get("freeCashflow"),
+    }
+    lines = [f"資料擷取時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}（台灣時間）"]
+    for label, value in fields.items():
+        if value is None or (isinstance(value, float) and not np.isfinite(value)):
+            continue
+        if label.endswith("率") and isinstance(value, (int, float, np.number)):
+            value = f"{float(value) * 100:.2f}%"
+        elif label in ("市值", "自由現金流") and isinstance(value, (int, float, np.number)):
+            value = f"{float(value):,.0f}（來源原幣別）"
+        lines.append(f"{label}：{str(value)[:900]}")
+    if market_snapshot:
+        lines.append("市場指數快照（數值可能延遲，依本次畫面資料）：" + "；".join(market_snapshot))
+
+    headlines = []
+    try:
+        news_items = stock_obj.news or []
+    except Exception:
+        news_items = []
+    for item in news_items[:8]:
+        content = item.get("content", item) if isinstance(item, dict) else {}
+        if not isinstance(content, dict):
+            continue
+        title = content.get("title") or item.get("title")
+        provider = content.get("provider") or item.get("publisher") or {}
+        publisher = provider.get("displayName", "") if isinstance(provider, dict) else str(provider)
+        url_obj = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
+        url = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj or "")
+        pub_date = content.get("pubDate") or item.get("providerPublishTime")
+        if isinstance(pub_date, (int, float)):
+            try:
+                pub_date = pd.Timestamp.utcfromtimestamp(pub_date).strftime("%Y-%m-%d")
+            except Exception:
+                pub_date = ""
+        if title:
+            headlines.append(f"- {str(title)[:250]}（{publisher or 'Yahoo Finance'}；{pub_date or '日期未提供'}）{('｜' + url) if url else ''}")
+    if headlines:
+        lines.append("Yahoo Finance 近期新聞標題（僅供檢索線索，不代表已查證）：\n" + "\n".join(headlines))
+    else:
+        lines.append("近期新聞：資料來源沒有提供可用新聞；不可自行補造新聞或題材。")
+    return "\n".join(lines)
+
+def run_ai_candidate_backtests(history, is_taiwan_stock):
+    """Evaluate a small fixed set of existing-system strategies, split chronologically."""
+    if history is None or history.empty:
+        return {"table": pd.DataFrame(), "best": None, "text": "無法下載可用日線歷史資料，因此沒有進行策略回測。"}
+    frame = history.copy()
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = frame.columns.get_level_values(0)
+    if getattr(frame.index, "tz", None) is not None:
+        frame.index = frame.index.tz_localize(None)
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    if any(column not in frame.columns for column in required):
+        return {"table": pd.DataFrame(), "best": None, "text": "日線資料缺少必要的開高低收或成交量欄位，沒有進行策略回測。"}
+    frame = frame[required].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    frame = frame.dropna(subset=required).sort_index()
+    frame = frame.loc[frame["Close"] > 0]
+    if len(frame) < 504:
+        return {
+            "table": pd.DataFrame(), "best": None,
+            "text": f"目前只有 {len(frame)} 筆有效日線（至少需要約 2 年資料），不足以分成前 70% 與後 30% 做基本樣本外比較。",
+        }
+
+    split = int(len(frame) * 0.70)
+    indicator_frame = compute_backtest_indicators(frame)
+    fee = 0.1425 if is_taiwan_stock else 0.0
+    tax = 0.3 if is_taiwan_stock else 0.0
+    slip = 0.05
+    candidates = [
+        {
+            "name": "均線順勢 MA20/60",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [(20, 60)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [(20, 60)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+        },
+        {
+            "name": "均線順勢 MA50/150",
+            "entry": {"ma_mode": "停用", "ma_p": 50, "ma_cross_pairs": [(50, 150)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 50, "ma_cross_pairs": [(50, 150)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+        },
+        {
+            "name": "MACD 黃金／死亡交叉",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "黃金交叉", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "死亡交叉", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+        },
+        {
+            "name": "KD 黃金／死亡交叉",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "黃金交叉", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "死亡交叉", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+        },
+    ]
+
+    def score_period(part):
+        dates = pd.DatetimeIndex(part.index).strftime("%Y-%m-%d").tolist()
+        trades = run_strategy_backtest(part, entry, exit_rules, dates, risk_reward_ratio=3.0)
+        analysis = analyze_indicator_backtest(part, trades, 100000.0, fee, tax, slip, "1日", is_taiwan_stock)
+        return analysis
+
+    rows = []
+    for candidate in candidates:
+        entry = candidate["entry"]
+        exit_rules = candidate["exit"]
+        train_part = indicator_frame.iloc[:split].copy()
+        # Retain the prior candle for crossover detection; it is pre-test data.
+        test_part = indicator_frame.iloc[max(0, split - 1):].copy()
+        train_result = score_period(train_part)
+        test_result = score_period(test_part)
+        train = train_result["strategy_metrics"] if train_result else {}
+        test = test_result["strategy_metrics"] if test_result else {}
+        test_count = int(test.get("trade_count", 0) or 0)
+        test_expectancy = _finite_number(test.get("expectancy_pct"))
+        test_pf = _finite_number(test.get("profit_factor"))
+        test_mdd = _finite_number(test.get("mdd"))
+        passed = (
+            test_count >= 5 and test_expectancy is not None and test_expectancy > 0
+            and (test_pf is None or test_pf > 1.0)
+            and test_mdd is not None and test_mdd >= -0.30
+        )
+        rows.append({
+            "策略": candidate["name"],
+            "前70%交易數": int(train.get("trade_count", 0) or 0),
+            "前70%平均每筆損益(%)": _finite_number(train.get("expectancy_pct")),
+            "後30%交易數": test_count,
+            "後30%平均每筆損益(%)": test_expectancy,
+            "後30%賺賠金額比": test_pf,
+            "後30%最大回撤(%)": test_mdd * 100.0 if test_mdd is not None else None,
+            "樣本外檢查": "通過初步門檻" if passed else "未通過／資料不足",
+            "_passed": passed,
+        })
+    result_frame = pd.DataFrame(rows)
+    passed_rows = result_frame.loc[result_frame["_passed"]].copy()
+    if passed_rows.empty:
+        best = None
+        recommendation = "沒有策略同時通過樣本外交易數、成本後正期望、賺賠金額比及回撤門檻；本次不指定可執行策略，建議觀望或先用模擬交易。"
+    else:
+        best_row = passed_rows.sort_values(["後30%平均每筆損益(%)", "後30%最大回撤(%)"], ascending=[False, False]).iloc[0]
+        best = str(best_row["策略"])
+        best_pf = _finite_number(best_row["後30%賺賠金額比"])
+        best_pf_text = f"{best_pf:.2f}" if best_pf is not None else "樣本外尚無虧損交易"
+        recommendation = (
+            f"初步通過門檻的策略為「{best}」；後 30% 樣本外平均每筆成本後損益 "
+            f"{best_row['後30%平均每筆損益(%)']:.2f}%、交易 {int(best_row['後30%交易數'])} 筆、"
+            f"賺賠金額比 {best_pf_text}、最大回撤 {best_row['後30%最大回撤(%)']:.2f}%。"
+        )
+    period = f"{frame.index[0]:%Y-%m-%d} 至 {frame.index[-1]:%Y-%m-%d}；前70%訓練、後30%樣本外測試"
+    assumptions = (
+        f"共 {len(frame)} 筆日線；成本假設：每邊手續費 {fee:.4f}%、賣出交易稅 {tax:.3f}%、每邊滑價 {slip:.2f}%；"
+        "固定測試停損 8%、移動停損 12%、預設風險報酬 1:3。通過門檻為後段至少 5 筆交易、成本後平均單筆報酬大於 0、"
+        "賺賠金額比大於 1（無虧損時不以缺值判失敗）且最大回撤不超過 30%。"
+    )
+    return {"table": result_frame.drop(columns=["_passed"]), "best": best,
+            "text": f"回測期間：{period}\n{assumptions}\n結果：{recommendation}",
+            "period": period, "assumptions": assumptions, "recommendation": recommendation}
+
+def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_context, backtest_summary):
+    research_mode = "必須使用網路搜尋查證近期資料，並附上可點擊的來源與日期。" if provider == "ChatGPT" else "目前使用者選擇 Gemini；只能根據提供的資料與新聞線索分析，不可假裝已完成即時網路搜尋，來源不足時明確寫出資料限制。"
+    return f"""你是謹慎的台灣與美國股票研究助理，請使用繁體中文寫一份結構清楚、白話而有資料依據的個股投資研究報告。
+股票：{symbol}（{name}）
+量化與策略雷達資料：
+{quant_summary}
+
+行情、公司基本資料及可取得的新聞：
+{company_context}
+
+本系統內部歷史策略回測（已扣設定的交易成本，採時間順序前70%／後30%比較）：
+{backtest_summary}
+
+研究方式：{research_mode}
+來源優先順序：台股先查證交所、公開資訊觀測站、公司投資人關係及主管機關資料；美股先查公司投資人關係、SEC 與主管機關資料，再以可信財經媒體補充。每個重要市場或同業數據都要附來源與資料日期。
+
+請依序寫出：
+1. 市場環境：台股或美股大盤近期方向、利率／匯率／政策等與此公司相關的因素；標註資料日期。
+2. 產業與題材：此公司所屬產業近期需求、供需、技術或政策題材，區分已發生事實與市場預期。
+3. 同業競爭比較：列出 2–4 家真正可比同業，優先比較近期營收成長、毛利／營業利益率、估值或市場地位；只列有來源且期間可比的數據，其他項目註明資料不足，不要虛構。
+4. 公司優勢與風險：用具體證據說明競爭優勢、主要風險及可能推翻看多／看空觀點的條件。
+5. 本系統回測結果：列出樣本外交易數、平均每筆損益、賺賠金額比、最大回撤，指出通過或未通過的策略；若沒有策略通過，明確說「目前找不到足夠證據支持正期望策略」，不得推薦未通過者。
+6. 操作與風控：若策略通過，僅依其實際買進規則規劃分批進場、初始停損與移動停損，並建議單筆最大資金風險 0.5%–1%、部位以「可承受損失金額 ÷ 每股進場至停損價差」估算；若沒有通過，建議觀望／模擬交易與重新評估條件。不得承諾獲利或給出無來源的目標價。
+7. 最後用三點摘要：目前偏多／中性／偏空、最重要催化因素、最重要風險。
+
+只把回測當作歷史測試，不代表未來。區分數據與推論，不確定或缺漏的數據直說缺漏。"""
+
+def render_plotly_delete_hotkey(st, chart_key):
+    """Map Delete to Plotly's built-in erase-selected-shape button when available."""
+    encoded_key = json.dumps(str(chart_key))
+    components.html(f"""
+    <script>
+    (() => {{
+      try {{
+        const hostWindow = window.parent;
+        const hostDocument = hostWindow.document;
+        const chartKey = {encoded_key};
+        hostWindow.__plotlyShapeDeleteKeys = hostWindow.__plotlyShapeDeleteKeys || {{}};
+        if (hostWindow.__plotlyShapeDeleteKeys[chartKey]) return;
+        const state = {{ overChart: false }};
+        hostWindow.__plotlyShapeDeleteKeys[chartKey] = state;
+        const selector = '[class*="st-key-' + chartKey.replace(/"/g, '') + '"] .js-plotly-plot';
+        const findGraph = () => hostDocument.querySelector(selector);
+        hostDocument.addEventListener('pointermove', (event) => {{
+          const graph = findGraph();
+          if (!graph) {{ state.overChart = false; return; }}
+          const bounds = graph.getBoundingClientRect();
+          state.overChart = event.clientX >= bounds.left && event.clientX <= bounds.right
+            && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+        }}, true);
+        hostDocument.addEventListener('keydown', (event) => {{
+          if (event.key !== 'Delete' || !state.overChart) return;
+          const target = event.target;
+          if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+          const graph = findGraph();
+          const eraseButton = graph && Array.from(graph.querySelectorAll('.modebar-btn')).find((button) => {{
+            const label = [button.getAttribute('data-title'), button.getAttribute('aria-label'), button.getAttribute('title')]
+              .filter(Boolean).join(' ').toLowerCase();
+            return label.includes('erase') && label.includes('shape');
+          }});
+          if (eraseButton) {{
+            event.preventDefault();
+            eraseButton.click();
+          }}
+        }}, true);
+      }} catch (_error) {{ /* Built-in Plotly eraser remains available if browser isolation blocks this shortcut. */ }}
+    }})();
+    </script>
+    """, height=0, scrolling=False)
 
 def get_gmail_secret_values(secret_store):
     """Read Gmail sender credentials without exposing them in the interface."""
@@ -2573,6 +2889,19 @@ else:
     if not api_key_input:
         api_key_input = st.sidebar.text_input("請輸入您的 Gemini API Key：", type="password")
 
+    openai_api_key_input, secret_openai_model = get_openai_secret_values(st.secrets)
+    if openai_api_key_input:
+        st.sidebar.success("🔒 ChatGPT API 金鑰已從雲端安全設定載入")
+    else:
+        openai_api_key_input = st.sidebar.text_input(
+            "請輸入您的 ChatGPT API Key：", type="password", key="openai_api_key_input"
+        )
+    openai_model_input = st.sidebar.text_input(
+        "ChatGPT 模型名稱", value=secret_openai_model, key="openai_model_input",
+        help="預設為 gpt-5.5；若您的 API 帳號沒有此模型權限，可改成帳號可用的模型。",
+    ).strip() or "gpt-5.5"
+    st.sidebar.caption("ChatGPT API 使用量依 OpenAI API 帳戶計費；ChatGPT 訂閱不包含 API 額度。")
+
     st.sidebar.markdown("### 🎛️ 個人自訂看盤面板")
     selected_tf = st.sidebar.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4)
     tf_mapping = {
@@ -2919,29 +3248,101 @@ else:
                 
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
 
-                if st.button(f"🧠 啟動 Gemini AI 分析【{c_name}】個股綜合投資價值", use_container_width=True, type="primary"):
-                    if not api_key_input: 
-                        st.error("⚠️ 請先在左側邊欄輸入 Gemini API Key！")
+                ai_provider = st.radio(
+                    "AI 分析來源",
+                    ["Gemini", "ChatGPT（含網路搜尋）"],
+                    horizontal=True,
+                    index=1 if openai_api_key_input else 0,
+                    key=f"ai_provider_{selected_stock}",
+                    help="Gemini 使用本系統行情與可取得的新聞；ChatGPT 會額外搜尋近期市場、產業題材與同業資料並附來源。",
+                )
+                if st.button(f"🧠 啟動 AI 投資分析報告【{c_name}】", use_container_width=True, type="primary"):
+                    provider_name = "ChatGPT" if ai_provider.startswith("ChatGPT") else "Gemini"
+                    provider_key = openai_api_key_input if provider_name == "ChatGPT" else api_key_input
+                    if not provider_key:
+                        label = "ChatGPT API Key" if provider_name == "ChatGPT" else "Gemini API Key"
+                        st.error(f"⚠️ 請先在左側邊欄設定 {label}，或改選另一個分析來源。")
                     else:
-                        with st.spinner(f"🤖 精算 {c_name} 報告中..."):
+                        with st.spinner(f"🤖 正在取得歷史日線、執行樣本外回測並整理 {c_name} 研究報告…"):
                             try:
-                                ai_prompt = f"請針對個股:{selected_stock}({c_name})，當前量化指標：GVI={gvi_str}, ROE={roe_str}, PB={pb_str}。經過三核心策略交叉分析，最適策略為【{best_strategy}】(匹配度{best_score}分)。請300字內提供繁體中文投資報告。"
-                                success_report = generate_content_with_retry(ai_prompt, api_key_input)
-                                st.session_state[f"ai_report_{selected_stock}"] = success_report
-                            except Exception as ai_e: 
-                                st.error(f"Gemini API 分析失敗：{ai_e}")
+                                daily_history = yf.download(
+                                    selected_stock, period="5y", interval="1d", auto_adjust=False,
+                                    actions=False, progress=False, threads=False,
+                                )
+                                ai_backtest = run_ai_candidate_backtests(daily_history, is_tw_stock)
+                                market_snapshot = []
+                                for label, value, index_change_pct in (
+                                    ("台灣加權指數", tw_val, tw_pct),
+                                    ("標普500", sp_val, sp_pct),
+                                    ("道瓊", dj_val, dj_pct),
+                                    ("那斯達克", nas_val, nas_pct),
+                                ):
+                                    if value is not None:
+                                        market_snapshot.append(
+                                            f"{label} {value:,.2f}，當次畫面漲跌 {index_change_pct:+.2f}%" if index_change_pct is not None
+                                            else f"{label} {value:,.2f}"
+                                        )
+                                company_context = collect_stock_research_context(
+                                    stock_obj_main, info_obj_main, market_snapshot
+                                )
+                                quant_summary = (
+                                    f"GVI={gvi_str}；ROE={roe_str}；PB={pb_str}；"
+                                    f"三核心推薦={best_strategy}（匹配度 {best_score}/100）；"
+                                    f"短中期籌碼動能={chip_status_text}；"
+                                    f"目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%"
+                                )
+                                ai_prompt = build_ai_investment_prompt(
+                                    selected_stock, c_name, provider_name, quant_summary,
+                                    company_context, ai_backtest["text"],
+                                )
+                                if provider_name == "ChatGPT":
+                                    success_report, ai_sources = generate_openai_research(
+                                        ai_prompt, openai_api_key_input, openai_model_input
+                                    )
+                                else:
+                                    success_report = generate_content_with_retry(ai_prompt, api_key_input)
+                                    ai_sources = []
+                                report_key = f"ai_report_{selected_stock}"
+                                st.session_state[report_key] = success_report
+                                st.session_state[f"{report_key}_provider"] = provider_name
+                                st.session_state[f"{report_key}_backtest"] = ai_backtest
+                                st.session_state[f"{report_key}_sources"] = ai_sources
+                            except Exception as ai_e:
+                                st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
                 
                 if f"ai_report_{selected_stock}" in st.session_state:
-                    st.success(f"📋 AI 【{c_name}】核心投資分析報告")
+                    report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
+                    st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
                     ai_report = st.session_state[f"ai_report_{selected_stock}"]
                     st.markdown(ai_report)
+                    saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
+                    saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
+                    if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
+                        with st.expander("查看系統自動回測比較", expanded=False):
+                            display_backtest = saved_backtest_table.copy()
+                            for metric_column in (
+                                "前70%平均每筆損益(%)", "後30%平均每筆損益(%)",
+                                "後30%最大回撤(%)",
+                            ):
+                                if metric_column in display_backtest:
+                                    display_backtest[metric_column] = pd.to_numeric(
+                                        display_backtest[metric_column], errors="coerce"
+                                    ).round(2)
+                            if "後30%賺賠金額比" in display_backtest:
+                                display_backtest["後30%賺賠金額比"] = pd.to_numeric(
+                                    display_backtest["後30%賺賠金額比"], errors="coerce"
+                                ).round(2)
+                            st.dataframe(display_backtest, use_container_width=True, hide_index=True)
+                            st.caption(saved_backtest.get("assumptions", ""))
+                    elif isinstance(saved_backtest, dict) and saved_backtest.get("text"):
+                        st.info(saved_backtest["text"])
                     recipient_email = st.text_input(
                         "寄送分析報告到 Email",
                         key=f"ai_report_email_recipient_{selected_stock}",
                         placeholder="請輸入收件信箱",
                     )
                     if st.button(
-                        "✉️ 用 Gmail 寄出這份分析",
+                        "✉️ 寄出這份分析",
                         key=f"send_ai_report_email_{selected_stock}",
                         use_container_width=True,
                     ):
@@ -2958,14 +3359,14 @@ else:
                                     "加入 [gmail] 區段（sender_email、app_password），儲存後重新啟動。"
                                 )
                             else:
-                                email_subject = f"Gemini 個股分析｜{selected_stock} {c_name}"
+                                email_subject = f"AI 個股分析｜{selected_stock} {c_name}"
                                 email_body = (
                                     f"個股：{selected_stock} {c_name}\n"
                                     f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                                    f"Gemini AI 分析結果：\n\n{ai_report}"
+                                    f"{report_provider} 分析結果：\n\n{ai_report}"
                                 )
                                 try:
-                                    with st.spinner("正在透過 Gmail 寄送分析報告…"):
+                                    with st.spinner("正在寄送分析報告…"):
                                         send_gmail_report(
                                             recipient_email,
                                             email_subject,
@@ -3102,10 +3503,11 @@ else:
                     )
                 )
                 
+                chart_key = f"candlestick_chart_{selected_stock}_{selected_tf}"
                 st.plotly_chart(
                     fig, 
                     use_container_width=True, 
-                    key=f"candlestick_chart_{selected_stock}_{selected_tf}",
+                    key=chart_key,
                     config={
                         'modeBarButtonsToAdd': [
                             'drawline',       # 直線工具
@@ -3122,6 +3524,8 @@ else:
                         'responsive': True
                     }
                 )
+                render_plotly_delete_hotkey(st, chart_key)
+                st.caption("單筆刪除：先點一下要刪除圖形的邊界，再將游標留在 K 線圖內按 Delete；手機可用圖表上的橡皮擦。")
 
             with tab6:
                 render_dividend_tab(st, default_ticker=selected_stock)
