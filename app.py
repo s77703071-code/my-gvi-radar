@@ -1349,14 +1349,9 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
     slip = 0.05
     candidates = [
         {
-            "name": "均線順勢 MA20/60",
-            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [(20, 60)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
-            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [(20, 60)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
-        },
-        {
-            "name": "均線順勢 MA50/150",
-            "entry": {"ma_mode": "停用", "ma_p": 50, "ma_cross_pairs": [(50, 150)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
-            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 50, "ma_cross_pairs": [(50, 150)], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+            "name": "五線開花（MA5／10／20／60／120）",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "five_ma_mode": "五線開花", "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "five_ma_mode": "排列失序", "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
         },
         {
             "name": "MACD 黃金／死亡交叉",
@@ -1367,6 +1362,16 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             "name": "KD 黃金／死亡交叉",
             "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "黃金交叉", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用", "match_mode": "ALL"},
             "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "死亡交叉", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用"},
+        },
+        {
+            "name": "RSI 超賣回升／超買回落",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "超賣回升 (RSI向上突破30)", "bb_mode": "停用", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "超買警戒 (RSI跌破70)", "bb_mode": "停用"},
+        },
+        {
+            "name": "布林通道下軌反彈／回到中軌",
+            "entry": {"ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "觸及布林下軌反彈", "match_mode": "ALL"},
+            "exit": {"stop_loss_pct": 8.0, "trailing_stop_pct": 12.0, "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "站上布林中軌"},
         },
     ]
 
@@ -1425,11 +1430,29 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
     period = f"{frame.index[0]:%Y-%m-%d} 至 {frame.index[-1]:%Y-%m-%d}；前70%訓練、後30%樣本外測試"
     assumptions = (
         f"共 {len(frame)} 筆日線；成本假設：每邊手續費 {fee:.4f}%、賣出交易稅 {tax:.3f}%、每邊滑價 {slip:.2f}%；"
-        "固定測試停損 8%、移動停損 12%、預設風險報酬 1:3。通過門檻為後段至少 5 筆交易、成本後平均單筆報酬大於 0、"
+        "五線開花定義為 MA5＞MA10＞MA20＞MA60＞MA120 且五條線均較前一交易日上升；排列失序時出場。"
+        "RSI 使用 14 日，RSI 上穿 30 進場、跌破 70 出場；布林通道使用 20 日均線與上下 2 倍標準差，下軌反彈進場、站上中軌出場。"
+        "MACD 與 KD 仍保留黃金／死亡交叉比較。各策略另套用固定停損 8%、移動停損 12%、預設風險報酬 1:3。"
+        "通過門檻為後段至少 5 筆交易、成本後平均單筆報酬大於 0、"
         "賺賠金額比大於 1（無虧損時不以缺值判失敗）且最大回撤不超過 30%。"
     )
+    def backtest_value(value, suffix=""):
+        number = _finite_number(value)
+        return f"{number:+.2f}{suffix}" if number is not None else "資料不足"
+
+    strategy_lines = []
+    for _, row in result_frame.iterrows():
+        pf_value = _finite_number(row.get("後30%賺賠金額比"))
+        pf_text = f"{pf_value:.2f}" if pf_value is not None else "無虧損或資料不足"
+        strategy_lines.append(
+            f"- {row['策略']}：前段 {int(row['前70%交易數'])} 筆；後段 {int(row['後30%交易數'])} 筆；"
+            f"後段平均每筆損益 {backtest_value(row.get('後30%平均每筆損益(%)'), '%')}；"
+            f"賺賠金額比 {pf_text}；最大回撤 {backtest_value(row.get('後30%最大回撤(%)'), '%')}；"
+            f"{row['樣本外檢查']}。"
+        )
+    results_text = "\n".join(strategy_lines)
     return {"table": result_frame.drop(columns=["_passed"]), "best": best,
-            "text": f"回測期間：{period}\n{assumptions}\n結果：{recommendation}",
+            "text": f"回測期間：{period}\n{assumptions}\n各策略樣本外結果：\n{results_text}\n整體結論：{recommendation}",
             "period": period, "assumptions": assumptions, "recommendation": recommendation}
 
 def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_context, backtest_summary):
@@ -2378,6 +2401,8 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
     }
     for period in cross_periods:
         df_calc[f'MA_CROSS_{period}'] = df_calc['Close'].rolling(window=period).mean()
+    for period in (5, 10, 20, 60, 120):
+        df_calc[f'MA_FIVE_{period}'] = df_calc['Close'].rolling(window=period).mean()
 
     low_min = df_calc['Low'].rolling(window=9).min()
     high_max = df_calc['High'].rolling(window=9).max()
@@ -2409,6 +2434,7 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
 
     bb_middle = df_calc['Close'].rolling(window=bb_p).mean()
     bb_std = df_calc['Close'].rolling(window=bb_p).std()
+    df_calc['BB_Middle'] = bb_middle
     df_calc['BB_Upper'] = bb_middle + (bb_std * 2)
     df_calc['BB_Lower'] = bb_middle - (bb_std * 2)
 
@@ -2456,6 +2482,28 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
     rsi_arr = df_calc['RSI'].to_numpy()
     bb_upper = df_calc['BB_Upper'].to_numpy()
     bb_lower = df_calc['BB_Lower'].to_numpy()
+    bb_middle = df_calc['BB_Middle'].to_numpy() if 'BB_Middle' in df_calc.columns else np.full(len(df_calc), np.nan)
+    five_ma_periods = (5, 10, 20, 60, 120)
+    five_ma_arrays = {
+        period: df_calc[f'MA_FIVE_{period}'].to_numpy()
+        if f'MA_FIVE_{period}' in df_calc.columns
+        else np.full(len(df_calc), np.nan)
+        for period in five_ma_periods
+    }
+
+    def five_line_bullish(index, require_rising=False):
+        if index < 0:
+            return False
+        values = [five_ma_arrays[period][index] for period in five_ma_periods]
+        if not np.isfinite(values).all() or not all(values[i] > values[i + 1] for i in range(4)):
+            return False
+        if require_rising:
+            if index == 0:
+                return False
+            previous = [five_ma_arrays[period][index - 1] for period in five_ma_periods]
+            if not np.isfinite(previous).all() or not all(values[i] > previous[i] for i in range(5)):
+                return False
+        return True
 
     for i in range(1, len(df_calc)):
         if not position:
@@ -2465,6 +2513,9 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                 buy_checks.append(not np.isnan(ma_entry[i-1]) and closes[i-1] <= ma_entry[i-1] and closes[i] > ma_entry[i])
             elif entry_conds['ma_mode'] == '站穩均線上':
                 buy_checks.append(not np.isnan(ma_entry[i]) and closes[i] > ma_entry[i])
+
+            if entry_conds.get('five_ma_mode') == '五線開花':
+                buy_checks.append(five_line_bullish(i, require_rising=True))
 
             for fast_period, slow_period in entry_ma_cross_pairs:
                 fast_ma = cross_ma_values[fast_period]
@@ -2575,6 +2626,12 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             elif exit_conds['bb_mode'] == '觸及上軌拉回':
                 if highs[i-1] >= bb_upper[i-1] and closes[i] < bb_upper[i]:
                     exit_reasons.append("布林上軌受阻離場")
+            elif exit_conds['bb_mode'] == '站上布林中軌':
+                if np.isfinite(bb_middle[i-1]) and np.isfinite(bb_middle[i]) and closes[i-1] <= bb_middle[i-1] and closes[i] > bb_middle[i]:
+                    exit_reasons.append("站上布林中軌停利")
+
+            if exit_conds.get('five_ma_mode') == '排列失序' and not five_line_bullish(i):
+                exit_reasons.append("五線多頭排列失序")
 
             target_hit = take_profit_price is not None and (
                 float(highs[i]) >= take_profit_price or float(closes[i]) >= take_profit_price
@@ -2844,7 +2901,9 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
-    selected_stock = st.sidebar.text_input("輸入台美股代碼：", value="3293.TWO").strip().upper()
+    selected_stock = st.sidebar.text_input(
+        "輸入台美股代碼：", value="3293.TWO", key="selected_stock_input"
+    ).strip().upper()
     st.title("📈 機構級三核心策略雷達 3.12（網格複利對比與專業畫線全能版）")
 
     st.markdown("### 🌐 全球大盤即時看板")
@@ -3040,7 +3099,18 @@ else:
                 else:
                     date_strings = df_chart.index.strftime('%Y-%m-%d').tolist()
 
-                c_name = STOCK_NAME_MAP.get(selected_stock, selected_stock)
+                stock_obj_main = yf.Ticker(selected_stock)
+                try:
+                    info_obj_main = stock_obj_main.info or {}
+                except Exception:
+                    info_obj_main = {}
+                c_name = (
+                    STOCK_NAME_MAP.get(selected_stock)
+                    or info_obj_main.get('longName')
+                    or info_obj_main.get('shortName')
+                    or selected_stock
+                )
+                current_price_label = f"當前現價 ({c_name} {selected_stock})"
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
 
@@ -3086,7 +3156,7 @@ else:
 
                 if "價值" in panel_mode:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"💰 當前現價 ({selected_stock})", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
+                    with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
                     
                     if bv_val is not None:
                         with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str); st.caption("📢 最新重算")
@@ -3097,7 +3167,7 @@ else:
                         with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
                 else:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"⚡ 當前現價 ({selected_stock})", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)")
+                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)")
                     with gc2: st.metric(label="🌊 今日成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off")
                     with gc3: st.metric(label="🎯 5日均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off")
                     with gc4: st.metric(label="🔺 今日最高價", value=f"{high_today:,.2f}")
@@ -3109,9 +3179,6 @@ else:
                 high_252d = close_today * 1.05 if L < 50 else float(df_chart['Close'].tail(min(252, L)).max())
                 momentum_score = float((close_today / high_252d) * 100) if high_252d > 0 else 0.0
 
-                stock_obj_main = yf.Ticker(selected_stock)
-                info_obj_main = stock_obj_main.info if hasattr(stock_obj_main, 'info') and stock_obj_main.info else {}
-                
                 fcf_main = info_obj_main.get('freeCashflow')
                 mcap_main = info_obj_main.get('marketCap')
                 if (fcf_main is None or np.isnan(fcf_main)) and mcap_main and mcap_main > 0:
@@ -4610,7 +4677,43 @@ else:
         else:
             st.caption("技術指標回測完成後，條件勝率與報酬建議會出現在此處；紀錄保留於目前工作階段。")
 
+        def _load_selected_scan_stock_for_diagnosis():
+            ticker = st.session_state.get("stock_screen_selected_ticker")
+            if ticker:
+                st.session_state["selected_stock_input"] = ticker
+
+        def render_stock_screen_results(result_view, title):
+            st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
+            st.caption("點選明細表中的股票列，再按下方「即時診斷」按鈕，即可將該股載入上方全球個股即時診斷。")
+            table_event = st.dataframe(
+                result_view,
+                use_container_width=True,
+                hide_index=True,
+                key="stock_screen_results_table",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+            selected_rows = list(table_event.selection.rows)
+            if selected_rows:
+                selected_row = int(selected_rows[0])
+                if 0 <= selected_row < len(result_view):
+                    selected_result = result_view.iloc[selected_row]
+                    st.session_state["stock_screen_selected_ticker"] = str(selected_result["股票代碼"])
+                    selected_name = str(selected_result.get("股票名稱", ""))
+                    selected_ticker = str(selected_result["股票代碼"])
+                    st.button(
+                        f"🔍 即時診斷【{selected_name} {selected_ticker}】",
+                        key="stock_screen_diagnose_selected",
+                        on_click=_load_selected_scan_stock_for_diagnosis,
+                        use_container_width=True,
+                    )
+            else:
+                st.session_state.pop("stock_screen_selected_ticker", None)
+
         def load_data_from_sqlite_and_render(filter_list, title, is_custom_mode=False):
+            st.session_state["stock_screen_result"] = None
+            st.session_state.pop("stock_screen_selected_ticker", None)
+            st.session_state.pop("stock_screen_results_table", None)
             conn = sqlite3.connect(DB_FILE)
             try: df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
             except Exception: df_db = pd.DataFrame()
@@ -4745,19 +4848,30 @@ else:
                 cols.append('⚡ 即時籌碼動能')
             
                 df_final_view = df_res[cols]
-                st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
-                st.dataframe(df_final_view, use_container_width=True)
+                st.session_state["stock_screen_result"] = {
+                    "view": df_final_view.copy(),
+                    "title": title,
+                }
+                render_stock_screen_results(df_final_view, title)
 
+        scan_triggered_this_run = False
         col_btn1, col_btn2, col_btn3 = st.columns(3)
         with col_btn1:
             if st.button("🇹🇼 一鍵執行：全自動過濾全台股核心池", type="secondary", use_container_width=True):
+                scan_triggered_this_run = True
                 load_data_from_sqlite_and_render(AUTO_TW_UNIVERSE, "🇹🇼 台灣股市核心策略篩選結果")
         with col_btn2:
             if st.button("🇺🇸 一鍵執行：全自動過濾全美股核心池", type="secondary", use_container_width=True):
+                scan_triggered_this_run = True
                 load_data_from_sqlite_and_render(AUTO_US_UNIVERSE, "🇺🇸 美國股市核心策略篩選結果")
         with col_btn3:
             if st.button("🚀 執行：自訂名單多因子本地精準過濾", type="primary", use_container_width=True):
+                scan_triggered_this_run = True
                 load_data_from_sqlite_and_render(custom_scan_list, "🎯 操盤手自訂名單策略篩選結果", is_custom_mode=True)
+        if not scan_triggered_this_run:
+            saved_screen_result = st.session_state.get("stock_screen_result")
+            if isinstance(saved_screen_result, dict) and isinstance(saved_screen_result.get("view"), pd.DataFrame):
+                render_stock_screen_results(saved_screen_result["view"], saved_screen_result.get("title", "選股策略篩選結果"))
 
     with tab8:
         st.markdown("---")
