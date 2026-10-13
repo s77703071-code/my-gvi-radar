@@ -908,3 +908,5 @@ else:
                 st.caption("依目標配置進行再平衡管理與回撤風險監控。")
                 positions = pd.DataFrame(columns=['代碼', '資產類型', '市值'])
                 st.dataframe(positions, use_container_width=True)
+        except Exception as e:
+            st.error(f"面板載入發生錯誤：{e}")
