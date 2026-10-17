@@ -3398,8 +3398,13 @@ else:
                 except sqlite3.IntegrityError:
                     st.error("這個帳號名稱已有人使用。")
 
-    st.markdown("## 🔒 請登入以使用操盤終端")
-    st.caption("新帳號的投資組合資料會與其他帳號分開保存。")
+    st.markdown("""
+        <div style="width:100%; min-height:65vh; display:flex; flex-direction:column;
+                    justify-content:center; align-items:center; text-align:center;">
+            <h2 style="margin:0 0 0.8rem 0;">🔒 請登入以使用操盤終端</h2>
+            <p style="margin:0; color:#94A3B8;">新帳號的投資組合資料會與其他帳號分開保存。</p>
+        </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
 if st.session_state.pop("account_notice", None):
