@@ -1941,6 +1941,18 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
     encoded_key = json.dumps(str(chart_key))
     encoded_revision = json.dumps(int(clear_revision))
     components.html(f"""
+    <style>
+      body {{ margin: 0; font-family: sans-serif; color: #CBD5E1; background: transparent; }}
+      #shape-delete-panel {{ display: flex; align-items: center; gap: 8px; overflow-x: auto;
+        padding: 8px 2px; white-space: nowrap; -webkit-overflow-scrolling: touch; }}
+      #shape-delete-panel button {{ min-height: 42px; padding: 8px 12px; border-radius: 8px;
+        border: 1px solid #475569; background: #172033; color: #F8FAFC; font-size: 14px;
+        cursor: pointer; touch-action: manipulation; }}
+      #shape-delete-panel button:disabled {{ opacity: .55; cursor: default; }}
+      #shape-delete-status {{ padding: 3px 2px; font-size: 13px; color: #94A3B8; }}
+    </style>
+    <div id="shape-delete-status">標線刪除工具載入中…</div>
+    <div id="shape-delete-panel"></div>
     <script>
     (() => {{
       try {{
@@ -1951,6 +1963,8 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
         hostWindow.__plotlyShapeDeleteKeys = hostWindow.__plotlyShapeDeleteKeys || {{}};
         const state = hostWindow.__plotlyShapeDeleteKeys[chartKey] || {{ overChart: false, graph: null }};
         hostWindow.__plotlyShapeDeleteKeys[chartKey] = state;
+        const panel = document.getElementById('shape-delete-panel');
+        const status = document.getElementById('shape-delete-status');
         const storageKey = 'codex-plotly-shapes:' + chartKey;
         const revisionKey = storageKey + ':revision';
         let storage = null;
@@ -1973,10 +1987,38 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
           if (!storage) return;
           try {{ storage.setItem(storageKey, JSON.stringify(graph.layout.shapes || [])); }} catch (_error) {{}}
         }};
+        const renderShapeControls = () => {{
+          if (!panel || !status) return;
+          panel.replaceChildren();
+          const shapes = state.graph && state.graph.layout ? (state.graph.layout.shapes || []) : [];
+          status.textContent = shapes.length
+            ? `目前有 ${{shapes.length}} 條標線；可直接按下方按鈕刪除，不必點選圖上細線。`
+            : '目前沒有標線。';
+          if (!(hostWindow.Plotly && hostWindow.Plotly.relayout)) {{
+            if (shapes.length) status.textContent += ' 若按鈕無法使用，請用圖表工具列橡皮擦。';
+            return;
+          }}
+          shapes.forEach((shape, index) => {{
+            const button = document.createElement('button');
+            const kind = shape.type || 'shape';
+            button.textContent = `刪除第 ${{index + 1}} 條（${{kind}}）`;
+            button.setAttribute('aria-label', `刪除第 ${{index + 1}} 條標線`);
+            button.addEventListener('click', () => {{
+              const nextShapes = (state.graph.layout.shapes || []).slice();
+              nextShapes.splice(index, 1);
+              hostWindow.Plotly.relayout(state.graph, {{ shapes: nextShapes }}).then(() => {{
+                persistShapes(state.graph);
+                renderShapeControls();
+              }});
+            }});
+            panel.appendChild(button);
+          }});
+        }};
+        state.renderShapeControls = renderShapeControls;
         const attachGraph = () => {{
           const graph = findGraph();
           if (!graph) {{ state.graph = null; return false; }}
-          if (state.graph === graph) return true;
+          if (state.graph === graph) {{ renderShapeControls(); return true; }}
           state.graph = graph;
           if (storage) {{
             try {{
@@ -1987,7 +2029,11 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
               }}
             }} catch (_error) {{}}
           }}
-          if (graph.on) graph.on('plotly_relayout', () => hostWindow.requestAnimationFrame(() => persistShapes(graph)));
+          if (graph.on) graph.on('plotly_relayout', () => hostWindow.requestAnimationFrame(() => {{
+            persistShapes(graph);
+            if (state.renderShapeControls) state.renderShapeControls();
+          }}));
+          if (state.renderShapeControls) state.renderShapeControls();
           return true;
         }};
         if (!state.listenersAttached) {{
@@ -2020,7 +2066,7 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
       }} catch (_error) {{ /* Built-in Plotly eraser remains available if browser isolation blocks this shortcut. */ }}
     }})();
     </script>
-    """, height=0, scrolling=False)
+    """, height=90, scrolling=False)
 
 def get_gmail_secret_values(secret_store):
     """Read Gmail sender credentials without exposing them in the interface."""
@@ -4268,6 +4314,7 @@ if auth_user:
                         'displayModeBar': True, # 強制固定顯示右上角 ModeBar 工具列
                         'displaylogo': False,
                         'editable': True,       # 開放圖上文字與形狀可點擊編輯
+                        'edits': {'shapePosition': True},
                         'scrollZoom': True,
                         'responsive': True
                     }
