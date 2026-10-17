@@ -1033,11 +1033,211 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 📱 行動端手機螢幕顯示優化 CSS
+# 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
     <style>
-        .block-container { width: 100%; max-width: 100%; padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
-        .js-plotly-plot .plotly .main-svg { border-radius: 8px; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
+
+        :root {
+            --font-main: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft JhengHei", sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-display: 'Plus Jakarta Sans', sans-serif;
+        }
+
+        html, body, [class*="css"] {
+            font-family: var(--font-main);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* 全域動態深色漸層背景 */
+        .stApp {
+            background: radial-gradient(circle at 10% 10%, rgba(30, 41, 69, 0.45) 0%, transparent 40%),
+                        radial-gradient(circle at 90% 90%, rgba(17, 24, 39, 0.6) 0%, transparent 45%),
+                        linear-gradient(180deg, #0A0E17 0%, #060910 100%) !important;
+            background-attachment: fixed !important;
+        }
+
+        /* 專業極窄漸層滾動條 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(10, 14, 23, 0.8); }
+        ::-webkit-scrollbar-thumb { background: rgba(59, 130, 246, 0.35); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(59, 130, 246, 0.7); }
+
+        .block-container {
+            width: 100%;
+            max-width: 100%;
+            padding: 1.2rem 1.6rem 3rem !important;
+        }
+
+        /* 專業金融指標卡片 (stMetric) 玻璃擬態與 3D 浮動效果 */
+        [data-testid="stMetric"] {
+            background: linear-gradient(135deg, rgba(20, 28, 48, 0.7) 0%, rgba(13, 19, 33, 0.9) 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 12px !important;
+            padding: 0.95rem 1.15rem !important;
+            backdrop-filter: blur(12px) !important;
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4) !important;
+            transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+        [data-testid="stMetric"]:hover {
+            border-color: rgba(59, 130, 246, 0.5) !important;
+            transform: translateY(-2px) !important;
+            box-shadow: 0 10px 25px -3px rgba(59, 130, 246, 0.2), 0 4px 12px rgba(0, 0, 0, 0.45) !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.82rem !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.03em !important;
+            color: #94A3B8 !important;
+            text-transform: uppercase !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-family: var(--font-mono) !important;
+            font-size: 1.55rem !important;
+            font-weight: 700 !important;
+            color: #FFFFFF !important;
+            letter-spacing: -0.02em !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-family: var(--font-mono) !important;
+            font-size: 0.85rem !important;
+            font-weight: 600 !important;
+        }
+
+        /* 🎛️ 十大策略導航主控台 - 實體立體按鈕 (Tactile 3D Buttons) 質感設計 */
+        div[data-testid="stTabs"] {
+            background: transparent !important;
+            margin-top: 1.2rem !important;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            display: flex !important;
+            flex-wrap: wrap !important;
+            gap: 0.65rem !important;
+            background: linear-gradient(135deg, rgba(17, 24, 39, 0.95) 0%, rgba(10, 15, 26, 0.98) 100%) !important;
+            padding: 0.9rem !important;
+            border-radius: 16px !important;
+            border: 1.5px solid rgba(59, 130, 246, 0.3) !important;
+            backdrop-filter: blur(14px) !important;
+            box-shadow: 0 12px 35px -5px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
+            justify-content: flex-start !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+            flex: 1 1 calc(20% - 0.65rem) !important;
+            min-width: 175px !important;
+            min-height: 54px !important;
+            border-radius: 11px !important;
+            padding: 0.65rem 0.9rem !important;
+            font-weight: 600 !important;
+            font-size: 0.92rem !important;
+            letter-spacing: 0.01em !important;
+            color: #CBD5E1 !important;
+            border: 1px solid rgba(255, 255, 255, 0.12) !important;
+            background: linear-gradient(180deg, #1E293B 0%, #0F172A 100%) !important;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.45), 0 2px 4px -1px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+            transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            text-align: center !important;
+            cursor: pointer !important;
+            white-space: nowrap !important;
+            position: relative !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:hover {
+            color: #FFFFFF !important;
+            background: linear-gradient(180deg, #334155 0%, #1E293B 100%) !important;
+            border-color: rgba(96, 165, 250, 0.85) !important;
+            transform: translateY(-2.5px) !important;
+            box-shadow: 0 8px 20px rgba(59, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"]:active {
+            transform: translateY(1.5px) scale(0.98) !important;
+            box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.6) !important;
+        }
+        div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+            background: linear-gradient(135deg, #2563EB 0%, #4F46E5 50%, #7C3AED 100%) !important;
+            border: 1.5px solid #93C5FD !important;
+            color: #FFFFFF !important;
+            font-weight: 700 !important;
+            transform: translateY(-1.5px) !important;
+            box-shadow: 0 0 24px rgba(59, 130, 246, 0.7), 0 4px 14px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        div[data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none !important;
+        }
+
+        /* 側邊欄深色層次與邊界線條 */
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #090D15 0%, #05080E 100%) !important;
+            border-right: 1px solid rgba(255, 255, 255, 0.07) !important;
+        }
+        section[data-testid="stSidebar"] .block-container {
+            padding: 1.2rem 1rem 3rem !important;
+        }
+
+        /* 現代電光按鈕設計 (stButton, stDownloadButton) */
+        div[data-testid="stButton"] button,
+        div[data-testid="stDownloadButton"] button,
+        div[data-testid="stFormSubmitButton"] button {
+            background: linear-gradient(135deg, #2563EB 0%, #4F46E5 100%) !important;
+            color: #FFFFFF !important;
+            font-weight: 600 !important;
+            border: 1px solid rgba(255, 255, 255, 0.15) !important;
+            border-radius: 9px !important;
+            padding: 0.55rem 1.15rem !important;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35) !important;
+            transition: all 0.22s ease !important;
+        }
+        div[data-testid="stButton"] button:hover,
+        div[data-testid="stDownloadButton"] button:hover,
+        div[data-testid="stFormSubmitButton"] button:hover {
+            transform: translateY(-1.5px) !important;
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5) !important;
+            filter: brightness(1.12) !important;
+        }
+        div[data-testid="stButton"] button:active,
+        div[data-testid="stDownloadButton"] button:active,
+        div[data-testid="stFormSubmitButton"] button:active {
+            transform: translateY(0) !important;
+            filter: brightness(0.95) !important;
+        }
+
+        /* 表單控制項、輸入框與下拉選單 */
+        input, textarea, div[data-baseweb="select"] > div {
+            background-color: rgba(15, 23, 42, 0.75) !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            border-radius: 8px !important;
+            color: #F8FAFC !important;
+            transition: all 0.2s ease !important;
+        }
+        input:focus, textarea:focus, div[data-baseweb="select"] > div:focus-within {
+            border-color: #3B82F6 !important;
+            box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.3) !important;
+        }
+
+        /* 折疊展開面板 (stExpander) */
+        div[data-testid="stExpander"] {
+            background: rgba(17, 24, 39, 0.5) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 10px !important;
+            backdrop-filter: blur(8px) !important;
+            margin-bottom: 0.6rem !important;
+        }
+
+        /* Plotly 原生圖表圓角美化 */
+        .js-plotly-plot .plotly .main-svg {
+            border-radius: 10px !important;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        /* 即時訊號呼吸燈微動畫 */
+        @keyframes radar-pulse {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.15); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+
         @media (max-width: 768px) {
             .block-container {
                 padding: 0.75rem 0.65rem 4rem !important;
@@ -1048,15 +1248,12 @@ st.markdown("""
             .stMetric { padding: 0.45rem !important; }
             [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
 
-            /* Keep metric/input panels readable, while giving chart panels the full phone width. */
             div[data-testid="stHorizontalBlock"] {
                 flex-wrap: wrap !important;
                 gap: 0.55rem !important;
             }
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
                 min-width: 0 !important;
-            }
-            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
                 flex: 1 1 calc(50% - 0.55rem) !important;
                 width: calc(50% - 0.55rem) !important;
                 min-width: calc(50% - 0.55rem) !important;
@@ -1072,30 +1269,22 @@ st.markdown("""
                 min-width: 100% !important;
             }
 
-            /* The nine main tabs remain in one row and can be swiped horizontally. */
             div[data-testid="stTabs"] [data-baseweb="tab-list"] {
                 display: flex !important;
-                flex-wrap: nowrap !important;
-                gap: 0.2rem !important;
-                overflow-x: auto !important;
-                overflow-y: hidden !important;
-                white-space: nowrap !important;
-                -webkit-overflow-scrolling: touch;
-                scroll-snap-type: x proximity;
-                scrollbar-width: thin;
-                touch-action: pan-x;
+                flex-wrap: wrap !important;
+                gap: 0.45rem !important;
+                padding: 0.6rem !important;
             }
             div[data-testid="stTabs"] button[role="tab"] {
-                flex: 0 0 auto !important;
-                min-height: 44px !important;
-                padding: 0.5rem 0.7rem !important;
-                font-size: 0.86rem !important;
-                white-space: nowrap !important;
-                scroll-snap-align: start;
-                touch-action: manipulation;
+                flex: 1 1 calc(50% - 0.45rem) !important;
+                min-width: 140px !important;
+                min-height: 48px !important;
+                padding: 0.45rem 0.6rem !important;
+                font-size: 0.84rem !important;
+                white-space: normal !important;
+                line-height: 1.2 !important;
             }
 
-            /* Larger controls are easier to tap, and 16px inputs avoid mobile browser zoom. */
             div[data-testid="stButton"] button,
             div[data-testid="stDownloadButton"] button,
             div[data-testid="stFormSubmitButton"] button {
@@ -1140,7 +1329,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
 CACHE_TTL = 86400  # 快取有效期限：24 小時 (86400 秒)
 
@@ -2932,8 +3124,31 @@ st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
 input_password = st.sidebar.text_input("請輸入管理員操盤密碼：", type="password")
 
 if input_password != "7770":
-    st.title("🔒 華爾街機構級三核心策略雷達終端")
-    st.warning("⚠️ 請於左側邊欄輸入正確的管理員操盤密碼以解鎖核心雷達。")
+    st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(24, 32, 54, 0.85) 0%, rgba(13, 19, 33, 0.95) 100%);
+                    border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 16px; padding: 2.8rem 2.2rem;
+                    max-width: 820px; margin: 3rem auto; box-shadow: 0 20px 50px rgba(0,0,0,0.6); text-align: center;">
+            <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(59, 130, 246, 0.15);
+                        border: 1px solid rgba(59, 130, 246, 0.35); padding: 6px 14px; border-radius: 20px;
+                        font-size: 0.8rem; font-weight: 600; color: #60A5FA; letter-spacing: 0.05em; margin-bottom: 1.2rem;">
+                <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#3B82F6; box-shadow:0 0 8px #3B82F6;"></span>
+                INSTITUTIONAL QUANT SYSTEM · SECURE GATEWAY
+            </div>
+            <h1 style="font-size: 2.2rem; font-weight: 800; margin: 0 0 0.8rem 0;
+                       background: linear-gradient(90deg, #FFFFFF 0%, #93C5FD 50%, #C4B5FD 100%);
+                       -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                華爾街機構級三核心策略雷達終端
+            </h1>
+            <p style="color: #94A3B8; font-size: 1rem; line-height: 1.6; max-width: 620px; margin: 0 auto 1.8rem auto;">
+                整合 GVI 價值評估、ROE 穩健護城河與三大法人籌碼雷達，配備專業級多週期畫線圖表與 AI 雙核心診斷模型。
+            </p>
+            <div style="background: rgba(15, 23, 42, 0.6); border: 1px dashed rgba(59, 130, 246, 0.35);
+                        border-radius: 10px; padding: 1.2rem; max-width: 480px; margin: 0 auto; color: #CBD5E1; font-size: 0.95rem;">
+                🔒 <strong style="color: #60A5FA;">操盤終端處於安全鎖定狀態</strong><br>
+                <span style="color: #94A3B8; font-size: 0.85rem;">請於左側邊欄輸入「管理員操盤密碼」解鎖量化分析矩陣</span>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
     st.stop()
 else:
     st.sidebar.markdown("---")
@@ -2942,7 +3157,30 @@ else:
     selected_stock = st.sidebar.text_input(
         "輸入台美股代碼：", value="3293.TWO", key="selected_stock_input"
     ).strip().upper()
-    st.title("📈 機構級三核心策略雷達 3.12（網格複利對比與專業畫線全能版）")
+    st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(20, 29, 49, 0.75) 0%, rgba(11, 16, 29, 0.9) 100%);
+                    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 1.2rem 1.6rem;
+                    margin-bottom: 1.2rem; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+                    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 0.4rem;">
+                    <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:#10B981; box-shadow:0 0 10px #10B981; animation: radar-pulse 2s infinite;"></span>
+                    <span style="font-size: 0.75rem; font-weight: 700; color: #10B981; letter-spacing: 0.08em; text-transform: uppercase;">LIVE MARKET TERMINAL</span>
+                    <span style="background: rgba(59, 130, 246, 0.2); color: #93C5FD; font-size: 0.72rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.3);">v3.12 PRO</span>
+                </div>
+                <h1 style="font-size: 1.7rem; font-weight: 800; margin: 0;
+                           background: linear-gradient(90deg, #FFFFFF 0%, #93C5FD 40%, #A78BFA 100%);
+                           -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                    機構級三核心策略雷達 · 全能量化看盤終端
+                </h1>
+            </div>
+            <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">🧠 AI 雙核心診斷</span>
+                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">⚖️ 網格複利與回測</span>
+                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">🏦 三大法人獨立雷達</span>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("### 🌐 全球大盤即時看板")
     col1, col2, col3, col4 = st.columns(4)
@@ -3353,140 +3591,164 @@ else:
                 
                 st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
 
-                ai_provider = st.radio(
-                    "AI 分析來源",
-                    ["Gemini", "ChatGPT（含網路搜尋）"],
-                    horizontal=True,
-                    index=1 if openai_api_key_input else 0,
-                    key=f"ai_provider_{selected_stock}",
-                    help="Gemini 使用本系統行情與可取得的新聞；ChatGPT 會額外搜尋近期市場、產業題材與同業資料並附來源。",
-                )
-                if st.button(f"🧠 啟動 AI 投資分析報告【{c_name}】", use_container_width=True, type="primary"):
-                    provider_name = "ChatGPT" if ai_provider.startswith("ChatGPT") else "Gemini"
-                    provider_key = openai_api_key_input if provider_name == "ChatGPT" else api_key_input
-                    if not provider_key:
-                        label = "ChatGPT API Key" if provider_name == "ChatGPT" else "Gemini API Key"
-                        st.error(f"⚠️ 請先在左側邊欄設定 {label}，或改選另一個分析來源。")
-                    else:
-                        with st.spinner(f"🤖 正在取得歷史日線、執行樣本外回測並整理 {c_name} 研究報告…"):
-                            try:
-                                daily_history = yf.download(
-                                    selected_stock, period="5y", interval="1d", auto_adjust=False,
-                                    actions=False, progress=False, threads=False,
-                                )
-                                ai_backtest = run_ai_candidate_backtests(daily_history, is_tw_stock)
-                                market_snapshot = []
-                                for label, value, index_change_pct in (
-                                    ("台灣加權指數", tw_val, tw_pct),
-                                    ("標普500", sp_val, sp_pct),
-                                    ("道瓊", dj_val, dj_pct),
-                                    ("那斯達克", nas_val, nas_pct),
-                                ):
-                                    if value is not None:
-                                        market_snapshot.append(
-                                            f"{label} {value:,.2f}，當次畫面漲跌 {index_change_pct:+.2f}%" if index_change_pct is not None
-                                            else f"{label} {value:,.2f}"
+                with st.expander(f"🧠 AI 雙核心個股研究報告與 Email 傳送【{c_name}】", expanded=(f"ai_report_{selected_stock}" in st.session_state)):
+                    ai_provider = st.radio(
+                        "AI 分析來源",
+                        ["Gemini", "ChatGPT（含網路搜尋）"],
+                        horizontal=True,
+                        index=1 if openai_api_key_input else 0,
+                        key=f"ai_provider_{selected_stock}",
+                        help="Gemini 使用本系統行情與可取得的新聞；ChatGPT 會額外搜尋近期市場、產業題材與同業資料並附來源。",
+                    )
+                    if st.button(f"🧠 啟動 AI 投資分析報告【{c_name}】", use_container_width=True, type="primary"):
+                        provider_name = "ChatGPT" if ai_provider.startswith("ChatGPT") else "Gemini"
+                        provider_key = openai_api_key_input if provider_name == "ChatGPT" else api_key_input
+                        if not provider_key:
+                            label = "ChatGPT API Key" if provider_name == "ChatGPT" else "Gemini API Key"
+                            st.error(f"⚠️ 請先在左側邊欄設定 {label}，或改選另一個分析來源。")
+                        else:
+                            with st.spinner(f"🤖 正在取得歷史日線、執行樣本外回測並整理 {c_name} 研究報告…"):
+                                try:
+                                    daily_history = yf.download(
+                                        selected_stock, period="5y", interval="1d", auto_adjust=False,
+                                        actions=False, progress=False, threads=False,
+                                    )
+                                    ai_backtest = run_ai_candidate_backtests(daily_history, is_tw_stock)
+                                    market_snapshot = []
+                                    for label, value, index_change_pct in (
+                                        ("台灣加權指數", tw_val, tw_pct),
+                                        ("標普500", sp_val, sp_pct),
+                                        ("道瓊", dj_val, dj_pct),
+                                        ("那斯達克", nas_val, nas_pct),
+                                    ):
+                                        if value is not None:
+                                            market_snapshot.append(
+                                                f"{label} {value:,.2f}，當次畫面漲跌 {index_change_pct:+.2f}%" if index_change_pct is not None
+                                                else f"{label} {value:,.2f}"
+                                            )
+                                    company_context = collect_stock_research_context(
+                                        stock_obj_main, info_obj_main, market_snapshot
+                                    )
+                                    quant_summary = (
+                                        f"GVI={gvi_str}；ROE={roe_str}；PB={pb_str}；"
+                                        f"三核心推薦={best_strategy}（匹配度 {best_score}/100）；"
+                                        f"短中期籌碼動能={chip_status_text}；"
+                                        f"目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%"
+                                    )
+                                    ai_prompt = build_ai_investment_prompt(
+                                        selected_stock, c_name, provider_name, quant_summary,
+                                        company_context, ai_backtest["text"],
+                                    )
+                                    if provider_name == "ChatGPT":
+                                        success_report, ai_sources = generate_openai_research(
+                                            ai_prompt, openai_api_key_input, openai_model_input
                                         )
-                                company_context = collect_stock_research_context(
-                                    stock_obj_main, info_obj_main, market_snapshot
-                                )
-                                quant_summary = (
-                                    f"GVI={gvi_str}；ROE={roe_str}；PB={pb_str}；"
-                                    f"三核心推薦={best_strategy}（匹配度 {best_score}/100）；"
-                                    f"短中期籌碼動能={chip_status_text}；"
-                                    f"目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%"
-                                )
-                                ai_prompt = build_ai_investment_prompt(
-                                    selected_stock, c_name, provider_name, quant_summary,
-                                    company_context, ai_backtest["text"],
-                                )
-                                if provider_name == "ChatGPT":
-                                    success_report, ai_sources = generate_openai_research(
-                                        ai_prompt, openai_api_key_input, openai_model_input
+                                    else:
+                                        success_report = generate_content_with_retry(ai_prompt, api_key_input)
+                                        ai_sources = []
+                                    report_key = f"ai_report_{selected_stock}"
+                                    st.session_state[report_key] = success_report
+                                    st.session_state[f"{report_key}_provider"] = provider_name
+                                    st.session_state[f"{report_key}_backtest"] = ai_backtest
+                                    st.session_state[f"{report_key}_sources"] = ai_sources
+                                except Exception as ai_e:
+                                    st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
+                    
+                    if f"ai_report_{selected_stock}" in st.session_state:
+                        report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
+                        st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
+                        ai_report = st.session_state[f"ai_report_{selected_stock}"]
+                        st.markdown(ai_report)
+                        saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
+                        saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
+                        if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
+                            with st.expander("查看系統自動回測比較", expanded=False):
+                                display_backtest = saved_backtest_table.copy()
+                                for metric_column in (
+                                    "前70%平均每筆損益(%)", "後30%平均每筆損益(%)",
+                                    "後30%最大回撤(%)",
+                                ):
+                                    if metric_column in display_backtest:
+                                        display_backtest[metric_column] = pd.to_numeric(
+                                            display_backtest[metric_column], errors="coerce"
+                                        ).round(2)
+                                if "後30%賺賠金額比" in display_backtest:
+                                    display_backtest["後30%賺賠金額比"] = pd.to_numeric(
+                                        display_backtest["後30%賺賠金額比"], errors="coerce"
+                                    ).round(2)
+                                st.dataframe(display_backtest, use_container_width=True, hide_index=True)
+                                st.caption(saved_backtest.get("assumptions", ""))
+                        elif isinstance(saved_backtest, dict) and saved_backtest.get("text"):
+                            st.info(saved_backtest["text"])
+                        recipient_email = st.text_input(
+                            "寄送分析報告到 Email",
+                            key=f"ai_report_email_recipient_{selected_stock}",
+                            placeholder="請輸入收件信箱",
+                        )
+                        if st.button(
+                            "✉️ 寄出這份分析",
+                            key=f"send_ai_report_email_{selected_stock}",
+                            use_container_width=True,
+                        ):
+                            if not recipient_email.strip() or "@" not in recipient_email:
+                                st.error("請輸入有效的收件 Email 地址。")
+                            else:
+                                try:
+                                    gmail_sender, gmail_app_password = get_gmail_secret_values(st.secrets)
+                                except Exception:
+                                    gmail_sender, gmail_app_password = "", ""
+                                if not gmail_sender or not gmail_app_password:
+                                    st.error(
+                                        "尚未設定 Gmail 寄件資料。請在 Streamlit Cloud 的 App Settings → Secrets "
+                                        "加入 [gmail] 區段（sender_email、app_password），儲存後重新啟動。"
                                     )
                                 else:
-                                    success_report = generate_content_with_retry(ai_prompt, api_key_input)
-                                    ai_sources = []
-                                report_key = f"ai_report_{selected_stock}"
-                                st.session_state[report_key] = success_report
-                                st.session_state[f"{report_key}_provider"] = provider_name
-                                st.session_state[f"{report_key}_backtest"] = ai_backtest
-                                st.session_state[f"{report_key}_sources"] = ai_sources
-                            except Exception as ai_e:
-                                st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
-                
-                if f"ai_report_{selected_stock}" in st.session_state:
-                    report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
-                    st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
-                    ai_report = st.session_state[f"ai_report_{selected_stock}"]
-                    st.markdown(ai_report)
-                    saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
-                    saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
-                    if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
-                        with st.expander("查看系統自動回測比較", expanded=False):
-                            display_backtest = saved_backtest_table.copy()
-                            for metric_column in (
-                                "前70%平均每筆損益(%)", "後30%平均每筆損益(%)",
-                                "後30%最大回撤(%)",
-                            ):
-                                if metric_column in display_backtest:
-                                    display_backtest[metric_column] = pd.to_numeric(
-                                        display_backtest[metric_column], errors="coerce"
-                                    ).round(2)
-                            if "後30%賺賠金額比" in display_backtest:
-                                display_backtest["後30%賺賠金額比"] = pd.to_numeric(
-                                    display_backtest["後30%賺賠金額比"], errors="coerce"
-                                ).round(2)
-                            st.dataframe(display_backtest, use_container_width=True, hide_index=True)
-                            st.caption(saved_backtest.get("assumptions", ""))
-                    elif isinstance(saved_backtest, dict) and saved_backtest.get("text"):
-                        st.info(saved_backtest["text"])
-                    recipient_email = st.text_input(
-                        "寄送分析報告到 Email",
-                        key=f"ai_report_email_recipient_{selected_stock}",
-                        placeholder="請輸入收件信箱",
-                    )
-                    if st.button(
-                        "✉️ 寄出這份分析",
-                        key=f"send_ai_report_email_{selected_stock}",
-                        use_container_width=True,
-                    ):
-                        if not recipient_email.strip() or "@" not in recipient_email:
-                            st.error("請輸入有效的收件 Email 地址。")
-                        else:
-                            try:
-                                gmail_sender, gmail_app_password = get_gmail_secret_values(st.secrets)
-                            except Exception:
-                                gmail_sender, gmail_app_password = "", ""
-                            if not gmail_sender or not gmail_app_password:
-                                st.error(
-                                    "尚未設定 Gmail 寄件資料。請在 Streamlit Cloud 的 App Settings → Secrets "
-                                    "加入 [gmail] 區段（sender_email、app_password），儲存後重新啟動。"
-                                )
-                            else:
-                                email_subject = f"AI 個股分析｜{selected_stock} {c_name}"
-                                email_body = (
-                                    f"個股：{selected_stock} {c_name}\n"
-                                    f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                                    f"{report_provider} 分析結果：\n\n{ai_report}"
-                                )
-                                try:
-                                    with st.spinner("正在寄送分析報告…"):
-                                        send_gmail_report(
-                                            recipient_email,
-                                            email_subject,
-                                            email_body,
-                                            gmail_sender,
-                                            gmail_app_password,
-                                        )
-                                    st.success(f"分析報告已寄送至 {recipient_email.strip()}。")
-                                except Exception as mail_error:
-                                    st.error(f"寄信失敗：{mail_error}")
-                    st.markdown("---")
+                                    email_subject = f"AI 個股分析｜{selected_stock} {c_name}"
+                                    email_body = (
+                                        f"個股：{selected_stock} {c_name}\n"
+                                        f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                                        f"{report_provider} 分析結果：\n\n{ai_report}"
+                                    )
+                                    try:
+                                        with st.spinner("正在寄送分析報告…"):
+                                            send_gmail_report(
+                                                recipient_email,
+                                                email_subject,
+                                                email_body,
+                                                gmail_sender,
+                                                gmail_app_password,
+                                            )
+                                        st.success(f"分析報告已寄送至 {recipient_email.strip()}。")
+                                    except Exception as mail_error:
+                                        st.error(f"寄信失敗：{mail_error}")
+                st.markdown("---")
         except Exception as e:
             st.error(f"數據載入異常：{e}")
 
     try:
+        st.markdown("""
+            <div style="margin: 2rem 0 0.9rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
+                        border-left: 5px solid #3B82F6; border-radius: 0 14px 14px 0; padding: 0.85rem 1.4rem;
+                        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem;
+                        box-shadow: 0 6px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <span style="font-size: 1.5rem; filter: drop-shadow(0 0 8px #3B82F6);">🎛️</span>
+                    <div>
+                        <div style="font-size: 1.25rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px;">
+                            十大量化策略核心導航主控台
+                            <span style="background: linear-gradient(135deg, #2563EB, #7C3AED); color: #FFFFFF; font-size: 0.72rem; padding: 2px 10px; border-radius: 12px; font-weight: 700;">PRO MATRIX</span>
+                        </div>
+                        <div style="font-size: 0.82rem; color: #94A3B8; margin-top: 2px;">
+                            上排：技術量化與回測模擬 ｜ 下排：價值複利、法人雷達與資產配置
+                        </div>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 5px 14px; border-radius: 20px; font-size: 0.82rem; font-weight: 600; color: #93C5FD;">
+                    <span>👆</span> 點擊下方按鈕立即切換策略檢視
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
             "📊 彩色 K 線圖與成交量",
             "📦 籌碼流向參考",
@@ -4621,6 +4883,28 @@ else:
 
     # If stock-chart loading failed before the chart area, keep the strategy tabs available.
     if not tabs_created:
+        st.markdown("""
+            <div style="margin: 2rem 0 0.9rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
+                        border-left: 5px solid #3B82F6; border-radius: 0 14px 14px 0; padding: 0.85rem 1.4rem;
+                        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem;
+                        box-shadow: 0 6px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <span style="font-size: 1.5rem; filter: drop-shadow(0 0 8px #3B82F6);">🎛️</span>
+                    <div>
+                        <div style="font-size: 1.25rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px;">
+                            十大量化策略核心導航主控台
+                            <span style="background: linear-gradient(135deg, #2563EB, #7C3AED); color: #FFFFFF; font-size: 0.72rem; padding: 2px 10px; border-radius: 12px; font-weight: 700;">PRO MATRIX</span>
+                        </div>
+                        <div style="font-size: 0.82rem; color: #94A3B8; margin-top: 2px;">
+                            上排：技術量化與回測模擬 ｜ 下排：價值複利、法人雷達與資產配置
+                        </div>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 5px 14px; border-radius: 20px; font-size: 0.82rem; font-weight: 600; color: #93C5FD;">
+                    <span>👆</span> 點擊下方按鈕立即切換策略檢視
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
             "📊 彩色 K 線圖與成交量",
             "📦 籌碼流向參考",
