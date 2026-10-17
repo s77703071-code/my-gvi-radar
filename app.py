@@ -3357,12 +3357,12 @@ else:
         if reset_name:
             with st.form("password_reset_complete_form"):
                 reset_code = st.text_input("六位數驗證碼", max_chars=6, key="password_reset_code")
-                reset_new_password = st.text_input("新密碼（至少 10 位）", type="password", key="password_reset_new_password")
+                reset_new_password = st.text_input("新密碼（至少 8 位）", type="password", key="password_reset_new_password")
                 reset_confirm = st.text_input("再次輸入新密碼", type="password", key="password_reset_confirm")
                 complete_reset = st.form_submit_button("重設密碼", use_container_width=True)
             if complete_reset:
-                if len(reset_new_password) < 10:
-                    st.sidebar.error("新密碼至少需要 10 位。")
+                if len(reset_new_password) < 8:
+                    st.sidebar.error("新密碼至少需要 8 位。")
                 elif reset_new_password != reset_confirm:
                     st.sidebar.error("兩次輸入的新密碼不一致。")
                 elif _reset_account_password(reset_name, reset_code, reset_new_password):
@@ -3376,7 +3376,7 @@ else:
         with st.form("account_register_form"):
             register_name = st.text_input("建立帳號（3–32 位英數或底線）", key="register_username").strip()
             register_email = st.text_input("備援 Email（用於忘記密碼）", key="register_email").strip().lower()
-            register_password = st.text_input("建立密碼（至少 10 位）", type="password", key="register_password")
+            register_password = st.text_input("建立密碼（至少 8 位）", type="password", key="register_password")
             register_confirm = st.text_input("再次輸入密碼", type="password", key="register_password_confirm")
             register_submit = st.form_submit_button("註冊帳號", use_container_width=True)
         if register_submit:
@@ -3384,8 +3384,8 @@ else:
                 st.error("帳號需為 3–32 位英數字或底線。")
             elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", register_email):
                 st.error("請輸入有效的 Email，作為忘記密碼時的驗證信箱。")
-            elif len(register_password) < 10:
-                st.error("密碼至少需要 10 位。")
+            elif len(register_password) < 8:
+                st.error("密碼至少需要 8 位。")
             elif register_password != register_confirm:
                 st.error("兩次輸入的密碼不一致。")
             else:
