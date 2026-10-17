@@ -1,7 +1,7 @@
 # ==============================================================================
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
-import sys, os, re, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
+import sys, os, re, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
 import streamlit.components.v1 as components
 from email.message import EmailMessage
 try:
@@ -1360,6 +1360,7 @@ def init_db():
     # 投資組合理財：獨立資料表，沿用既有 market_cache.db，不影響原有 market_data。
     c.execute('''CREATE TABLE IF NOT EXISTS portfolio_positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
         symbol TEXT NOT NULL,
         name TEXT NOT NULL DEFAULT '',
         asset_type TEXT NOT NULL,
@@ -1376,6 +1377,7 @@ def init_db():
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS portfolio_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
         snapshot_date TEXT NOT NULL,
         total_value_twd REAL NOT NULL,
         stock_value_twd REAL NOT NULL,
@@ -1383,6 +1385,42 @@ def init_db():
         cash_value_twd REAL NOT NULL,
         note TEXT DEFAULT ''
     )''')
+    # Account credentials use salted PBKDF2 hashes. Portfolio rows are scoped
+    # by user_id; legacy rows remain unassigned until the first account registers.
+    c.execute('''CREATE TABLE IF NOT EXISTS app_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        email TEXT,
+        password_salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS portfolio_user_settings (
+        user_id INTEGER NOT NULL,
+        setting_key TEXT NOT NULL,
+        setting_value REAL NOT NULL,
+        PRIMARY KEY(user_id, setting_key),
+        FOREIGN KEY(user_id) REFERENCES app_users(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS account_email_challenges (
+        user_id INTEGER NOT NULL,
+        purpose TEXT NOT NULL,
+        pending_email TEXT,
+        code_salt TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        sent_at REAL NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id, purpose),
+        FOREIGN KEY(user_id) REFERENCES app_users(id)
+    )''')
+    user_cols = [row[1] for row in c.execute("PRAGMA table_info(app_users)").fetchall()]
+    if "email" not in user_cols:
+        c.execute("ALTER TABLE app_users ADD COLUMN email TEXT")
+    for table in ("portfolio_positions", "portfolio_snapshots"):
+        table_cols = [row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()]
+        if "user_id" not in table_cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER")
     defaults = {
         "target_stock_pct": 40.0,
         "target_bond_pct": 50.0,
@@ -1399,6 +1437,161 @@ def init_db():
     conn.close()
 
 init_db()
+
+def _password_digest(password, salt_hex):
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000
+    ).hex()
+
+
+def _register_account(username, password, email):
+    salt = os.urandom(16).hex()
+    digest = _password_digest(password, salt)
+    defaults = {
+        "target_stock_pct": 40.0, "target_bond_pct": 50.0,
+        "target_cash_pct": 10.0, "rebalance_threshold_pct": 5.0,
+        "drawdown_warning_pct": 8.0, "drawdown_review_pct": 12.0,
+        "drawdown_limit_pct": 15.0, "minimum_cash_twd": 0.0,
+    }
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        account_count = conn.execute("SELECT COUNT(*) FROM app_users").fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO app_users(username,email,password_salt,password_hash,created_at) VALUES(?,?,?,?,?)",
+            (username, email, salt, digest, pd.Timestamp.now().isoformat(timespec="seconds")),
+        )
+        user_id = int(cur.lastrowid)
+        if account_count == 0:
+            # Preserve the existing shared portfolio under the first account.
+            conn.execute("UPDATE portfolio_positions SET user_id=? WHERE user_id IS NULL", (user_id,))
+            conn.execute("UPDATE portfolio_snapshots SET user_id=? WHERE user_id IS NULL", (user_id,))
+            for key, value in conn.execute(
+                "SELECT setting_key,setting_value FROM portfolio_settings"
+            ).fetchall():
+                conn.execute(
+                    "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES(?,?,?)",
+                    (user_id, key, value),
+                )
+        for key, value in defaults.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES(?,?,?)",
+                (user_id, key, value),
+            )
+        conn.commit()
+    return user_id, account_count == 0
+
+
+def _verify_account(username, password):
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT id,username,password_salt,password_hash FROM app_users WHERE username=? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
+    if not row:
+        return None
+    candidate = _password_digest(password, row[2])
+    if hmac.compare_digest(candidate, row[3]):
+        return {"id": int(row[0]), "username": row[1]}
+    return None
+
+
+def _request_account_code(user_id, purpose, email=None):
+    """Send a short-lived one-time code for password reset or email binding."""
+    user_id = int(user_id)
+    now = time.time()
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        row = conn.execute("SELECT email FROM app_users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            return False
+        target_email = str(email or row[0] or "").strip().lower()
+        if not target_email:
+            return False
+        previous = conn.execute(
+            "SELECT sent_at FROM account_email_challenges WHERE user_id=? AND purpose=?",
+            (user_id, purpose),
+        ).fetchone()
+        if previous and now - float(previous[0]) < 60:
+            return False
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    salt = os.urandom(16).hex()
+    digest = _password_digest(code, salt)
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        conn.execute(
+            "INSERT INTO account_email_challenges(user_id,purpose,pending_email,code_salt,code_hash,expires_at,sent_at,attempts) "
+            "VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(user_id,purpose) DO UPDATE SET "
+            "pending_email=excluded.pending_email,code_salt=excluded.code_salt,code_hash=excluded.code_hash,"
+            "expires_at=excluded.expires_at,sent_at=excluded.sent_at,attempts=0",
+            (user_id, purpose, target_email if purpose == "bind_email" else None,
+             salt, digest, now + 600, now),
+        )
+        conn.commit()
+    try:
+        sender, app_password = get_gmail_secret_values(st.secrets)
+        if not sender or not app_password:
+            raise RuntimeError("尚未設定 Gmail 寄件資料。請在 Streamlit Secrets 設定 [gmail] sender_email 與 app_password。")
+        purpose_text = "密碼重設" if purpose == "password_reset" else "信箱驗證"
+        send_gmail_report(
+            target_email, f"操盤終端{purpose_text}驗證碼",
+            f"您的驗證碼是：{code}\n\n驗證碼 10 分鐘內有效，請勿提供給他人。若非本人操作，請忽略此信。",
+            sender, app_password,
+        )
+    except Exception:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (user_id, purpose))
+            conn.commit()
+        raise
+    return True
+
+
+def _check_email_code(user_id, purpose, code):
+    now = time.time()
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        row = conn.execute(
+            "SELECT pending_email,code_salt,code_hash,expires_at,attempts FROM account_email_challenges "
+            "WHERE user_id=? AND purpose=?", (int(user_id), purpose),
+        ).fetchone()
+        if not row:
+            return None
+        pending_email, salt, expected, expires_at, attempts = row
+        if float(expires_at) < now or int(attempts) >= 5:
+            conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (int(user_id), purpose))
+            conn.commit()
+            return None
+        if not hmac.compare_digest(_password_digest(str(code).strip(), salt), expected):
+            conn.execute(
+                "UPDATE account_email_challenges SET attempts=attempts+1 WHERE user_id=? AND purpose=?",
+                (int(user_id), purpose),
+            )
+            conn.commit()
+            return None
+        conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (int(user_id), purpose))
+        conn.commit()
+    return pending_email if purpose == "bind_email" else True
+
+
+def _reset_account_password(username, code, new_password):
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        row = conn.execute("SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
+    if not row or not _check_email_code(row[0], "password_reset", code):
+        return False
+    salt = os.urandom(16).hex()
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        conn.execute(
+            "UPDATE app_users SET password_salt=?,password_hash=? WHERE id=?",
+            (salt, _password_digest(new_password, salt), int(row[0])),
+        )
+        conn.commit()
+    return True
+
+
+def _confirm_recovery_email(user_id, code):
+    email = _check_email_code(user_id, "bind_email", code)
+    if not email:
+        return False
+    with sqlite3.connect(DB_FILE, timeout=30) as conn:
+        conn.execute("UPDATE app_users SET email=? WHERE id=?", (email, int(user_id)))
+        conn.commit()
+    return True
 
 def parse_roe(raw_roe):
     if raw_roe is None or np.isnan(raw_roe) or not np.isfinite(raw_roe):
@@ -3119,38 +3312,127 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
         'bars_per_year': bars_per_year,
     }
 
-# 🔐 管理員操盤密碼固定為 7770
-st.sidebar.markdown("### 🔒 操盤手安全密碼鎖")
-input_password = st.sidebar.text_input("請輸入管理員操盤密碼：", type="password")
+# 🔐 使用者帳號登入與自助註冊
+def _logout_account():
+    for key in list(st.session_state.keys()):
+        if key == "auth_user" or key.startswith(("port_", "portfolio_", "login_", "register_", "recovery_", "password_reset_", "reset_")) or key == "pending_recovery_email":
+            st.session_state.pop(key, None)
 
-if input_password != "7770":
-    st.markdown("""
-        <div style="background: linear-gradient(135deg, rgba(24, 32, 54, 0.85) 0%, rgba(13, 19, 33, 0.95) 100%);
-                    border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 16px; padding: 2.8rem 2.2rem;
-                    max-width: 820px; margin: 3rem auto; box-shadow: 0 20px 50px rgba(0,0,0,0.6); text-align: center;">
-            <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(59, 130, 246, 0.15);
-                        border: 1px solid rgba(59, 130, 246, 0.35); padding: 6px 14px; border-radius: 20px;
-                        font-size: 0.8rem; font-weight: 600; color: #60A5FA; letter-spacing: 0.05em; margin-bottom: 1.2rem;">
-                <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#3B82F6; box-shadow:0 0 8px #3B82F6;"></span>
-                INSTITUTIONAL QUANT SYSTEM · SECURE GATEWAY
-            </div>
-            <h1 style="font-size: 2.2rem; font-weight: 800; margin: 0 0 0.8rem 0;
-                       background: linear-gradient(90deg, #FFFFFF 0%, #93C5FD 50%, #C4B5FD 100%);
-                       -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-                華爾街機構級三核心策略雷達終端
-            </h1>
-            <p style="color: #94A3B8; font-size: 1rem; line-height: 1.6; max-width: 620px; margin: 0 auto 1.8rem auto;">
-                整合 GVI 價值評估、ROE 穩健護城河與三大法人籌碼雷達，配備專業級多週期畫線圖表與 AI 雙核心診斷模型。
-            </p>
-            <div style="background: rgba(15, 23, 42, 0.6); border: 1px dashed rgba(59, 130, 246, 0.35);
-                        border-radius: 10px; padding: 1.2rem; max-width: 480px; margin: 0 auto; color: #CBD5E1; font-size: 0.95rem;">
-                🔒 <strong style="color: #60A5FA;">操盤終端處於安全鎖定狀態</strong><br>
-                <span style="color: #94A3B8; font-size: 0.85rem;">請於左側邊欄輸入「管理員操盤密碼」解鎖量化分析矩陣</span>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-    st.stop()
+
+st.sidebar.markdown("### 🔒 操盤手帳號登入")
+auth_user = st.session_state.get("auth_user")
+if auth_user:
+    st.sidebar.success(f"已登入：{auth_user['username']}")
+    st.sidebar.button("登出", key="account_logout", on_click=_logout_account)
 else:
+    with st.sidebar.form("account_login_form"):
+        login_name = st.text_input("帳號", key="login_username").strip()
+        login_password = st.text_input("密碼", type="password", key="login_password")
+        login_submit = st.form_submit_button("登入", use_container_width=True)
+    if login_submit:
+        account = _verify_account(login_name, login_password)
+        if account:
+            st.session_state["auth_user"] = account
+            st.rerun()
+        st.sidebar.error("帳號或密碼不正確。")
+
+    with st.sidebar.expander("忘記密碼？"):
+        st.caption("驗證碼會寄到帳號的備援 Email；寄件服務需先設定 Gmail Secrets。")
+        with st.form("password_reset_request_form"):
+            reset_name = st.text_input("帳號", key="reset_request_username").strip()
+            request_reset = st.form_submit_button("寄送重設驗證碼", use_container_width=True)
+        if request_reset:
+            st.session_state["password_reset_username"] = reset_name
+            with sqlite3.connect(DB_FILE) as _conn:
+                reset_row = _conn.execute(
+                    "SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (reset_name,)
+                ).fetchone()
+            if reset_row:
+                try:
+                    _request_account_code(reset_row[0], "password_reset")
+                except Exception:
+                    st.sidebar.error("目前無法寄送驗證信，請稍後再試或聯絡系統管理者。")
+            st.sidebar.info("若帳號已設定備援信箱，驗證碼會寄到該信箱；請檢查垃圾郵件匣。")
+        reset_name = st.session_state.get("password_reset_username", "")
+        if reset_name:
+            with st.form("password_reset_complete_form"):
+                reset_code = st.text_input("六位數驗證碼", max_chars=6, key="password_reset_code")
+                reset_new_password = st.text_input("新密碼（至少 10 位）", type="password", key="password_reset_new_password")
+                reset_confirm = st.text_input("再次輸入新密碼", type="password", key="password_reset_confirm")
+                complete_reset = st.form_submit_button("重設密碼", use_container_width=True)
+            if complete_reset:
+                if len(reset_new_password) < 10:
+                    st.sidebar.error("新密碼至少需要 10 位。")
+                elif reset_new_password != reset_confirm:
+                    st.sidebar.error("兩次輸入的新密碼不一致。")
+                elif _reset_account_password(reset_name, reset_code, reset_new_password):
+                    st.session_state.pop("password_reset_username", None)
+                    st.sidebar.success("密碼已重設，請使用新密碼登入。")
+                else:
+                    st.sidebar.error("驗證碼無效、已逾時或錯誤次數過多。")
+
+    with st.sidebar.expander("尚未有帳號？建立新帳號"):
+        st.caption("第一個註冊帳號會接收升級前共用的投資組合資料。")
+        with st.form("account_register_form"):
+            register_name = st.text_input("建立帳號（3–32 位英數或底線）", key="register_username").strip()
+            register_email = st.text_input("備援 Email（用於忘記密碼）", key="register_email").strip().lower()
+            register_password = st.text_input("建立密碼（至少 10 位）", type="password", key="register_password")
+            register_confirm = st.text_input("再次輸入密碼", type="password", key="register_password_confirm")
+            register_submit = st.form_submit_button("註冊帳號", use_container_width=True)
+        if register_submit:
+            if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", register_name):
+                st.error("帳號需為 3–32 位英數字或底線。")
+            elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", register_email):
+                st.error("請輸入有效的 Email，作為忘記密碼時的驗證信箱。")
+            elif len(register_password) < 10:
+                st.error("密碼至少需要 10 位。")
+            elif register_password != register_confirm:
+                st.error("兩次輸入的密碼不一致。")
+            else:
+                try:
+                    user_id, is_first_account = _register_account(register_name, register_password, register_email)
+                    st.session_state["auth_user"] = {"id": user_id, "username": register_name}
+                    if is_first_account:
+                        st.session_state["account_notice"] = "已建立第一個帳號；原有共用投資組合資料已保留並歸入此帳號。"
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("這個帳號名稱已有人使用。")
+
+    st.markdown("## 🔒 請登入以使用操盤終端")
+    st.caption("新帳號的投資組合資料會與其他帳號分開保存。")
+    st.stop()
+
+if st.session_state.pop("account_notice", None):
+    st.sidebar.info("原有共用投資組合資料已保留並歸入第一個建立的帳號。")
+
+if auth_user:
+    with st.sidebar.expander("設定／更新備援 Email"):
+        with st.form("recovery_email_request_form"):
+            recovery_email = st.text_input("備援 Email", key="recovery_email_input").strip().lower()
+            request_email_code = st.form_submit_button("寄送信箱驗證碼", use_container_width=True)
+        if request_email_code:
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", recovery_email):
+                st.error("請輸入有效的 Email 地址。")
+            else:
+                try:
+                    sent = _request_account_code(auth_user["id"], "bind_email", recovery_email)
+                    if sent:
+                        st.session_state["pending_recovery_email"] = recovery_email
+                        st.success("驗證碼已寄出，請查看信箱。")
+                    else:
+                        st.warning("請稍候一分鐘後再重新寄送驗證碼。")
+                except Exception:
+                    st.error("目前無法寄送驗證信，請確認系統管理者已設定郵件服務。")
+        if st.session_state.get("pending_recovery_email"):
+            with st.form("recovery_email_verify_form"):
+                email_code = st.text_input("六位數驗證碼", max_chars=6, key="recovery_email_code")
+                confirm_email = st.form_submit_button("確認備援 Email", use_container_width=True)
+            if confirm_email:
+                if _confirm_recovery_email(auth_user["id"], email_code):
+                    st.session_state.pop("pending_recovery_email", None)
+                    st.success("備援 Email 已驗證並更新。")
+                else:
+                    st.error("驗證碼無效、已逾時或錯誤次數過多。")
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 全球個股即時診斷")
     st.sidebar.caption("💡 提示：上市請加 `.TW`，上櫃請加 `.TWO`（例如：3293.TWO）")
@@ -5249,18 +5531,22 @@ else:
     if selected_module == "🧭 投資組合理財":
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
+        portfolio_user_id = int(auth_user["id"])
 
         def _portfolio_load_settings():
             with sqlite3.connect(DB_FILE) as _conn:
-                _rows = _conn.execute("SELECT setting_key, setting_value FROM portfolio_settings").fetchall()
+                _rows = _conn.execute(
+                    "SELECT setting_key, setting_value FROM portfolio_user_settings WHERE user_id=?",
+                    (portfolio_user_id,),
+                ).fetchall()
             return {str(k): float(v) for k, v in _rows}
 
         def _portfolio_save_setting(key, value):
             with sqlite3.connect(DB_FILE) as _conn:
                 _conn.execute(
-                    "INSERT INTO portfolio_settings(setting_key, setting_value) VALUES (?, ?) "
-                    "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
-                    (str(key), float(value))
+                    "INSERT INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES (?,?,?) "
+                    "ON CONFLICT(user_id,setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+                    (portfolio_user_id, str(key), float(value))
                 )
                 _conn.commit()
 
@@ -5269,8 +5555,9 @@ else:
                 return pd.read_sql_query(
                     "SELECT id, symbol AS 代碼, name AS 名稱, asset_type AS 資產類型, currency AS 幣別, "
                     "quantity AS 數量, price AS 最新價格, fx_to_twd AS 換算台幣匯率, "
-                    "cost_basis_twd AS 台幣成本, updated_at AS 更新時間 FROM portfolio_positions ORDER BY id DESC",
-                    _conn
+                    "cost_basis_twd AS 台幣成本, updated_at AS 更新時間 "
+                    "FROM portfolio_positions WHERE user_id=? ORDER BY id DESC",
+                    _conn, params=(portfolio_user_id,)
                 )
 
         settings = _portfolio_load_settings()
@@ -5330,9 +5617,9 @@ else:
             else:
                 with sqlite3.connect(DB_FILE) as _conn:
                     _conn.execute(
-                        "INSERT INTO portfolio_positions(symbol,name,asset_type,currency,quantity,price,fx_to_twd,cost_basis_twd,updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?)",
-                        (p_symbol, p_name, p_type, p_currency, float(p_quantity), float(p_price),
+                        "INSERT INTO portfolio_positions(user_id,symbol,name,asset_type,currency,quantity,price,fx_to_twd,cost_basis_twd,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (portfolio_user_id, p_symbol, p_name, p_type, p_currency, float(p_quantity), float(p_price),
                          float(p_fx), float(p_cost), pd.Timestamp.now().isoformat(timespec="seconds"))
                     )
                     _conn.commit()
@@ -5414,15 +5701,15 @@ else:
                 else:
                     with sqlite3.connect(DB_FILE) as _conn:
                         _conn.execute(
-                            "UPDATE portfolio_positions SET name=?,asset_type=?,currency=?,quantity=?,price=?,fx_to_twd=?,cost_basis_twd=?,updated_at=? WHERE id=?",
+                            "UPDATE portfolio_positions SET name=?,asset_type=?,currency=?,quantity=?,price=?,fx_to_twd=?,cost_basis_twd=?,updated_at=? WHERE id=? AND user_id=?",
                             (u_name, u_type, u_currency, float(u_quantity), float(u_price), float(u_fx), float(u_cost),
-                             pd.Timestamp.now().isoformat(timespec="seconds"), int(selected_id))
+                             pd.Timestamp.now().isoformat(timespec="seconds"), int(selected_id), portfolio_user_id)
                         )
                         _conn.commit()
                     st.success("持倉更新完成。請重新整理頁面查看最新計算。")
             if delete_position:
                 with sqlite3.connect(DB_FILE) as _conn:
-                    _conn.execute("DELETE FROM portfolio_positions WHERE id=?", (int(selected_id),))
+                    _conn.execute("DELETE FROM portfolio_positions WHERE id=? AND user_id=?", (int(selected_id), portfolio_user_id))
                     _conn.commit()
                 st.success("持倉已刪除。")
 
@@ -5431,13 +5718,13 @@ else:
             if st.button("📌 記錄目前組合市值", key="portfolio_record_snapshot"):
                 with sqlite3.connect(DB_FILE) as _conn:
                     _conn.execute(
-                        "INSERT INTO portfolio_snapshots(snapshot_date,total_value_twd,stock_value_twd,bond_value_twd,cash_value_twd,note) VALUES(?,?,?,?,?,?)",
-                        (pd.Timestamp.now().isoformat(timespec="seconds"), total_value, type_values["stock"], type_values["bond"], type_values["cash"], "手動快照；未調整外部現金流")
+                        "INSERT INTO portfolio_snapshots(user_id,snapshot_date,total_value_twd,stock_value_twd,bond_value_twd,cash_value_twd,note) VALUES(?,?,?,?,?,?,?)",
+                        (portfolio_user_id, pd.Timestamp.now().isoformat(timespec="seconds"), total_value, type_values["stock"], type_values["bond"], type_values["cash"], "手動快照；未調整外部現金流")
                     )
                     _conn.commit()
                 st.success("已記錄目前市值快照。")
             with sqlite3.connect(DB_FILE) as _conn:
-                snapshots = pd.read_sql_query("SELECT snapshot_date AS 記錄時間,total_value_twd AS 組合市值,stock_value_twd AS 股票市值,bond_value_twd AS 債券市值,cash_value_twd AS 現金市值 FROM portfolio_snapshots ORDER BY id", _conn)
+                snapshots = pd.read_sql_query("SELECT snapshot_date AS 記錄時間,total_value_twd AS 組合市值,stock_value_twd AS 股票市值,bond_value_twd AS 債券市值,cash_value_twd AS 現金市值 FROM portfolio_snapshots WHERE user_id=? ORDER BY id", _conn, params=(portfolio_user_id,))
             if not snapshots.empty:
                 peak = float(snapshots["組合市值"].cummax().max())
                 latest_snapshot = float(snapshots["組合市值"].iloc[-1])
@@ -5452,7 +5739,7 @@ else:
                 st.dataframe(snapshots, use_container_width=True, hide_index=True)
                 if st.button("🗑️ 清除所有淨值快照", key="portfolio_clear_snapshots"):
                     with sqlite3.connect(DB_FILE) as _conn:
-                        _conn.execute("DELETE FROM portfolio_snapshots")
+                        _conn.execute("DELETE FROM portfolio_snapshots WHERE user_id=?", (portfolio_user_id,))
                         _conn.commit()
                     st.success("已清除快照紀錄。")
             else:
