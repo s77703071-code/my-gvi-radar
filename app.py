@@ -1242,6 +1242,9 @@ st.markdown("""
             .block-container {
                 padding: 0.75rem 0.65rem 4rem !important;
             }
+            section.main > div {
+                max-width: 100% !important;
+            }
             h1 { font-size: 1.55rem !important; line-height: 1.25 !important; }
             h2 { font-size: 1.3rem !important; line-height: 1.3 !important; }
             h3 { font-size: 1.1rem !important; line-height: 1.35 !important; }
@@ -1313,7 +1316,35 @@ st.markdown("""
                 max-width: 100% !important;
                 min-width: 0 !important;
             }
-            .modebar-btn { min-width: 32px !important; min-height: 32px !important; }
+            .modebar-btn {
+                min-width: 42px !important;
+                min-height: 42px !important;
+                padding: 10px !important;
+                touch-action: manipulation !important;
+            }
+            .modebar-container {
+                opacity: 1 !important;
+                visibility: visible !important;
+            }
+            .modebar {
+                max-width: calc(100vw - 1.5rem) !important;
+                overflow-x: auto !important;
+                white-space: nowrap !important;
+                -webkit-overflow-scrolling: touch;
+            }
+            .modebar-group {
+                display: inline-flex !important;
+                flex-wrap: nowrap !important;
+            }
+            div[data-testid="stPlotlyChart"] {
+                max-width: 100% !important;
+                overflow-x: auto !important;
+                -webkit-overflow-scrolling: touch;
+            }
+            div[data-testid="stPlotlyChart"] .js-plotly-plot {
+                min-width: 0 !important;
+                max-width: 100% !important;
+            }
         }
         @media (max-width: 420px) {
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
@@ -1905,9 +1936,10 @@ def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_co
 
 只把回測當作歷史測試，不代表未來。區分數據與推論，不確定或缺漏的數據直說缺漏。"""
 
-def render_plotly_delete_hotkey(st, chart_key):
-    """Map Delete to Plotly's built-in erase-selected-shape button when available."""
+def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
+    """Persist drawn Plotly shapes and keep erase controls working after reruns."""
     encoded_key = json.dumps(str(chart_key))
+    encoded_revision = json.dumps(int(clear_revision))
     components.html(f"""
     <script>
     (() => {{
@@ -1915,34 +1947,76 @@ def render_plotly_delete_hotkey(st, chart_key):
         const hostWindow = window.parent;
         const hostDocument = hostWindow.document;
         const chartKey = {encoded_key};
+        const clearRevision = {encoded_revision};
         hostWindow.__plotlyShapeDeleteKeys = hostWindow.__plotlyShapeDeleteKeys || {{}};
-        if (hostWindow.__plotlyShapeDeleteKeys[chartKey]) return;
-        const state = {{ overChart: false }};
+        const state = hostWindow.__plotlyShapeDeleteKeys[chartKey] || {{ overChart: false, graph: null }};
         hostWindow.__plotlyShapeDeleteKeys[chartKey] = state;
-        const selector = '[class*="st-key-' + chartKey.replace(/"/g, '') + '"] .js-plotly-plot';
-        const findGraph = () => hostDocument.querySelector(selector);
-        hostDocument.addEventListener('pointermove', (event) => {{
+        const storageKey = 'codex-plotly-shapes:' + chartKey;
+        const revisionKey = storageKey + ':revision';
+        let storage = null;
+        try {{ storage = hostWindow.localStorage; }} catch (_error) {{}}
+        if (storage) {{
+          try {{
+            const previousRevision = storage.getItem(revisionKey);
+            if (previousRevision !== String(clearRevision)) {{
+              storage.removeItem(storageKey);
+              storage.setItem(revisionKey, String(clearRevision));
+            }}
+          }} catch (_error) {{ storage = null; }}
+        }}
+        const findGraph = () => {{
+          return Array.from(hostDocument.querySelectorAll('.js-plotly-plot'))
+            .find((graph) => graph._fullLayout && graph._fullLayout.meta
+              && graph._fullLayout.meta.codex_chart_key === chartKey) || null;
+        }};
+        const persistShapes = (graph) => {{
+          if (!storage) return;
+          try {{ storage.setItem(storageKey, JSON.stringify(graph.layout.shapes || [])); }} catch (_error) {{}}
+        }};
+        const attachGraph = () => {{
           const graph = findGraph();
-          if (!graph) {{ state.overChart = false; return; }}
-          const bounds = graph.getBoundingClientRect();
-          state.overChart = event.clientX >= bounds.left && event.clientX <= bounds.right
-            && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
-        }}, true);
-        hostDocument.addEventListener('keydown', (event) => {{
-          if (event.key !== 'Delete' || !state.overChart) return;
-          const target = event.target;
-          if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return;
-          const graph = findGraph();
-          const eraseButton = graph && Array.from(graph.querySelectorAll('.modebar-btn')).find((button) => {{
-            const label = [button.getAttribute('data-title'), button.getAttribute('aria-label'), button.getAttribute('title')]
-              .filter(Boolean).join(' ').toLowerCase();
-            return label.includes('erase') && label.includes('shape');
-          }});
-          if (eraseButton) {{
-            event.preventDefault();
-            eraseButton.click();
+          if (!graph) {{ state.graph = null; return false; }}
+          if (state.graph === graph) return true;
+          state.graph = graph;
+          if (storage) {{
+            try {{
+              const saved = storage.getItem(storageKey);
+              if (saved !== null && hostWindow.Plotly && hostWindow.Plotly.relayout) {{
+                const shapes = JSON.parse(saved);
+                if (Array.isArray(shapes)) hostWindow.Plotly.relayout(graph, {{ shapes }});
+              }}
+            }} catch (_error) {{}}
           }}
-        }}, true);
+          if (graph.on) graph.on('plotly_relayout', () => hostWindow.requestAnimationFrame(() => persistShapes(graph)));
+          return true;
+        }};
+        if (!state.listenersAttached) {{
+          state.listenersAttached = true;
+          hostDocument.addEventListener('pointermove', (event) => {{
+            const graph = state.graph || findGraph();
+            if (!graph) {{ state.overChart = false; return; }}
+            const bounds = graph.getBoundingClientRect();
+            state.overChart = event.clientX >= bounds.left && event.clientX <= bounds.right
+              && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+          }}, true);
+          hostDocument.addEventListener('keydown', (event) => {{
+            if (!['Delete', 'Backspace'].includes(event.key) || !state.overChart) return;
+            const target = event.target;
+            if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+            const graph = findGraph();
+            if (graph) state.graph = graph;
+            const eraseButton = graph && Array.from(graph.querySelectorAll('.modebar-btn')).find((button) => {{
+              const label = [button.getAttribute('data-title'), button.getAttribute('aria-label'), button.getAttribute('title')]
+                .filter(Boolean).join(' ').toLowerCase();
+              return label.includes('erase') && label.includes('shape');
+            }});
+            if (eraseButton) {{ event.preventDefault(); eraseButton.click(); }}
+          }}, true);
+        }}
+        if (!attachGraph()) {{
+          const retry = hostWindow.setInterval(() => {{ if (attachGraph()) hostWindow.clearInterval(retry); }}, 150);
+          hostWindow.setTimeout(() => hostWindow.clearInterval(retry), 10000);
+        }}
       }} catch (_error) {{ /* Built-in Plotly eraser remains available if browser isolation blocks this shortcut. */ }}
     }})();
     </script>
@@ -4075,27 +4149,26 @@ if auth_user:
             # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 完整畫線與文字工具箱】
             # ==============================================================================
             if selected_module == "📊 彩色 K 線圖與成交量":
-                col_title, col_draw_color, col_draw_width, col_draw_clear = st.columns([2.5, 1, 1, 1])
-                with col_title:
-                    ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:4px 8px; border:1px solid #444; border-radius:6px; display:inline-block; font-size:12px; color:white; vertical-align:middle;'>"
-                    for ma in personal_ma_configs:
-                        p, c = ma["period"], ma["color"]
-                        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-                        if not ma_series.empty:
-                            latest_ma_val = ma_series.to_numpy().flatten()[-1]
-                            ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:8px;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
-                    ma_display_html += "</div>"
-                    st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
-                
-                with col_draw_color:
-                    draw_color = st.color_picker("🎨 自訂畫線/文字顏色", value="#FF3333", key="draw_line_color_picker")
-                with col_draw_width:
-                    draw_line_width = st.slider("線條粗細", min_value=0.5, max_value=10.0, value=2.5, step=0.5, key=f"draw_line_width_{selected_stock}",
-                                                help="設定接下來繪製的趨勢線、矩形與圓形邊框粗細。")
-                with col_draw_clear:
-                    clear_shapes = st.button("🧹 清除全部畫線", key=f"clear_shapes_{selected_stock}_{selected_tf}", use_container_width=True)
+                ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:4px 8px; border:1px solid #444; border-radius:6px; display:inline-block; font-size:12px; color:white; vertical-align:middle;'>"
+                for ma in personal_ma_configs:
+                    p, c = ma["period"], ma["color"]
+                    ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+                    if not ma_series.empty:
+                        latest_ma_val = ma_series.to_numpy().flatten()[-1]
+                        ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:8px;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
+                ma_display_html += "</div>"
+                st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
+
+                with st.expander("🎨 畫線顏色與粗細設定", expanded=False):
+                    draw_color_col, draw_width_col = st.columns(2)
+                    with draw_color_col:
+                        draw_color = st.color_picker("自訂畫線／文字顏色", value="#FF3333", key="draw_line_color_picker")
+                    with draw_width_col:
+                        draw_line_width = st.slider("線條粗細", min_value=0.5, max_value=10.0, value=2.5, step=0.5, key=f"draw_line_width_{selected_stock}",
+                                                    help="設定接下來繪製的趨勢線、矩形與圓形邊框粗細。")
+                clear_shapes = st.button("🧹 清除全部畫線", key=f"clear_shapes_{auth_user['id']}_{selected_stock}_{selected_tf}", use_container_width=True)
                 if clear_shapes:
-                    clear_key = f"shape_clear_revision_{selected_stock}_{selected_tf}"
+                    clear_key = f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}"
                     st.session_state[clear_key] = int(st.session_state.get(clear_key, 0)) + 1
                 
                 # 📊 建立 2 行 1 列雙子圖
@@ -4150,8 +4223,8 @@ if auth_user:
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
                     uirevision=f"chart-{selected_stock}-{selected_tf}",
-                    editrevision=int(st.session_state.get(f"shape_clear_revision_{selected_stock}_{selected_tf}", 0)),
-                    height=600, 
+                    editrevision=int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0)),
+                    height=520,
                     margin=dict(l=10, r=10, t=25, b=10), 
                     dragmode='pan', 
                     showlegend=False,
@@ -4176,7 +4249,9 @@ if auth_user:
                     )
                 )
                 
-                chart_key = f"candlestick_chart_{selected_stock}_{selected_tf}"
+                chart_key = f"candlestick_chart_{auth_user['id']}_{selected_stock}_{selected_tf}"
+                clear_revision = int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0))
+                fig.update_layout(meta={"codex_chart_key": chart_key})
                 st.plotly_chart(
                     fig, 
                     use_container_width=True, 
@@ -4197,8 +4272,8 @@ if auth_user:
                         'responsive': True
                     }
                 )
-                render_plotly_delete_hotkey(st, chart_key)
-                st.caption("單筆刪除：先點一下要刪除圖形的邊界，再將游標留在 K 線圖內按 Delete；手機可用圖表上的橡皮擦。")
+                render_plotly_delete_hotkey(st, chart_key, clear_revision)
+                st.caption("單筆刪除：先點標線邊界使其選取，再按工具列橡皮擦；電腦也可將游標移到圖表內按 Delete。手機可左右滑動工具列找到橡皮擦，或按上方清除全部。")
 
             if selected_module == "💸 配息複利策略":
                 render_dividend_tab(st, default_ticker=selected_stock)
