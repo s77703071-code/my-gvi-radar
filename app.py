@@ -3157,6 +3157,42 @@ else:
     selected_stock = st.sidebar.text_input(
         "輸入台美股代碼：", value="3293.TWO", key="selected_stock_input"
     ).strip().upper()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🧭 核心策略模組導航")
+    MODULE_LIST = [
+        "📊 彩色 K 線圖與成交量",
+        "📦 籌碼流向參考",
+        "🤖 網格自動生成器",
+        "⚖️ 網格／持有／定期定額比較",
+        "🧪 技術指標自訂策略回測",
+        "💸 配息複利策略",
+        "🚀 華爾街機構級三核心策略雷達",
+        "🏦 台股三大法人獨立選股策略",
+        "📊 當日全市場三大法人佔股本比 Top 10",
+        "🧭 投資組合理財",
+    ]
+    # Keep the original option values stable for existing session state and
+    # module dispatch conditions; show a category prefix only in the menu.
+    MODULE_GROUPS = {
+        "📊 彩色 K 線圖與成交量": "📈 圖表與籌碼",
+        "📦 籌碼流向參考": "📈 圖表與籌碼",
+        "🤖 網格自動生成器": "⚖️ 策略與回測",
+        "⚖️ 網格／持有／定期定額比較": "⚖️ 策略與回測",
+        "🧪 技術指標自訂策略回測": "⚖️ 策略與回測",
+        "💸 配息複利策略": "⚖️ 策略與回測",
+        "🚀 華爾街機構級三核心策略雷達": "🏦 選股與市場掃描",
+        "🏦 台股三大法人獨立選股策略": "🏦 選股與市場掃描",
+        "📊 當日全市場三大法人佔股本比 Top 10": "🏦 選股與市場掃描",
+        "🧭 投資組合理財": "🧭 投資組合",
+    }
+    selected_module = st.sidebar.selectbox(
+        "選擇要檢視的分析面板：",
+        options=MODULE_LIST,
+        index=0,
+        format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
+        key="sidebar_strategy_selector",
+    )
     st.markdown("""
         <div style="background: linear-gradient(135deg, rgba(20, 29, 49, 0.75) 0%, rgba(11, 16, 29, 0.9) 100%);
                     border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 1.2rem 1.6rem;
@@ -3726,50 +3762,32 @@ else:
             st.error(f"數據載入異常：{e}")
 
     try:
-        st.markdown("""
-            <div style="margin: 2rem 0 0.9rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
+        st.markdown(f"""
+            <div style="margin: 1.2rem 0 1.2rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
                         border-left: 5px solid #3B82F6; border-radius: 0 14px 14px 0; padding: 0.85rem 1.4rem;
                         display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem;
                         box-shadow: 0 6px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <span style="font-size: 1.5rem; filter: drop-shadow(0 0 8px #3B82F6);">🎛️</span>
-                    <div>
-                        <div style="font-size: 1.25rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px;">
-                            十大量化策略核心導航主控台
-                            <span style="background: linear-gradient(135deg, #2563EB, #7C3AED); color: #FFFFFF; font-size: 0.72rem; padding: 2px 10px; border-radius: 12px; font-weight: 700;">PRO MATRIX</span>
-                        </div>
-                        <div style="font-size: 0.82rem; color: #94A3B8; margin-top: 2px;">
-                            上排：技術量化與回測模擬 ｜ 下排：價值複利、法人雷達與資產配置
-                        </div>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 1.4rem;">🎯</span>
+                    <div style="font-size: 1.2rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em;">
+                        當前檢視策略面板：<span style="color: #60A5FA;">{selected_module}</span>
                     </div>
                 </div>
-                <div style="display: flex; align-items: center; gap: 6px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 5px 14px; border-radius: 20px; font-size: 0.82rem; font-weight: 600; color: #93C5FD;">
-                    <span>👆</span> 點擊下方按鈕立即切換策略檢視
+                <div style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; color: #93C5FD;">
+                    👈 可隨時於左側邊欄切換 10 種策略模組
                 </div>
             </div>
         """, unsafe_allow_html=True)
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
-            "📊 彩色 K 線圖與成交量",
-            "📦 籌碼流向參考",
-            "🤖 網格自動生成器",
-            "⚖️ 網格／持有／定期定額比較",
-            "🧪 技術指標自訂策略回測",
-            "💸 配息複利策略",
-            "🚀 華爾街機構級三核心策略雷達",
-            "🏦 台股三大法人獨立選股策略",
-            "📊 當日全市場三大法人佔股本比 Top 10",
-            "🧭 投資組合理財",
-        ])
-        tabs_created = True
         if df_chart is None or df_chart.empty:
-            st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
+            if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略"]:
+                st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
             
             # ==============================================================================
             # 【Tab 1: Plotly 雙子圖原生 K 線圖 + 成交量 + 完整畫線與文字工具箱】
             # ==============================================================================
-            with tab1:
+            if selected_module == "📊 彩色 K 線圖與成交量":
                 col_title, col_draw_color, col_draw_width, col_draw_clear = st.columns([2.5, 1, 1, 1])
                 with col_title:
                     ma_display_html = "<div style='background-color:rgba(20,20,20,0.8); padding:4px 8px; border:1px solid #444; border-radius:6px; display:inline-block; font-size:12px; color:white; vertical-align:middle;'>"
@@ -3895,10 +3913,10 @@ else:
                 render_plotly_delete_hotkey(st, chart_key)
                 st.caption("單筆刪除：先點一下要刪除圖形的邊界，再將游標留在 K 線圖內按 Delete；手機可用圖表上的橡皮擦。")
 
-            with tab6:
+            if selected_module == "💸 配息複利策略":
                 render_dividend_tab(st, default_ticker=selected_stock)
             
-            with tab2:
+            if selected_module == "📦 籌碼流向參考":
                 st.markdown("### 📦 市場走勢與資金流向參考")
                 st.caption("改用較容易取得、一般人容易理解的價格趨勢、成交熱度與法人當日動向。資料暫缺時會直接標示，不把缺漏當成零。")
                 price_history = df_chart[[column for column in ("Close", "Volume") if column in df_chart.columns]].copy()
@@ -3937,7 +3955,7 @@ else:
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
             # ==============================================================================
-            with tab3:
+            if selected_module == "🤖 網格自動生成器":
                 st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.12 操盤手教學版)")
                 
                 with st.expander("📚 點擊展開：網格交易 3 大資金管理機制與適用場景解析", expanded=False):
@@ -4069,7 +4087,7 @@ else:
             # ==============================================================================
             # 【Tab 4: 3.12 「網格再平衡 vs 買進持有」歷史線路模擬與全指標對比】
             # ==============================================================================
-            with tab4:
+            if selected_module == "⚖️ 網格／持有／定期定額比較":
                 st.markdown(f"### ⚖️ 【{c_name}】網格、買進持有與定期定額歷史比較")
                 st.caption("三種方式使用同一標的、價格期間及交易費率。定期定額預設把相同總預算平均分到每個資料月份；年化報酬按每次實際投入日期計算。")
                 
@@ -4285,7 +4303,7 @@ else:
             # ==============================================================================
             # 【Tab 5: 3.12 技術指標多空策略與動態停損回測器】
             # ============================================================================== 
-            with tab5:
+            if selected_module == "🧪 技術指標自訂策略回測":
                 st.markdown(f"### 🧪 【{c_name}】技術指標多空策略與動態停損回測器 (3.12 版)")
                 default_bt_start = pd.Timestamp(df_chart.index[0]).date()
                 default_bt_end = pd.Timestamp(df_chart.index[-1]).date()
@@ -4881,45 +4899,7 @@ else:
     except Exception as ex_tab:
         st.error(f"❌ 畫面渲染異常：{ex_tab}")
 
-    # If stock-chart loading failed before the chart area, keep the strategy tabs available.
-    if not tabs_created:
-        st.markdown("""
-            <div style="margin: 2rem 0 0.9rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
-                        border-left: 5px solid #3B82F6; border-radius: 0 14px 14px 0; padding: 0.85rem 1.4rem;
-                        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem;
-                        box-shadow: 0 6px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <span style="font-size: 1.5rem; filter: drop-shadow(0 0 8px #3B82F6);">🎛️</span>
-                    <div>
-                        <div style="font-size: 1.25rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px;">
-                            十大量化策略核心導航主控台
-                            <span style="background: linear-gradient(135deg, #2563EB, #7C3AED); color: #FFFFFF; font-size: 0.72rem; padding: 2px 10px; border-radius: 12px; font-weight: 700;">PRO MATRIX</span>
-                        </div>
-                        <div style="font-size: 0.82rem; color: #94A3B8; margin-top: 2px;">
-                            上排：技術量化與回測模擬 ｜ 下排：價值複利、法人雷達與資產配置
-                        </div>
-                    </div>
-                </div>
-                <div style="display: flex; align-items: center; gap: 6px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 5px 14px; border-radius: 20px; font-size: 0.82rem; font-weight: 600; color: #93C5FD;">
-                    <span>👆</span> 點擊下方按鈕立即切換策略檢視
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
-            "📊 彩色 K 線圖與成交量",
-            "📦 籌碼流向參考",
-            "🤖 網格自動生成器",
-            "⚖️ 網格／持有／定期定額比較",
-            "🧪 技術指標自訂策略回測",
-            "💸 配息複利策略",
-            "🚀 華爾街機構級三核心策略雷達",
-            "🏦 台股三大法人獨立選股策略",
-            "📊 當日全市場三大法人佔股本比 Top 10",
-            "🧭 投資組合理財",
-        ])
-        tabs_created = True
-
-    with tab7:
+    if selected_module == "🚀 華爾街機構級三核心策略雷達":
         st.markdown("---")
         st.markdown("### 🚀 華爾街機構級三核心策略雷達")
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -5197,7 +5177,7 @@ else:
             if isinstance(saved_screen_result, dict) and isinstance(saved_screen_result.get("view"), pd.DataFrame):
                 render_stock_screen_results(saved_screen_result["view"], saved_screen_result.get("title", "選股策略篩選結果"))
 
-    with tab8:
+    if selected_module == "🏦 台股三大法人獨立選股策略":
         st.markdown("---")
         st.markdown("### 🏦 台股三大法人獨立選股策略")
         st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比。")
@@ -5229,7 +5209,7 @@ else:
                 if inst_errors:
                     st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
 
-    with tab9:
+    if selected_module == "📊 當日全市場三大法人佔股本比 Top 10":
         st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
         st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。")
         if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
@@ -5266,7 +5246,7 @@ else:
     # ==============================================================================
     # 【Tab 10：投資組合理財】獨立於選股策略；只計算與提供建議，不會自動下單。
     # ==============================================================================
-    with tab10:
+    if selected_module == "🧭 投資組合理財":
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
 
