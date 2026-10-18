@@ -2064,6 +2064,46 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             "_latest_triggered": latest_triggered,
         })
     result_frame = pd.DataFrame(rows)
+    def candidate_direction(test_count, expectancy, profit_factor, max_drawdown, passed, latest_triggered):
+        """Turn each candidate's holdout evidence into a cautious investor-facing stance."""
+        if passed:
+            if latest_triggered:
+                return (
+                    "偏多觀察｜樣本外初步通過且最新資料觸發；先按風險規則驗證，"
+                    "不視為買進指令。"
+                )
+            return (
+                "中性觀望｜歷史樣本外初步通過，但最新資料未觸發；等待條件出現，"
+                "不提前進場。"
+            )
+
+        failed_checks = []
+        if test_count < 5:
+            failed_checks.append(f"樣本外僅 {test_count} 筆，交易數不足")
+        if expectancy is None:
+            failed_checks.append("成本後平均損益資料不足")
+        elif expectancy <= 0:
+            failed_checks.append("成本後平均每筆損益未為正")
+        if profit_factor is not None and profit_factor <= 1.0:
+            failed_checks.append("賺賠金額比未高於 1")
+        if max_drawdown is None:
+            failed_checks.append("最大回撤資料不足")
+        elif max_drawdown < -0.30:
+            failed_checks.append(f"最大回撤 {max_drawdown:.0%} 超過 30% 門檻")
+        reason_text = "；".join(failed_checks) if failed_checks else "未通過樣本外門檻"
+        return f"暫不採用｜{reason_text}；方向以觀望為主，不依此策略進場。"
+
+    result_frame["投資方向提示"] = [
+        candidate_direction(
+            int(row["後30%交易數"]),
+            _finite_number(row["後30%平均每筆損益(%)"]),
+            _finite_number(row["後30%賺賠金額比"]),
+            (_finite_number(row["後30%最大回撤(%)"]) / 100.0)
+            if _finite_number(row["後30%最大回撤(%)"]) is not None else None,
+            bool(row["_passed"]), bool(row["_latest_triggered"]),
+        )
+        for _, row in result_frame.iterrows()
+    ]
     passed_rows = result_frame.loc[result_frame["_passed"]].copy()
     if passed_rows.empty:
         best = None
@@ -2124,7 +2164,8 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             f"後段平均每筆損益 {backtest_value(row.get('後30%平均每筆損益(%)'), '%')}；"
             f"賺賠金額比 {pf_text}；最大回撤 {backtest_value(row.get('後30%最大回撤(%)'), '%')}；"
             f"最新資料日 {frame.index[-1]:%Y-%m-%d}：{row['最新一根是否觸發']}；"
-            f"{row['樣本外檢查']}。"
+            f"{row['樣本外檢查']}。\n"
+            f"  🖍️ 畫線重點｜投資方向：{row['投資方向提示']}"
         )
     results_text = "\n".join(strategy_lines)
     return {"table": result_frame.drop(columns=["_passed", "_latest_triggered"]), "best": best,
@@ -2282,10 +2323,12 @@ def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_co
 2. **市場心理觀察**：只根據提供的價格、成交量、公開法人流量、券商分點摘要、新聞與基本面證據，描述可能的樂觀、觀望、追價、恐慌或風險重新評估線索。若提供分點摘要，必須直接解讀淨買超／淨賣超分點家數、淨額與集中度，並和價格方向並列；只有日期與期間對齊時才能稱為同向或背離，日期不明就明確標示期間未對齊、只能作方向參考。每項標示「觀察到的資料」與「可能的心理解讀」；不要宣稱知道投資人真實想法，不要由分點或法人資料推定主力／散戶身分。
 3. **市場、產業與同業**：交代相關大盤、利率／匯率／政策、產業供需與題材；列 2–4 家真正可比同業。重要數據附來源和日期；區分事實與市場預期，資料不足就直說。
 4. **公司優勢與風險**：以可查證資料說明優勢、風險，以及可能推翻目前觀點的條件。
-5. **技術指標回測與條件式建議**：逐項整理本系統提供的 MA、五線排列、KD、MACD、成交量、RSI、布林、BIAS、ATR、OBV、CCI、DMI／ADX、EMA12／26 回測候選，引用每項實際測試的進出場條件、樣本外交易數、成本後平均每筆損益、賺賠金額比、最大回撤、通過狀態及最新日線是否觸發。只可把「樣本外通過且最新日線觸發」的策略列為進一步研究候選；若通過但最新日線未觸發，建議等待條件，不追價；若沒有策略通過，明確寫「目前找不到足夠證據支持正期望策略」，不提供進場候選。說明通過門檻不代表勝率或未來報酬保證，並列出停損／停利風險。只把回測當歷史檢查。
+5. **技術指標回測與條件式建議**：逐項整理本系統提供的 MA、五線排列、KD、MACD、成交量、RSI、布林、BIAS、ATR、OBV、CCI、DMI／ADX、EMA12／26 回測候選，引用每項實際測試的進出場條件、樣本外交易數、成本後平均每筆損益、賺賠金額比、最大回撤、通過狀態、最新日線是否觸發及系統提供的「投資方向提示」。每項策略都要給清楚的方向：未通過門檻則暫不採用、以觀望為主；通過但最新未觸發則等待訊號；通過且最新觸發也只列為偏多觀察與進一步研究，不可叫使用者直接買進。只可把「樣本外通過且最新日線觸發」的策略列為進一步研究候選；若沒有策略通過，明確寫「目前找不到足夠證據支持正期望策略」，不提供進場候選。說明通過門檻不代表勝率或未來報酬保證，並列出停損／停利風險。只把回測當歷史檢查。
 6. **結尾行動重點**：列出目前資料支持的偏多／中性／偏空觀察、最重要催化因素、最重要風險，以及下一步要查證的項目。沒有通過的策略不得包裝成推薦；不得承諾獲利或提供無來源目標價。
 
-格式要求：直接劃重點，使用短段落、清楚小標和條列；不要貼程式碼、不要列數學公式或工程符號。需要解釋計算結果時，請用日常語言說明「這個數字代表什麼、可能影響什麼、還要注意什麼」。心理解讀一律寫成可能性，不把推論寫成事實。不得虛構資料或來源；區分資料、推論與未知。"""
+語氣與畫線筆記格式：使用繁體中文，口吻活潑、生動、自然，像專業研究員在陪投資人看盤；避免生硬術語、官樣文章、聳動標題或保證式說法。可以用「多空拉鋸」「追價熱度」「怕錯過（FOMO）」「錨定成本」「損失厭惡」「羊群效應」「確認偏誤」等市場心理詞，但每次都要緊扣本次可見數據，並用一句白話解釋；不能把推論說成投資人的真實心理。
+請在「先看重點」、市場心理、三核心比對、回測方向、風險與結尾行動等重要段落，挑最值得注意的 1–2 個數字、日期、相反訊號或風險，獨立標成「> 🖍️ **畫線重點｜……**」。每則畫線筆記盡量短，直接說出觀察、可能含意和要留意的風險；不要把整篇每句都標重點。畫線標記是方便閱讀的筆記，不是交易訊號。
+格式要求：直接劃重點，使用短段落、清楚小標和條列；不要貼程式碼、不要列數學公式或工程符號。需要解釋計算結果時，請用日常語言說明「這個數字代表什麼、可能影響什麼、還要注意什麼」。市場心理解讀一律寫成可能性，不把推論寫成事實。不得虛構資料或來源；區分資料、推論與未知。"""
 
 def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
     """Persist drawn Plotly shapes and keep erase controls working after reruns."""
@@ -2429,8 +2472,101 @@ def get_gmail_secret_values(secret_store):
     except Exception:
         return "", ""
 
+def report_text_to_email_html(report_text):
+    """Render safe, readable HTML email and highlight the report's pen-note lines."""
+    def inline_markup(value):
+        safe = html.escape(str(value), quote=True)
+        safe = re.sub(
+            r"\[([^\]]+)\]\((https://[^)\s]+)\)",
+            r'<a href="\2" style="color:#1D4ED8;text-decoration:underline;">\1</a>',
+            safe,
+        )
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe)
+
+    def split_table_row(line):
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    lines = str(report_text or "").splitlines()
+    body_parts = []
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
+        line = raw_line.strip()
+        if not line:
+            body_parts.append('<div style="height:7px;"></div>')
+            index += 1
+            continue
+
+        if line.startswith("|"):
+            table_lines = []
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                table_lines.append(split_table_row(lines[index]))
+                index += 1
+            usable_rows = [
+                row for row in table_lines
+                if not row or not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in row)
+            ]
+            if usable_rows:
+                table_html = ['<table style="border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;">']
+                for row_number, cells in enumerate(usable_rows):
+                    tag = "th" if row_number == 0 else "td"
+                    cell_style = (
+                        "border:1px solid #CBD5E1;padding:7px 9px;text-align:left;vertical-align:top;"
+                        + ("background:#E2E8F0;color:#0F172A;" if tag == "th" else "color:#1E293B;")
+                    )
+                    table_html.append("<tr>" + "".join(
+                        f'<{tag} style="{cell_style}">{inline_markup(cell)}</{tag}>' for cell in cells
+                    ) + "</tr>")
+                table_html.append("</table>")
+                body_parts.append("".join(table_html))
+            continue
+
+        is_note = "🖍️" in line or "畫線重點" in line
+        if line.startswith("> "):
+            line = line[2:].strip()
+            is_note = is_note or "🖍️" in line or "畫線重點" in line
+        if is_note:
+            body_parts.append(
+                '<div style="margin:8px 0;padding:10px 12px;background:#FFF7D6;'
+                'border-left:4px solid #F59E0B;border-bottom:2px solid #FBBF24;'
+                'border-radius:4px;color:#422006;line-height:1.65;">'
+                + inline_markup(line) + "</div>"
+            )
+            index += 1
+            continue
+
+        heading_match = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading_match:
+            level = len(heading_match.group(1))
+            font_size = {1: "22px", 2: "19px", 3: "16px", 4: "15px"}[level]
+            body_parts.append(
+                f'<div style="margin:{16 if level < 3 else 12}px 0 7px;font-size:{font_size};'
+                f'font-weight:700;color:#0F172A;">{inline_markup(heading_match.group(2))}</div>'
+            )
+        elif re.match(r"^(?:[-*]|•)\s+", line):
+            item_text = re.sub(r"^(?:[-*]|•)\s+", "", line)
+            body_parts.append(
+                '<div style="margin:4px 0 4px 12px;padding-left:12px;border-left:2px solid #CBD5E1;'
+                f'line-height:1.65;color:#1E293B;">• {inline_markup(item_text)}</div>'
+            )
+        else:
+            body_parts.append(
+                '<div style="margin:4px 0;line-height:1.7;color:#1E293B;">'
+                + inline_markup(line) + "</div>"
+            )
+        index += 1
+
+    return (
+        '<!doctype html><html><body style="margin:0;padding:18px;background:#F8FAFC;">'
+        '<div style="max-width:900px;margin:0 auto;padding:22px;background:#FFFFFF;'
+        'border:1px solid #E2E8F0;border-radius:10px;font-family:Arial,\'Noto Sans TC\',sans-serif;">'
+        + "".join(body_parts)
+        + "</div></body></html>"
+    )
+
+
 def send_gmail_report(recipient_email, subject, report_text, sender_email, app_password):
-    """Send a plain-text report through Gmail SMTP using a Google App Password."""
+    """Send a plain-text fallback and formatted HTML report through Gmail SMTP."""
     required = (recipient_email, subject, report_text, sender_email, app_password)
     if any(not str(value).strip() for value in required):
         raise ValueError("收件地址、報告內容或 Gmail 寄件設定不完整。")
@@ -2440,6 +2576,7 @@ def send_gmail_report(recipient_email, subject, report_text, sender_email, app_p
     message["To"] = recipient_email.strip()
     message["Subject"] = subject.strip()
     message.set_content(report_text)
+    message.add_alternative(report_text_to_email_html(report_text), subtype="html")
 
     stage = "連接 Gmail 安全郵件通道（SSL 465）"
     try:
@@ -5799,7 +5936,7 @@ if auth_user:
                                         for factor, interpretation in ai_psychology["notes"].items()
                                     ]
                                     ai_psychology_lines.extend([
-                                        f"• 三核心合併觀察：{ai_psychology['overall']}",
+                                        f"> 🖍️ **畫線重點｜三核心合併觀察：** {ai_psychology['overall']}",
                                         f"• 價格與成交量：{build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf)}",
                                         "• 解讀限制：以上是市場行為線索，不是對投資人身分或真實情緒的判定，也不是買賣訊號。",
                                     ])
@@ -5846,6 +5983,7 @@ if auth_user:
                                     success_report = (
                                         str(success_report).rstrip()
                                         + "\n\n### 技術指標回測｜條件式建議\n"
+                                        + "> 🖍️ **畫線重點｜回測後方向：** "
                                         + str(ai_backtest.get(
                                             "advice",
                                             "回測資料不足，暫不依技術指標回測提出策略建議。",
@@ -5906,6 +6044,10 @@ if auth_user:
                                     ).round(2)
                                 st.dataframe(display_backtest, use_container_width=True, hide_index=True)
                                 st.caption(saved_backtest.get("assumptions", ""))
+                                st.caption(
+                                    "投資方向提示是依固定樣本外門檻與最新訊號產生的研究參考，未考量個人財務狀況、"
+                                    "持倉成本或風險承受度；不代表個人化投資建議、買賣指令或建議部位。"
+                                )
                         elif isinstance(saved_backtest, dict) and saved_backtest.get("text"):
                             st.info(saved_backtest["text"])
                         recipient_email = st.text_input(
