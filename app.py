@@ -2809,8 +2809,98 @@ def fetch_mops_insider_holding(ticker):
             continue
     return None
 
+def get_finmind_api_token():
+    """Read provider credentials from deployment secrets or environment, never from source text."""
+    token = str(os.environ.get("FINMIND_TOKEN", "")).strip()
+    if token:
+        return token
+    try:
+        return str(st.secrets.get("FINMIND_TOKEN", "")).strip()
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_finmind_broker_branch(stock_code, trade_date, api_token):
+    """Fetch one Taiwan stock's daily branch details from FinMind's authenticated endpoint."""
+    if not api_token:
+        return pd.DataFrame(), "尚未設定 FinMind API Token。"
+    try:
+        response = requests.get(
+            "https://api.finmindtrade.com/api/v4/taiwan_stock_trading_daily_report",
+            params={"data_id": str(stock_code), "date": str(trade_date)},
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=25,
+        )
+        if response.status_code in (401, 402, 403):
+            return pd.DataFrame(), "FinMind 拒絕此請求；請確認 Token 有效且帳號方案包含台股分點資料。"
+        response.raise_for_status()
+        payload = response.json()
+        records = payload.get("data", []) if isinstance(payload, dict) else []
+        if not records:
+            message = str(payload.get("msg") or payload.get("detail") or "該日期尚無可用分點資料。")
+            return pd.DataFrame(), message
+        return pd.DataFrame(records), None
+    except Exception:
+        return pd.DataFrame(), "自動取得分點資料失敗；請稍後重試，或使用 CSV 匯入。"
+
+
+def summarize_broker_branch_frame(frame, stock_code):
+    """Aggregate price-level branch rows into one buy/sell total per broker branch."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {"error": "沒有可分析的分點資料。"}
+    code_col = next((c for c in frame.columns if str(c).lower() in ("stock_id", "data_id")
+                     or ('代號' in str(c) and ('證券' in str(c) or '股票' in str(c)))), None)
+    buy_col = next((c for c in frame.columns if str(c).lower() in ("buy", "buy_volume")
+                    or ('買進' in str(c) and ('股數' in str(c) or '數量' in str(c)))), None)
+    sell_col = next((c for c in frame.columns if str(c).lower() in ("sell", "sell_volume")
+                     or ('賣出' in str(c) and ('股數' in str(c) or '數量' in str(c)))), None)
+    if not all((code_col, buy_col, sell_col)):
+        return {"error": "資料需包含股票代號、買進股數、賣出股數欄位。"}
+    selected = frame[frame[code_col].astype(str).str.strip().str.upper() == str(stock_code).strip().upper()].copy()
+    if selected.empty:
+        return {"error": "資料找不到目前分析股票。"}
+
+    branch_id_col = next((c for c in selected.columns if str(c).lower() == "securities_trader_id"
+                          or ('券商' in str(c) and '代號' in str(c))), None)
+    branch_name_col = next((c for c in selected.columns if str(c).lower() == "securities_trader"
+                            or ('券商' in str(c) and ('名稱' in str(c) or '分點' in str(c)))), None)
+    group_cols = [column for column in (branch_id_col, branch_name_col) if column]
+    selected["_buy"] = pd.to_numeric(selected[buy_col].astype(str).str.replace(',', ''), errors='coerce')
+    selected["_sell"] = pd.to_numeric(selected[sell_col].astype(str).str.replace(',', ''), errors='coerce')
+    selected = selected.dropna(subset=["_buy", "_sell"])
+    if selected.empty:
+        return {"error": "買進或賣出欄位沒有可讀取的數值。"}
+    if group_cols:
+        grouped = selected.groupby(group_cols, dropna=False, as_index=False)[["_buy", "_sell"]].sum()
+        grouped["分點"] = grouped[branch_name_col].fillna("").astype(str) if branch_name_col else ""
+        if branch_id_col:
+            ids = grouped[branch_id_col].fillna("").astype(str)
+            grouped["分點"] = ids + grouped["分點"].map(lambda value: f"｜{value}" if value else "")
+        count_unit = "分點"
+    else:
+        grouped = selected[["_buy", "_sell"]].copy().reset_index(drop=True)
+        grouped["分點"] = [f"資料列 {i + 1}" for i in range(len(grouped))]
+        count_unit = "資料列"
+    grouped["買賣超"] = grouped["_buy"] - grouped["_sell"]
+    buyers = int((grouped["買賣超"] > 0).sum())
+    sellers = int((grouped["買賣超"] < 0).sum())
+    breakdown = grouped[["分點", "_buy", "_sell", "買賣超"]].rename(
+        columns={"_buy": "買進股數", "_sell": "賣出股數"}
+    ).sort_values("買賣超", ascending=False).reset_index(drop=True)
+    return {
+        "net_shares": float(grouped["買賣超"].sum()),
+        "buyers": buyers,
+        "sellers": sellers,
+        "count_unit": count_unit,
+        "top_net_buy": float(grouped.nlargest(15, "買賣超")["買賣超"].clip(lower=0).sum()),
+        "top_net_sell": float(grouped.nsmallest(15, "買賣超")["買賣超"].clip(upper=0).sum()),
+        "breakdown": breakdown,
+    }
+
+
 def summarize_broker_branch_csv(uploaded_file, stock_code):
-    """Summarize optional official broker-branch CSV supplied by the user."""
+    """Read a user CSV and share the same branch-level aggregation as the API source."""
     if uploaded_file is None:
         return None
     try:
@@ -2818,22 +2908,7 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
     except Exception:
         uploaded_file.seek(0)
         frame = pd.read_csv(uploaded_file, encoding='big5', encoding_errors='replace')
-    code_col = next((c for c in frame.columns if '代號' in str(c) and ('證券' in str(c) or '股票' in str(c))), None)
-    buy_col = next((c for c in frame.columns if '買進' in str(c) and ('股數' in str(c) or '數量' in str(c))), None)
-    sell_col = next((c for c in frame.columns if '賣出' in str(c) and ('股數' in str(c) or '數量' in str(c))), None)
-    if not all((code_col, buy_col, sell_col)):
-        return {'error':'檔案需包含證券代號、買進股數、賣出股數欄位。'}
-    selected = frame[frame[code_col].astype(str).str.strip() == str(stock_code)].copy()
-    if selected.empty:
-        return {'error':'上傳檔案找不到目前分析股票。'}
-    selected['_buy'] = pd.to_numeric(selected[buy_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    selected['_sell'] = pd.to_numeric(selected[sell_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    selected['_net'] = selected['_buy'] - selected['_sell']
-    buyers = int((selected['_net'] > 0).sum())
-    sellers = int((selected['_net'] < 0).sum())
-    return {'net_shares': float(selected['_net'].sum()), 'buyers':buyers, 'sellers':sellers,
-            'count_diff':buyers-sellers, 'top_net_buy':float(selected.nlargest(15, '_net')['_net'].clip(lower=0).sum()),
-            'top_net_sell':float(selected.nsmallest(15, '_net')['_net'].clip(upper=0).sum())}
+    return summarize_broker_branch_frame(frame, stock_code)
 
 def build_institutional_rankings(trades, shares_by_code, limit=10):
     rows = []
@@ -4756,10 +4831,58 @@ if auth_user:
                     st.info("集保持股級距資料目前僅適用台股。")
 
                 with st.expander("🔎 選用：券商分點買賣明細", expanded=False):
-                    st.caption("可匯入含「證券代號、買進股數、賣出股數」欄位的 CSV。分點資料只反映券商帳戶交易彙整，無法辨認最終投資人身分，也不等於主力或散戶流向。")
+                    st.caption("分點資料反映券商帳戶交易彙整，無法辨認最終投資人身分，也不等於主力或散戶流向。")
                     if not is_taiwan_stock:
-                        st.info("券商分點 CSV 分析目前僅適用台股。")
+                        st.info("券商分點資料目前僅適用台股。")
                     else:
+                        def _render_branch_summary(branch_summary, source_label):
+                            if not branch_summary:
+                                return
+                            if branch_summary.get('error'):
+                                st.warning(branch_summary['error'])
+                                return
+                            branch_cols = st.columns(3)
+                            count_suffix = "家" if branch_summary["count_unit"] == "分點" else "列"
+                            with branch_cols[0]:
+                                st.metric("分點合計淨買賣超", f"{branch_summary['net_shares']:+,.0f} 股", delta_color="off")
+                            with branch_cols[1]:
+                                st.metric(f"淨買超{branch_summary['count_unit']}數", f"{branch_summary['buyers']:,} {count_suffix}", delta_color="off")
+                            with branch_cols[2]:
+                                st.metric(f"淨賣超{branch_summary['count_unit']}數", f"{branch_summary['sellers']:,} {count_suffix}", delta_color="off")
+                            st.caption(
+                                f"{source_label}；淨買超前 15 分點合計 {branch_summary['top_net_buy']:+,.0f} 股，"
+                                f"淨賣超前 15 分點合計 {branch_summary['top_net_sell']:+,.0f} 股。"
+                            )
+                            breakdown = branch_summary.get("breakdown")
+                            if isinstance(breakdown, pd.DataFrame) and not breakdown.empty:
+                                top_rows = pd.concat([breakdown.head(10), breakdown.nsmallest(10, "買賣超")]).drop_duplicates()
+                                st.dataframe(top_rows, hide_index=True, use_container_width=True)
+
+                        st.markdown("##### 自動帶入（FinMind）")
+                        st.caption("設定 FINMIND_TOKEN 後，會依目前股票與日期自動取得分點資料；分點資料通常於交易日盤後更新。")
+                        finmind_token = get_finmind_api_token()
+                        if finmind_token:
+                            from datetime import datetime as _datetime
+                            from zoneinfo import ZoneInfo as _ZoneInfo
+                            default_branch_date = pd.Timestamp(trade_date).date() if trade_date else _datetime.now(_ZoneInfo("Asia/Taipei")).date()
+                            branch_trade_date = st.date_input(
+                                "分點資料日期",
+                                value=default_branch_date,
+                                key=f"chip_branch_date_{stock_code}",
+                            )
+                            branch_date_text = branch_trade_date.strftime("%Y-%m-%d")
+                            with st.spinner(f"自動讀取 {stock_code} 的券商分點資料…"):
+                                branch_frame, branch_error = fetch_finmind_broker_branch(stock_code, branch_date_text, finmind_token)
+                            if branch_error:
+                                st.info(f"FinMind：{branch_error}")
+                            else:
+                                auto_summary = summarize_broker_branch_frame(branch_frame, stock_code)
+                                _render_branch_summary(auto_summary, f"FinMind｜{branch_date_text}")
+                        else:
+                            st.info("尚未設定 FinMind Token；可在部署環境的 Streamlit secrets 或 FINMIND_TOKEN 環境變數中設定。")
+                            st.caption("分點 API 需要 FinMind Sponsor 以上方案；若此程式作為商業服務提供給他人，請先核對資料授權方案。")
+
+                        st.markdown("##### 手動匯入備援 CSV")
                         branch_file = st.file_uploader(
                             "選擇券商分點 CSV 檔",
                             type=["csv"],
@@ -4767,20 +4890,7 @@ if auth_user:
                         )
                         if branch_file is not None:
                             branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
-                            if branch_summary and branch_summary.get('error'):
-                                st.warning(branch_summary['error'])
-                            elif branch_summary:
-                                branch_cols = st.columns(3)
-                                with branch_cols[0]:
-                                    st.metric("分點合計淨買賣超", f"{branch_summary['net_shares']:+,.0f} 股", delta_color="off")
-                                with branch_cols[1]:
-                                    st.metric("淨買超分點數", f"{branch_summary['buyers']:,} 家", delta_color="off")
-                                with branch_cols[2]:
-                                    st.metric("淨賣超分點數", f"{branch_summary['sellers']:,} 家", delta_color="off")
-                                st.caption(
-                                    f"淨買超前 15 分點合計 {branch_summary['top_net_buy']:+,.0f} 股；"
-                                    f"淨賣超前 15 分點合計 {branch_summary['top_net_sell']:+,.0f} 股。"
-                                )
+                            _render_branch_summary(branch_summary, "依上傳檔案所含資料期間彙總")
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
