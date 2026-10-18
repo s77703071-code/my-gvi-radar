@@ -811,9 +811,9 @@ def _render_screen(st, tickers: list[str], rules: dict[str, Any], label: str = "
         st.caption("表格中的殖利率、發放率、自由現金流、估值與品質分數皆依目前可取得資料估算；「資料不足」或資料覆蓋低時，請勿把缺值當成零或通過。上方「指標與計算欄位怎麼看？」可查各欄位白話說明。")
         with st.expander("🔎 配息品質表格欄位說明", expanded=False):
             st.markdown(
-                "- **現金殖利率**：近 12 個月現金股利 ÷ 現價。**近五年股利／正值年數**：檢查紀錄是否連續；不代表未來仍會配息。\n"
+                "- **現金殖利率**：用近 12 個月實際發放的現金股利，對照目前股價看現金回饋規模；不是固定利息。**近五年股利／正值年數**：檢查紀錄是否連續；不代表未來仍會配息。\n"
                 "- **EPS 年化成長**：可得年度每股盈餘的年化變化；**現金流正值年數**：營業現金流為正的年度數。\n"
-                "- **發放率**：近 12 個月股利 ÷ 最新可得 EPS；**本益比**：股價 ÷ 每股盈餘；**負債/權益**：負債相對股東權益；**利息保障倍數**：營業獲利支付利息的緩衝。\n"
+                "- **發放率**：觀察公司把近期盈餘中多少拿來配息，過高時要留意是否難以維持；**本益比**：表示目前股價相對每股盈餘的倍數；**負債/權益**：比較負債規模與股東權益；**利息保障倍數**：觀察營業獲利支付利息的緩衝。\n"
                 "- **品質分數**：目前啟用條件加權的 0–100 分；**資料覆蓋**：指標可取得程度；兩者皆不是未來報酬機率。**不合格原因、資料缺漏、風險警示**分別說明未達條件、缺資料及需要留意的情形。"
             )
         rows = []
@@ -904,7 +904,7 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
         "cagr": "把回測整段複利結果換算為年平均報酬，方便比較不同期間；不代表每年都會達成。",
         "mdd": "回測期間資產由高點到後續低點的最大跌幅，用來了解曾承受的最深下跌。",
         "annualized_volatility": "報酬起伏幅度的年化估算；不是虧損機率或未來跌幅上限。",
-        "sharpe": "平均報酬扣除無風險利率後除以報酬標準差，再年化；本回測以 0% 無風險利率估算。越高代表歷史上每單位整體波動換到較多報酬，不保證未來。",
+        "sharpe": "把歷史報酬與整體起伏程度一起衡量；本回測以 0% 無風險利率估算。數值越高，代表過去承受相同程度波動時換到的報酬較多，不保證未來。",
         "cumulative_total_return": "把股價變化和已納入計算的股息一起計算，顯示整段期間相對投入金額的變化。",
         "gross_dividends": "回測期間收到的股息總額，尚未扣除設定的股利稅費。",
         "reinvested_dividends": "實際用於增加持股的股息金額；若設定不再投入，這項會較低或為零。",
@@ -1003,7 +1003,8 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
 def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Optional[Mapping[str, Any]] = None) -> None:
     """Render an additive, independent dividend strategy panel."""
     st.markdown("### 💸 配息複利投資策略（獨立模組）")
-    st.caption("配息評分獨立計算，不讀寫原系統的 GVI、動能、QARP 或綜合評分。殖利率是近 12 個月現金股利／現價；股利發放率以近 12 個月股利與最新可得 EPS 估算。總報酬將價格變化與股息再投入分開處理。")
+    st.caption("配息評分獨立計算，不讀寫原系統的 GVI、動能、QARP 或綜合評分。殖利率用近期實際股利對照目前價格，發放率則檢查盈餘被用於配息的程度；總報酬同時考慮價格變化與股息再投入。")
+    st.info("🧠 **市場心理重點｜別只追求高殖利率**\n\n現金入帳容易讓人覺得投資有回報，但股價下跌或公司削減股利，可能抵銷甚至超過股息。高殖利率也可能是股價先大跌造成；先確認盈餘、現金流與配息紀錄，再看含息後的整體資產變化。")
     if st.session_state.get("dividend_strategy_mode") == "只使用原有策略":
         st.session_state["dividend_strategy_mode"] = "只使用配息策略"
     mode = st.radio("策略檢視模式", ["只使用配息策略", "比較策略"], index=0, horizontal=True, key="dividend_strategy_mode")
@@ -1943,9 +1944,138 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             "text": f"回測期間：{period}\n{assumptions}\n各策略樣本外結果：\n{results_text}\n整體結論：{recommendation}",
             "period": period, "assumptions": assumptions, "recommendation": recommendation}
 
+def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_pct, peg_value):
+    """Translate three research factors into cautious, plain-language behavior cues."""
+    gvi = _finite_number(gvi_value)
+    momentum = _finite_number(momentum_pct)
+    fcf_yield = _finite_number(fcf_yield_pct)
+    peg = _finite_number(peg_value)
+    notes = {}
+    checks = {}
+
+    if gvi is None:
+        notes["GVI 價值面"] = "估值資料不足，暫時無法判讀價值條件可能如何影響市場關注。"
+        checks["GVI 價值面"] = None
+    elif gvi >= 0.20:
+        notes["GVI 價值面"] = (
+            "目前達到價值研究門檻，可能吸引重視獲利能力與帳面價值的投資者進一步研究；"
+            "仍要核對財報日期、產業差異及獲利是否持續，不能只因分數較高就認定便宜。"
+        )
+        checks["GVI 價值面"] = True
+    else:
+        notes["GVI 價值面"] = (
+            "目前未達價值研究門檻，表示這項價值假設支持較弱；不代表市場一定高估，"
+            "也可能是獲利、成長或產業風險需要進一步查證。"
+        )
+        checks["GVI 價值面"] = False
+
+    if momentum is None:
+        notes["動能趨勢面"] = "有效價格資料不足，暫時不能判讀趨勢延續或追價情緒。"
+        checks["動能趨勢面"] = None
+    elif momentum >= 80:
+        notes["動能趨勢面"] = (
+            "價格接近近一年可用收盤高位，表示趨勢延續較受關注，也可能吸引順勢買盤；"
+            "同時要留意追價與交易過度擁擠的風險，不能把強勢直接當成後續上漲保證。"
+        )
+        checks["動能趨勢面"] = True
+    else:
+        notes["動能趨勢面"] = (
+            "價格離近一年可用收盤高位較遠，順勢追價的支持相對較弱；"
+            "這不等於股票便宜，可能是整理或趨勢轉弱，需搭配其他資料判讀。"
+        )
+        checks["動能趨勢面"] = False
+
+    if fcf_yield is None or peg is None:
+        notes["QARP 現金流與估值面"] = "現金流或成長估值資料不足，暫時不能判讀這項條件。"
+        checks["QARP 現金流與估值面"] = None
+    elif fcf_yield >= 2.5 and peg <= 1.5:
+        notes["QARP 現金流與估值面"] = (
+            "目前現金流與成長估值條件同時達標，可能吸引重視現金創造力及價格合理性的投資者；"
+            "仍須確認現金流能否延續、成長估計是否可靠，避免把低估值直接當成安全。"
+        )
+        checks["QARP 現金流與估值面"] = True
+    else:
+        notes["QARP 現金流與估值面"] = (
+            "目前至少一項現金流或成長估值條件未達標；這可能反映現金創造力、成長預期或價格要求需要再查證，"
+            "不能單憑未達標就說市場過度悲觀或股票太貴。"
+        )
+        checks["QARP 現金流與估值面"] = False
+
+    available_checks = [value for value in checks.values() if value is not None]
+    passed_count = sum(value is True for value in available_checks)
+    if not available_checks:
+        overall = "三個研究角度的有效資料不足，先補齊資料再比較。"
+    elif passed_count == len(available_checks):
+        overall = (
+            "目前可評估的研究條件方向一致，可能讓投資者對基本面或趨勢較有信心；"
+            "一致不等於已證明有優勢，仍要檢查共同資料偏差與樣本外結果。"
+        )
+    elif passed_count == 0:
+        overall = (
+            "目前可評估的研究條件都未達門檻，代表本次篩選支持較少；"
+            "不要為了得到看多結論而臨時放寬條件。"
+        )
+    else:
+        overall = (
+            "三個研究角度出現分歧，這是提醒使用者避免確認偏誤的時點："
+            "不要只挑支持原有看法的指標，應先找出價值、趨勢與現金流訊號不一致的原因。"
+        )
+    return {"notes": notes, "checks": checks, "overall": overall}
+
+
+def build_price_volume_market_psychology(change_pct, volume_ratio, timeframe_name):
+    """Describe price/volume behavior without claiming to know trader identities or emotions."""
+    change = _finite_number(change_pct)
+    ratio = _finite_number(volume_ratio)
+    interval = str(timeframe_name or "目前圖表週期")
+    if change is None or ratio is None:
+        return f"{interval}的價格或成交量資料不足，暫時不解讀市場參與熱度。"
+    if change > 0 and ratio >= 1.0:
+        return (
+            f"{interval}價格上升且成交量不低於近期平均，表示這段走勢的參與度較高；"
+            "可能有趨勢認同或追價行為，但成交量不能辨別買賣雙方身分。"
+        )
+    if change < 0 and ratio >= 1.0:
+        return (
+            f"{interval}價格下跌且成交量不低於近期平均，表示這段期間交易較活躍並伴隨價格走弱；"
+            "可留意賣壓或風險重新評估，但不能單憑這點判定恐慌出場。"
+        )
+    if change > 0:
+        return (
+            f"{interval}價格上升但成交量低於近期平均，走勢偏強而參與度沒有同步增加；"
+            "避免把少量成交的上漲直接當成市場普遍認同。"
+        )
+    if change < 0:
+        return (
+            f"{interval}價格下跌但成交量低於近期平均，表示價格走弱時成交參與相對較淡；"
+            "可能是觀望或買盤不足，仍需觀察後續變化。"
+        )
+    return f"{interval}價格變化接近持平；可視為目前方向不明，避免只憑單一週期推斷市場情緒。"
+
+
+def _render_market_psychology_guide(st, selected_module):
+    """Show a concise behavior-focused reading guide for the active module."""
+    guides = {
+        "📊 彩色 K 線圖與成交量": "K 線和成交量呈現已發生的交易結果。價升量增可能代表參與度提高，也可能伴隨追價；單根 K 棒不能辨認投資人身分或確定情緒。",
+        "📦 籌碼流向參考": "分點家數反映淨買方或淨賣方參與的分點廣度；分點不是投資人身分。再看淨額集中程度、價格和資料期間，避免直接貼上主力吸籌或散戶接盤標籤。",
+        "🤖 網格自動生成器": "網格較依賴價格來回波動；人在震盪時容易想低買高賣，但遇到單邊行情可能太早賣出強勢股，或在下跌中不斷加碼。先確認資金上限和價格區間，不要把近期高低點當成必然邊界。",
+        "⚖️ 網格／持有／定期定額比較": "買進持有考驗承受回撤的耐心；定期定額降低一次押時點的壓力，但不會消除虧損；網格提供規則化操作，卻可能在單邊行情落後。比較時先看自己能否承受過程中的下跌與錯過上漲。",
+        "🧪 技術指標自訂策略回測": "回測容易讓人過度相信剛好適合歷史行情的參數。先看較晚期間、交易筆數、成本和最大跌幅，再確認規則能否照做；不要只挑最好看的回測結果。",
+        "💸 配息複利策略": "高殖利率容易讓人只盯著現金入帳，忽略股價下跌或配息不持續。配息不是額外免費報酬；先看現金流和發放能力，再看總資產變化。",
+        "🚀 華爾街機構級三核心策略雷達": "價值條件容易讓人錨定帳面價值；動能條件可能放大追漲或錯過恐懼；現金流與估值條件則要防止把便宜誤當安全。三者不一致時，先查原因，不要只挑符合原有看法的指標。",
+        "🏦 台股三大法人獨立選股策略": "法人買賣超是已公布的交易流量，不等於持股變化，也不是未來方向保證。看到法人買超容易產生跟隨心理；應同時看日期、連續性、股價和成交量。",
+        "📊 當日全市場三大法人佔股本比 Top 10": "排行容易讓人把『名次高』誤當成『勝率高』。單日法人流量只說明當日交易相對股本的大小；避免追逐榜單，先確認資料日期和是否連續出現。",
+        "🧭 投資組合理財": "成本價容易成為心理錨點，虧損時也可能讓人不願重新評估。預先設定配置和風險檢查門檻，有助於降低情緒化決策；門檻仍須符合個人承受能力，不代表最佳配置。",
+    }
+    note = guides.get(selected_module)
+    if note:
+        st.info(f"🧠 市場心理重點｜{selected_module}\n\n{note}")
+        st.caption("這些是可能的行為線索，不是對投資人心理的直接測量，也不是買賣訊號。")
+
+
 def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_context, backtest_summary):
     research_mode = "必須使用網路搜尋查證近期資料，並附上可點擊的來源與日期。" if provider == "ChatGPT" else "目前使用者選擇 Gemini；只能根據提供的資料與新聞線索分析，不可假裝已完成即時網路搜尋，來源不足時明確寫出資料限制。"
-    return f"""你是謹慎的台灣與美國股票研究助理，請使用繁體中文寫一份結構清楚、白話而有資料依據的個股投資研究報告。
+    return f"""你是謹慎的台灣與美國股票研究助理，請使用繁體中文寫一份重點清楚、白話、有資料依據的個股研究報告。
 股票：{symbol}（{name}）
 量化與策略雷達資料：
 {quant_summary}
@@ -1959,16 +2089,15 @@ def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_co
 研究方式：{research_mode}
 來源優先順序：台股先查證交所、公開資訊觀測站、公司投資人關係及主管機關資料；美股先查公司投資人關係、SEC 與主管機關資料，再以可信財經媒體補充。每個重要市場或同業數據都要附來源與資料日期。
 
-請依序寫出：
-1. 市場環境：台股或美股大盤近期方向、利率／匯率／政策等與此公司相關的因素；標註資料日期。
-2. 產業與題材：此公司所屬產業近期需求、供需、技術或政策題材，區分已發生事實與市場預期。
-3. 同業競爭比較：列出 2–4 家真正可比同業，優先比較近期營收成長、毛利／營業利益率、估值或市場地位；只列有來源且期間可比的數據，其他項目註明資料不足，不要虛構。
-4. 公司優勢與風險：用具體證據說明競爭優勢、主要風險及可能推翻看多／看空觀點的條件。
-5. 本系統回測結果：列出樣本外交易數、平均每筆損益、賺賠金額比、最大回撤，指出通過或未通過的策略；若沒有策略通過，明確說「目前找不到足夠證據支持正期望策略」，不得推薦未通過者。
-6. 操作與風控：若策略通過，僅依其實際買進規則規劃分批進場、初始停損與移動停損，並建議單筆最大資金風險 0.5%–1%、部位以「可承受損失金額 ÷ 每股進場至停損價差」估算；若沒有通過，建議觀望／模擬交易與重新評估條件。不得承諾獲利或給出無來源的目標價。
-7. 最後用三點摘要：目前偏多／中性／偏空、最重要催化因素、最重要風險。
+請先用「【先看重點】」列出最多 4 點，再依序提供：
+1. **三核心條件比對與市場心理角度**：分別說明價值、價格趨勢、現金流與估值條件是否符合本次研究門檻；每項用白話說明可能吸引或削弱哪一類市場關注，以及相伴風險。資料不足就明確寫不足。三核心分數是條件比對結果，不是勝率、預期報酬或推薦排名。
+2. **市場心理觀察**：只根據提供的價格、成交量、公開法人流量、新聞與基本面證據，描述可能的樂觀、觀望、追價、恐慌或風險重新評估線索。每項標示「觀察到的資料」與「可能的心理解讀」；不要宣稱知道投資人真實想法，不要由分點或法人資料推定主力／散戶身分。
+3. **市場、產業與同業**：交代相關大盤、利率／匯率／政策、產業供需與題材；列 2–4 家真正可比同業。重要數據附來源和日期；區分事實與市場預期，資料不足就直說。
+4. **公司優勢與風險**：以可查證資料說明優勢、風險，以及可能推翻目前觀點的條件。
+5. **回測與風控**：說明樣本外交易數、每筆平均損益、賺賠金額比、最大回撤及通過狀態；沒有策略通過時，明確寫「目前找不到足夠證據支持正期望策略」。只把回測當歷史檢查。
+6. **結尾行動重點**：列出目前資料支持的偏多／中性／偏空觀察、最重要催化因素、最重要風險，以及下一步要查證的項目。沒有通過的策略不得包裝成推薦；不得承諾獲利或提供無來源目標價。
 
-只把回測當作歷史測試，不代表未來。區分數據與推論，不確定或缺漏的數據直說缺漏。"""
+格式要求：直接劃重點，使用短段落、清楚小標和條列；不要貼程式碼、不要列數學公式或工程符號。需要解釋計算結果時，請用日常語言說明「這個數字代表什麼、可能影響什麼、還要注意什麼」。心理解讀一律寫成可能性，不把推論寫成事實。不得虛構資料或來源；區分資料、推論與未知。"""
 
 def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
     """Persist drawn Plotly shapes and keep erase controls working after reruns."""
@@ -3189,53 +3318,57 @@ def _render_metric_glossary(st):
                 "**年化報酬 CAGR**：把整段期間的複利結果換算成一年，方便比較不同長度的期間；不代表每年都會得到這個報酬。",
                 "**最大回撤 MDD／最大跌幅**：歷史資產曲線從高點到後續低點的最深跌幅，用來了解曾承受的最差下跌。",
                 "**年化波動率**：報酬上下起伏的幅度估算；波動大不等於一定虧損，也不代表未來風險上限。",
-                "**夏普比率 Sharpe**：平均報酬扣除無風險利率後，除以報酬的整體起伏，再依期間換算成年化。配息與技術回測目前以 0% 無風險利率估算；數值越高表示歷史上每單位整體波動換到較多報酬，不保證未來。",
-                "**索提諾比率 Sortino**：類似夏普比率，但只把下跌波動當風險；數值越高通常代表承受下跌風險時的歷史報酬較好。",
-                "**卡瑪比率 Calmar**：年化報酬除以最大回撤幅度，用來對照報酬與最深下跌；歷史值不代表未來。",
+                "**夏普比率 Sharpe**：比較歷史報酬與整體資金起伏。數值越高，表示過去每承受一份整體起伏所換到的報酬較多；目前以 0% 無風險利率估算，不保證未來。",
+                "**索提諾比率 Sortino**：著重比較報酬與下跌時的起伏；數值較高代表過去承受下跌起伏時的報酬相對較好，不是虧損機率。",
+                "**卡瑪比率 Calmar**：把平均每年報酬和歷史最深跌幅放在一起看；過去報酬相對跌幅較高，不代表未來也能維持。",
                 "**勝率／賺錢交易比例**：扣除設定成本後賺錢的交易占比；高勝率仍可能被少數大虧損抵銷。",
-                "**賺賠金額比／獲利因子**：獲利交易金額總和除以虧損交易金額總和；大於 1 代表歷史獲利總額較高，不能單獨代表策略可靠。",
+                "**賺賠金額比／獲利因子**：比較歷史獲利交易與虧損交易的總金額；大於 1 代表過去獲利總額較高，不能單獨代表策略可靠。",
                 "**每筆平均損益／期望值**：每筆已完成交易平均賺或賠多少，通常以扣除回測成本後計算；筆數太少時容易受個別交易影響。",
                 "**持有時間比例／曝險**：回測中持有股票的時間占比；其餘時間通常是現金。",
                 "**持有 K 棒數**：從模擬進場到出場經過的圖表資料根數；不同圖表週期下，一根代表的時間不同。",
                 "**成本後報酬率**：單筆模擬交易扣除設定手續費、交易稅及滑價後的損益比例；成本仍是估算值。",
                 "**風險報酬比／目標停利價**：依進場價、停損距離及設定倍數推算的目標價；是模擬規則，不是獲利機率。",
                 "**回撤期間**：資產低於前次高點的連續資料根數；不同圖表週期不宜直接比較根數。",
+                "**心理提醒**：漂亮的回測成績容易讓人過度自信，虧損紀錄也容易讓人只想等回本；先看較晚期間、交易成本和最深跌幅，避免只挑支持自己想法的結果。",
             ]),
             ("價格、技術與選股指標", [
                 "**均線乖離率**：現價相對指定期間平均價高或低多少百分比；用來觀察短期偏離，不是必然反轉訊號。",
                 "**量比**：目前成交量與近期平均量相比的倍數；高於 1 代表量比平均活躍，不能判斷買賣方向。",
-                "**價量動能估算**：本程式將價格變化乘上相對成交量，再做平滑；只是一種價量趨勢代理，不是實際籌碼集中度、法人進出或持股變化。",
+                "**價量動能估算**：綜合價格漲跌與成交量相對熱度，觀察趨勢參與度；只是價量參考，不是實際籌碼集中度、法人進出或持股變化。",
                 "**RSI 相對強弱指標**：依近期上漲與下跌幅度計算的 0–100 動能指標；描述近期漲跌力道，不代表單獨的買賣訊號。",
                 "**KD 隨機指標**：比較收盤價在近期高低區間的位置，K、D 線是平滑後的變化；主要描述短期動能。",
                 "**MACD**：兩條不同速度的指數移動平均線之差；柱狀圖顯示 MACD 與訊號線的差距，用來觀察趨勢動能變化。",
                 "**布林通道**：以移動平均線和近期波動範圍形成上下界；價格靠近通道邊緣表示位置偏向區間一側，不保證反轉。",
                 "**ATR 平均真實波幅**：近期價格區間的平均大小，用來估算波動幅度；不表示漲跌方向。",
                 "**黃金交叉／死亡交叉**：快均線向上穿越慢均線／向下跌破慢均線；是歷史價格訊號，可能落後且會反覆失效。",
-                "**GVI 成長價值指標**：本程式以每股淨值／股價乘上 ROE 五年複利估算；是研究用估值分數，依賴財報資料與假設，不是合理價或報酬預測。",
+                "**GVI 成長價值指標**：綜合帳面價值、股價與獲利能力估算的研究分數；依賴財報資料與假設，不是合理價或報酬預測。",
                 "**ROE 股東權益報酬率**：公司用股東投入的權益創造盈餘的比例；須留意產業差異、財報期間與一次性項目。",
-                "**每股淨值／PB 股價淨值比**：每股淨值是帳面資產扣負債後分攤到每股；PB 是股價除以每股淨值，用來比較市價相對帳面價值。",
-                "**動能／距近 252 根高點比例**：現價除以可取得的近 252 根收盤最高價；較接近 100% 代表價格靠近期間高點。歷史資料少於 50 根時不評分。",
-                "**自由現金流收益率**：自由現金流除以市值的百分比，粗略比較現金流相對公司規模；來源與年度可能落後股價。",
-                "**PEG 本益成長比**：以本益比除以盈餘成長率估算；成長率資料品質會直接影響結果，不宜跨來源直接比較。",
+                "**每股淨值／PB 股價淨值比**：每股淨值是帳面資產扣除負債後分攤到每股的金額；PB 顯示股價相對帳面價值的高低，跨產業比較要小心。",
+                "**動能／距近 252 根高點比例**：觀察現價離近一年可取得的最高收盤價有多近；越接近高點代表近期趨勢較強，也要留意追價風險。歷史資料少於 50 根時不評分。",
+                "**自由現金流收益率**：比較公司創造的自由現金流相對於公司市值的大小；資料期間可能落後股價，也可能受一次性現金流影響。",
+                "**PEG 本益成長比**：把公司估值與預期盈餘成長放在一起觀察；成長預估不可靠時，這個數字也會失真。",
                 "**策略評分／排名**：依本次股票池和已開啟條件做相對排序，不是通過機率、預期報酬或買進建議。",
+                "**心理提醒**：價格靠近高點時容易引發追價，快速下跌時容易引發恐慌；指標只提供觀察線索，不能直接量出所有投資人的情緒。",
             ]),
             ("配息、網格與法人欄位", [
-                "**現金殖利率**：近 12 個月現金股利除以目前股價；未來股利可能變動，不能視為固定利息。",
-                "**股利發放率**：近 12 個月股利與最新可得 EPS 的比值；高於 100% 可能表示股利超過當期盈餘，需查明原因。",
+                "**現金殖利率**：用近 12 個月實際發放的現金股利，對照目前股價觀察回饋規模；未來股利可能變動，不能視為固定利息。",
+                "**股利發放率**：觀察近期股利相對公司最新可得盈餘的高低；高於 100% 可能表示股利超過當期盈餘，需查明原因。",
                 "**配息品質分數**：依配息紀錄、盈餘、現金流、發放率、安全性與估值等目前啟用條件加權整理的 0–100 分；不是配息保證或未來報酬機率。",
                 "**利息保障倍數**：營業獲利相對利息支出的倍數；越低通常代表支付利息的緩衝較小，並受資料口徑影響。",
                 "**資料覆蓋率**：目前可取得的必要資料占比；缺漏越多，評分越不完整，不等於公司品質分數。",
                 "**網格偏離現價**：每個觸發價與目前價格的百分比差距；觸發價是規劃參考，不是券商掛單。",
                 "**定期定額累計投入**：模擬期間投入金額加總；和期末資產相比才能看投入後的損益。",
-                "**佔股本比**：法人買進、賣出或淨買賣超股數除以官方已發行普通股數；是當日交易量相對股本的比例，不等於法人持股比例。淨買賣超 = 買進股數 − 賣出股數。",
+                "**佔股本比**：顯示法人當日買進、賣出或淨買賣超規模相對於公司已發行股數的大小；不是法人持股比例。淨買賣超表示買進與賣出相抵後的方向和數量。",
+                "**心理提醒**：高殖利率容易讓人只注意現金入帳、忽略價格與配息能否維持；法人買超也容易引發跟隨心理，兩者都需要搭配公司狀況和多日資料。",
             ]),
             ("投資組合欄位", [
-                "**目前配置比例**：各類資產市值除以組合總市值；價格與匯率更新狀態會影響結果。",
-                "**配置偏離（百分點）**：目前比例減目標比例。例如目前 45%、目標 40%，偏離是 +5 個百分點。",
-                "**調整金額參考**：目標市值減目前市值；正數代表相對不足、負數代表相對超出，未扣交易成本或稅費。",
-                "**未實現損益估算**：目前市值減記錄成本；不含完整稅費、已領股息或所有外部資金流。",
+                "**目前配置比例**：顯示各類資產占整個組合的比重；價格與匯率更新狀態會影響結果。",
+                "**配置偏離（百分點）**：顯示目前資產比重比目標高或低多少；例如目前 45%、目標 40%，代表高出 5 個百分點。",
+                "**調整金額參考**：估算回到目標配置所需的金額差；正數代表相對不足、負數代表相對超出，未扣交易成本或稅費。",
+                "**未實現損益估算**：比較目前估值和記錄成本後的帳面差額；不含完整稅費、已領股息或所有外部資金流。",
                 "**快照估算回撤**：手動記錄的組合市值與曾記錄高點相比的變化；未調整入金／出金，只能粗略參考。",
                 "**最低保留現金**：低於設定金額時顯示提醒；系統不會因此自動買賣或更改配置建議。",
+                "**心理提醒**：買入成本常成為心理錨點，虧損時可能不願重新檢視；依事前訂好的配置和風險門檻檢查，能減少臨時追高或恐慌賣出。",
             ]),
         ]
         for heading, definitions in sections:
@@ -4028,6 +4161,7 @@ if auth_user:
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
     )
+    _render_market_psychology_guide(st, selected_module)
 
     def _jump_to_stock_diagnosis(ticker):
         st.session_state["selected_stock_input"] = str(ticker).strip().upper()
@@ -4354,16 +4488,16 @@ if auth_user:
                     with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="資料來源最近更新的價格；可能不是即時成交價，請留意下方資料時間。"); st.caption(f"📢 即時報價 ({cache_time_str})")
                     
                     if bv_val is not None:
-                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="本程式以每股淨值／股價乘上 ROE 五年複利估算的研究指標；不是合理價或未來報酬預測。"); st.caption("📢 最新重算")
+                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；不是合理價或未來報酬預測。"); st.caption("📢 最新重算")
                         with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str, help="公司以股東權益創造盈餘的比率；需搭配產業特性及財報期間判讀。"); st.caption(f"📢 {roe_src}")
                         with gc4: st.metric(label="📖 每股淨值", value=bv_str, help="公司帳面資產扣除負債後，平均分配到每一股的金額；不等於股票的市場價格。"); st.caption(f"📢 {bv_src}")
-                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="股價除以每股淨值；表示市場價格相對帳面價值的倍數，跨產業比較要小心。"); st.caption("📢 溢價程度")
+                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="顯示目前股價相對每股帳面價值的倍數；產業間差異大，跨產業比較要小心。"); st.caption("📢 溢價程度")
                     else:
                         with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
                 else:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
                     with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)", help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
-                    with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比為最近一根 K 棒成交量除以近 5 根平均量；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
+                    with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比將最近一根 K 棒的成交量和近 5 根平均量比較；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
                     with gc3: st.metric(label="🎯 5根均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off", help="最新收盤價相對近 5 根收盤均價的百分比差距；用來觀察短期偏離，不是反轉訊號。")
                     with gc4: st.metric(label="🔺 最近一根 K 棒最高價", value=f"{high_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最高價。")
                     with gc5: st.metric(label="🔻 最近一根 K 棒最低價", value=f"{low_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最低價。")
@@ -4421,10 +4555,10 @@ if auth_user:
                     reasons['GVI 價值雷達'] = "基本面資料不足，未評分。"
                 elif gvi_val >= 0.20:
                     scores['GVI 價值雷達'] = 90 if gvi_val >= 0.35 else 75
-                    reasons['GVI 價值雷達'] = f"GVI={gvi_val:.4f}，符合目前設定的研究門檻；門檻尚未經樣本外驗證。"
+                    reasons['GVI 價值雷達'] = f"成長價值分數為 {gvi_val:.4f}，達到目前設定的價值研究門檻；尚未證明能帶來較佳績效。"
                 else:
                     scores['GVI 價值雷達'] = 40
-                    reasons['GVI 價值雷達'] = f"GVI={gvi_val:.4f}，低於目前設定的研究門檻。"
+                    reasons['GVI 價值雷達'] = f"成長價值分數為 {gvi_val:.4f}，未達目前設定的價值研究門檻。"
 
                 # 2. 動能突破策略評分
                 if momentum_score is None:
@@ -4432,10 +4566,10 @@ if auth_user:
                     reasons['動能突破雷達'] = "有效歷史收盤資料少於 50 根，動能值缺失且不納入評分。"
                 elif momentum_score >= 80:
                     scores['動能突破雷達'] = 95 if momentum_score >= 95 else 85
-                    reasons['動能突破雷達'] = f"現價／近 252 根可用資料最高收盤價={momentum_score:.1f}%，符合目前設定的研究門檻。"
+                    reasons['動能突破雷達'] = f"目前價格約在近一年可用最高收盤價的 {momentum_score:.1f}%，達到趨勢研究門檻。"
                 else:
                     scores['動能突破雷達'] = 50
-                    reasons['動能突破雷達'] = f"現價／近 252 根可用資料最高收盤價={momentum_score:.1f}%，低於目前設定的研究門檻。"
+                    reasons['動能突破雷達'] = f"目前價格約在近一年可用最高收盤價的 {momentum_score:.1f}%，未達趨勢研究門檻。"
 
                 # 3. QARP 現金流策略評分
                 if fcf_yield_main is None or peg_val_main is None:
@@ -4443,10 +4577,14 @@ if auth_user:
                     reasons['QARP 現金流雷達'] = "自由現金流收益率或 PEG 資料不足，未評分。"
                 elif fcf_yield_main >= 2.5 and peg_val_main <= 1.5:
                     scores['QARP 現金流雷達'] = 90
-                    reasons['QARP 現金流雷達'] = f"自由現金流收益率={fcf_yield_main:.2f}%、PEG={peg_val_main:.2f}，符合目前設定的研究門檻。"
+                    reasons['QARP 現金流雷達'] = f"現金流收益參考為 {fcf_yield_main:.2f}%，成長估值參考為 {peg_val_main:.2f}，兩項均達目前研究門檻。"
                 else:
                     scores['QARP 現金流雷達'] = 45
-                    reasons['QARP 現金流雷達'] = f"自由現金流收益率={fcf_yield_main:.2f}%、PEG={peg_val_main:.2f}，未同時符合目前設定的研究門檻。"
+                    reasons['QARP 現金流雷達'] = f"現金流收益參考為 {fcf_yield_main:.2f}%，成長估值參考為 {peg_val_main:.2f}；至少一項未達目前研究門檻。"
+
+                three_core_psychology = build_three_core_market_psychology_notes(
+                    gvi_val, momentum_score, fcf_yield_main, peg_val_main
+                )
 
                 # 顯示目前門檻的符合度，不把它解讀為實證優勢或進場建議。
                 valid_scores = {name: score for name, score in scores.items() if score is not None}
@@ -4462,19 +4600,29 @@ if auth_user:
                 else:
                     valuation_color = "#cc0000"
 
-                fin_src_display = f"BV: {bv_src} / ROE: {roe_src}"
+                fin_src_display = f"每股淨值來源：{bv_src}；ROE 來源：{roe_src}"
 
-                advice = f"📊 **目前門檻相符項目：【{best_strategy}】（研究用分數：{best_score}分）**<br><br>"
+                advice = f"📊 **目前研究分數最高的單項條件：【{best_strategy}】（研究比對分數：{best_score}分，不是勝率）**<br><br>"
                 advice += f"📌 **採用數據源**：{fin_src_display}<br>"
                 if was_missing_in_db:
                     advice += f"📡 **備援提示**：自動啟動多層次財報遞補機制以確保診斷不中斷。<br>"
                 advice += f"🔍 **門檻比對摘要**：<br>"
+                psychology_key_by_strategy = {
+                    "GVI 價值雷達": "GVI 價值面",
+                    "動能突破雷達": "動能趨勢面",
+                    "QARP 現金流雷達": "QARP 現金流與估值面",
+                }
                 for strat, sc in scores.items():
                     icon = "●" if strat == best_strategy else "·"
-                    score_label = f"{sc}分" if sc is not None else "未評分"
-                    advice += f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} **{strat}**（{score_label}）：{reasons[strat]}<br>"
+                    score_label = f"研究比對分數 {sc} 分" if sc is not None else "資料不足，未評分"
+                    psych_label = three_core_psychology["notes"].get(psychology_key_by_strategy.get(strat), "")
+                    advice += (
+                        f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} **{strat}**（{score_label}）：{reasons[strat]}<br>"
+                        f"&nbsp;&nbsp;&nbsp;&nbsp;🧠 **市場心理角度**：{psych_label}<br>"
+                    )
                 advice += (
-                    "<br>⚠️ **解讀方式**：以上只表示目前數值與程式門檻的相符程度。各因子尚未完成獨立樣本外比較，"
+                    f"<br>🧭 **三核心合併解讀**：{three_core_psychology['overall']}<br>"
+                    "⚠️ **解讀方式**：以上只表示目前數值與研究門檻的相符程度。各因子尚未完成獨立樣本外比較，"
                     "不代表長期報酬優勢，也不構成買賣或部位建議。"
                 )
 
@@ -4554,11 +4702,24 @@ if auth_user:
                                     company_context = collect_stock_research_context(
                                         stock_obj_main, info_obj_main, market_snapshot
                                     )
+                                    ai_psychology = build_three_core_market_psychology_notes(
+                                        gvi_val, momentum_score, fcf_yield_main, peg_val_main
+                                    )
+                                    ai_psychology_lines = [
+                                        f"• {factor}：{interpretation}"
+                                        for factor, interpretation in ai_psychology["notes"].items()
+                                    ]
+                                    ai_psychology_lines.extend([
+                                        f"• 三核心合併觀察：{ai_psychology['overall']}",
+                                        f"• 價格與成交量：{build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf)}",
+                                        "• 解讀限制：以上是市場行為線索，不是對投資人身分或真實情緒的判定，也不是買賣訊號。",
+                                    ])
+                                    market_psychology_brief = "\n".join(ai_psychology_lines)
                                     quant_summary = (
-                                        f"GVI={gvi_str}；ROE={roe_str}；PB={pb_str}；"
-                                        f"三核心目前門檻相符項目={best_strategy}（研究用分數 {best_score}/100，尚未完成獨立樣本外驗證，不代表績效優勢）；"
-                                        f"短中期籌碼動能={chip_status_text}；"
-                                        f"目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%"
+                                        f"成長價值研究分數={gvi_str}；股東權益報酬率={roe_str}；股價淨值比={pb_str}；"
+                                        f"目前研究比對分數最高的單項條件={best_strategy}（{best_score}/100，這是條件比對分數，不是勝率）；"
+                                        f"價量動能估算={chip_status_text}；目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%\n"
+                                        f"三核心白話心理解讀：\n{market_psychology_brief}"
                                     )
                                     ai_prompt = build_ai_investment_prompt(
                                         selected_stock, c_name, provider_name, quant_summary,
@@ -4576,12 +4737,17 @@ if auth_user:
                                     st.session_state[f"{report_key}_provider"] = provider_name
                                     st.session_state[f"{report_key}_backtest"] = ai_backtest
                                     st.session_state[f"{report_key}_sources"] = ai_sources
+                                    st.session_state[f"{report_key}_psychology"] = market_psychology_brief
                                 except Exception as ai_e:
                                     st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
                     
                     if f"ai_report_{selected_stock}" in st.session_state:
                         report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
                         st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
+                        saved_psychology_brief = st.session_state.get(f"ai_report_{selected_stock}_psychology")
+                        if saved_psychology_brief:
+                            st.markdown("#### 🧠 市場心理重點")
+                            st.markdown(saved_psychology_brief)
                         ai_report = st.session_state[f"ai_report_{selected_stock}"]
                         st.markdown(ai_report)
                         saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
@@ -4629,9 +4795,14 @@ if auth_user:
                                     )
                                 else:
                                     email_subject = f"AI 個股分析｜{selected_stock} {c_name}"
+                                    email_psychology_brief = st.session_state.get(
+                                        f"ai_report_{selected_stock}_psychology",
+                                        "此報告產生於市場心理摘要功能加入前；目前報告內可能已有心理面分析。",
+                                    )
                                     email_body = (
                                         f"個股：{selected_stock} {c_name}\n"
                                         f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                                        f"【市場心理重點】\n{email_psychology_brief}\n\n"
                                         f"{report_provider} 分析結果：\n\n{ai_report}"
                                     )
                                     try:
@@ -4686,6 +4857,7 @@ if auth_user:
                         ma_display_html += f"<span style='color:{c}; font-weight:bold; margin-right:8px;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
                 ma_display_html += "</div>"
                 st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
+                st.info("🧠 市場行為觀察：" + build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf))
 
                 with st.expander("🎨 畫線顏色與粗細設定", expanded=False):
                     draw_color_col, draw_width_col = st.columns(2)
@@ -5024,6 +5196,50 @@ if auth_user:
                                 f"該分點資料期間合計{branch_direction} {abs(net_shares):,.0f} 股。"
                                 "價格趨勢與分點資料涵蓋期間可能不同，請分開解讀；這是市場觀察參考，不代表因果或買賣訊號。"
                             )
+                            st.markdown("##### 🧠 市場心理觀察：怎麼理解這些分點數字？")
+                            buyer_count = int(branch_summary["buyers"])
+                            seller_count = int(branch_summary["sellers"])
+                            if buyer_count > seller_count:
+                                st.markdown(
+                                    f"**參與廣度：** 淨買超分點有 {buyer_count} 個，淨賣超分點有 {seller_count} 個，"
+                                    "表示這份資料中淨買方分點參與面較廣。這可以作為買方參與較廣的線索，"
+                                    "但不能推論買方是散戶，或賣方是主力。"
+                                )
+                            elif seller_count > buyer_count:
+                                st.markdown(
+                                    f"**參與廣度：** 淨賣超分點有 {seller_count} 個，淨買超分點有 {buyer_count} 個，"
+                                    "表示這份資料中淨賣方分點參與面較廣。這可以作為賣方參與較廣的線索，"
+                                    "但不能推論賣方是散戶，或買方是主力。"
+                                )
+                            else:
+                                st.markdown(
+                                    f"**參與廣度：** 淨買超與淨賣超分點數相同（各 {buyer_count} 個）；"
+                                    "家數本身沒有顯示哪一方參與面較廣。"
+                                )
+
+                            concentration_notes = []
+                            if buy_share is not None:
+                                concentration_notes.append(
+                                    f"前 15 個淨買超分點占全部淨買超 {buy_share:.1f}%"
+                                )
+                            if sell_share is not None:
+                                concentration_notes.append(
+                                    f"前 15 個淨賣超分點占全部淨賣超 {sell_share:.1f}%"
+                                )
+                            if concentration_notes:
+                                st.markdown(
+                                    "**淨流向集中度：** " + "；".join(concentration_notes) +
+                                    "。比例較高表示該方向的淨額較集中在排名靠前的分點；它不是持股集中度，也不能辨認分點背後的投資人。"
+                                )
+                            if trend_label != "資料不足":
+                                st.markdown(
+                                    f"**價格情緒線索：** 近 20 筆收盤價相對平均價呈{trend_label}；"
+                                    "可與分點流向一起觀察市場是否同向，但兩者期間若不一致，就不能據此判定背離或趨勢延續。"
+                                )
+                            st.caption(
+                                "市場心理不是這些欄位直接測得的結果。單日或單份 CSV 只能描述該資料範圍的成交分布；"
+                                "請勿只憑分點家數判定吸籌、出貨或預測漲跌。"
+                            )
                             breakdown = branch_summary.get("breakdown")
                             if isinstance(breakdown, pd.DataFrame) and not breakdown.empty:
                                 top_rows = pd.concat([breakdown.head(10), breakdown.nsmallest(10, "買賣超")]).drop_duplicates()
@@ -5259,6 +5475,7 @@ if auth_user:
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
                 st.caption("「網格層級」是價格分段；「目標觸發價」是策略參考價；「偏離現價」顯示距離；「預計動作」與資金管理方式是依上方假設試算，並非實際掛單或保證成交。")
+                st.caption("🧠 心理角度：網格把低買高賣變成固定規則，有助減少臨場猶豫；但若價格持續單向移動，使用者可能因錨定原本區間而不願調整，或因害怕錯過而追著改參數。先訂好資金上限和檢視頻率。")
 
                 st.warning(
                     "⚠️ **操盤手複利與風險特別提示：**\n"
@@ -5465,6 +5682,7 @@ if auth_user:
                         "年化報酬(%)": "{:+.2f}%", "最大跌幅(%)": "{:.2f}%",
                     }, na_rep="—"), use_container_width=True, hide_index=True)
                     st.caption("累計投入是投入金額加總；期末資產是回測末端估值；總損益為兩者差額。CAGR 以實際資料起訖日期計算，期間不足半年時不顯示年化值。定期定額年化報酬依每次投入日期計算；最大跌幅先扣除新增投入的影響。其他兩種方式從期初投入全部預算。三者均未另計股息；買進持有與定期定額以持倉市值估值，未假設期末賣出。")
+                    st.caption("🧠 心理角度：買進持有考驗承受回撤的耐心；定期定額可減少一次押時點的壓力，但不會消除下跌；網格提供規則化操作，遇到長期單邊行情卻可能太早賣出或持續加碼。結果要配合自己能承受的過程，而不只挑期末數字最高的做法。")
 
                     strat_display_name = grid_sim_strategy.split(" ")[1]
 
@@ -5815,14 +6033,14 @@ if auth_user:
                         metric_row1[2].metric("從高點算起最大跌幅", show_pct(strategy_metrics["mdd"]),
                                               help="回測期間曾經從資產高點跌到多低。數字越接近零，代表歷史上最深的跌幅越小。")
                         metric_row1[3].metric("夏普比率 Sharpe", show_number(strategy_metrics["sharpe"]),
-                                              help="平均每根 K 棒報酬除以報酬標準差，再依目前圖表週期的每年 K 棒數換算成年化；本頁以 0% 無風險利率估算。衡量每單位整體波動換到多少歷史報酬，不保證未來。")
+                                              help="把歷史報酬和整體起伏一起衡量，再換算成年化；本頁以 0% 無風險利率估算。數值較高代表過去每承受相同程度起伏時，換到的報酬較多，不保證未來。")
                         metric_row2 = st.columns(4)
                         metric_row2[0].metric("索提諾比率 Sortino", show_number(strategy_metrics["sortino"]),
                                               help="平均報酬相對於下跌波動的比值並年化；只把低於 0 的報酬視為下行風險，並非虧損機率。")
                         metric_row2[1].metric("賺錢交易比例", show_pct(strategy_metrics["win_rate"]),
                                               help="所有交易中，扣除費用後仍賺錢的比例。比例高不一定代表總收益高，還要一起看每次賺多少、賠多少。")
                         metric_row2[2].metric("賺賠金額比", show_number(strategy_metrics["profit_factor"]),
-                                              help="賺錢交易金額總和除以賠錢交易金額總和。若數值是 1.5，代表歷史模擬中每賠 1 元，約賺 1.5 元；已扣設定費用。沒有賠錢交易時不顯示。")
+                                              help="比較賺錢交易和賠錢交易的金額總和。若數值是 1.5，代表歷史模擬中每賠 1 元，約賺 1.5 元；已扣設定費用。沒有賠錢交易時不顯示。")
                         metric_row2[3].metric("持有股票的時間比例", show_pct(strategy_metrics["exposure"]),
                                               help="回測期間有持有股票的時間占全部時間多少；其餘時間策略資金留在現金。")
 
@@ -6119,6 +6337,14 @@ if auth_user:
                 "缺少歷史點時財報時不會以當期基本面回填過去，避免前視偏誤。"
             )
 
+        st.info(
+            "🧠 **三核心的市場心理讀法**\n\n"
+            "**價值（GVI）：**可能吸引重視公司獲利與帳面價值的投資者，但低估值不等於安全。\n\n"
+            "**趨勢（動能）：**接近近期高位可能吸引順勢買盤，也要留意追價過度與交易擁擠。\n\n"
+            "**現金流與估值（QARP）：**可能吸引重視現金創造力和價格合理性的投資者，仍要查證現金流是否持續、成長預估是否可靠。\n\n"
+            "條件分歧時先找出原因，不要只挑支持原有看法的指標；分數只表示本次條件比對，不是勝率或績效保證。"
+        )
+
         st.markdown("#### ✍️ 操盤手自訂觀察代碼掃描區")
         st.caption("每個欄位輸入一檔股票代碼。台股上市請加 .TW、上櫃請加 .TWO；美股輸入代碼即可。下方掃描結果沿用台股／美股核心池的明細欄位與策略評分方式。")
         watch_defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
@@ -6202,7 +6428,7 @@ if auth_user:
             if result_view.empty:
                 st.info("本次無符合標的。已完整套用目前勾選的條件，沒有放寬條件或回退顯示未通過的股票。")
                 return
-            st.caption("GVI、動能、自由現金流收益率與 PEG 是研究用估算；策略評分是本次股票池內相對排名，不是預期報酬。『價量動能估算』由近期價格與成交量推算，並非實際籌碼或法人資料。")
+            st.caption("GVI、動能、自由現金流與成長估值是研究用估算；策略評分只表示本次股票池中的相對排序，不是勝率或預期報酬。價格接近高位可能吸引順勢買盤，也可能增加追價風險；價量動能不是實際籌碼或法人資料。")
             st.caption("點選明細表中的股票列，再選擇個股即時診斷或加入操盤手自訂觀察代碼。")
             table_event = st.dataframe(
                 result_view,
@@ -6405,13 +6631,14 @@ if auth_user:
     if selected_module == "🏦 台股三大法人獨立選股策略":
         st.markdown("---")
         st.markdown("### 🏦 台股三大法人獨立選股策略")
-        st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比；淨買賣超為買進減賣出，正數偏買超、負數偏賣超，這不代表持股比例。")
+        st.caption("只掃描自訂觀察名單中的台股普通股。百分比是把法人當日交易量放到公司已發行股數的規模中比較；正值代表買進多於賣出，負值代表賣出多於買進。這是當日交易流量，不是法人持股比例，也不代表後續方向。")
         inst_col1, inst_col2 = st.columns([1, 2])
         with inst_col1:
             inst_investor = st.selectbox("篩選法人", ['外資', '投信', '自營商'], key='inst_screen_investor')
             inst_min_net_pct = st.number_input("淨買賣超佔股本至少 (%)", min_value=-100.0, max_value=100.0, value=0.0, step=0.01, format='%.2f', key='inst_min_net_pct')
         with inst_col2:
-            st.write("篩選條件：所選法人的「買賣超佔股本比」大於等於設定值。表格仍同時列出外資、投信、自營商三方買進、賣出及買賣超佔股本比。")
+            st.write("篩選條件：所選法人的當日淨買進規模需達到你設定的門檻。表格仍列出外資、投信、自營商三方的買進、賣出與淨流向規模，方便比較交易方向和強弱。")
+            st.caption("🧠 **心理讀法：**單日法人買超容易引發跟隨心理，但它只代表已發生的交易。觀察資料日期、連續性、股價與成交量；不能由買超直接推論法人正在吸籌或股價必漲。")
         if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
             taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
             if not taiwan_tickers:
@@ -6436,7 +6663,8 @@ if auth_user:
 
     if selected_module == "📊 當日全市場三大法人佔股本比 Top 10":
         st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
-        st.caption("佔股本比 = 當日法人買進、賣出或淨買賣超股數 ÷ 官方已發行普通股數；淨買賣超 = 買進 − 賣出。正數為買超、負數為賣超，比例不是法人持股比例。榜單依淨買賣超佔股本比由高至低及低至高排序，另列買進與賣出比率最高前 10 檔。上市與上櫃分別採各自官方最新資料日。點選任一表格中的股票列，可選擇即時診斷或加入自訂觀察代碼。")
+        st.caption("表格的百分比把法人當日買進、賣出或淨流向，換成相對公司已發行股數的規模，並非法人持股比例。正值代表買進多於賣出，負值代表賣出多於買進。榜單列出淨買超較高、淨賣超較高，以及買進或賣出較活躍的前 10 檔；上市與上櫃採各自官方最新資料日。點選股票列，可選擇即時診斷或加入自訂觀察代碼。")
+        st.info("🧠 **市場心理重點：**榜單名次容易讓人把「排前面」誤認成「比較會漲」。單日交易規模不代表持倉變化或未來方向；先看資料日期，再觀察是否連續出現，以及價格有沒有同步反應。")
         if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
             st.session_state['inst_top10_loaded'] = True
             with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
@@ -6609,7 +6837,7 @@ if auth_user:
             if minimum_cash_floor > 0 and type_values["cash"] < minimum_cash_floor:
                 st.warning(f"目前現金市值 NT${type_values['cash']:,.0f}，低於設定的最低保留現金 NT${minimum_cash_floor:,.0f}。此為提醒，不會自動執行交易。")
             metrics = st.columns(4)
-            with metrics[0]: st.metric("組合總市值（TWD）", f"NT${total_value:,.0f}", help="各筆持倉數量 × 最新價格 × 換算台幣匯率後加總；價格與匯率需由使用者維護。")
+            with metrics[0]: st.metric("組合總市值（TWD）", f"NT${total_value:,.0f}", help="依各筆持倉數量、最新價格與台幣換算匯率估算後加總；價格與匯率需由使用者維護。")
             with metrics[1]: st.metric("股票市值", f"NT${type_values['stock']:,.0f}", f"{type_values['stock']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="股票類持倉的台幣市值；下方百分比是股票市值占組合總市值的比例。")
             with metrics[2]: st.metric("債券市值", f"NT${type_values['bond']:,.0f}", f"{type_values['bond']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="債券類持倉的台幣市值；下方百分比是債券市值占組合總市值的比例。")
             with metrics[3]: st.metric("現金市值", f"NT${type_values['cash']:,.0f}", f"{type_values['cash']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="現金類持倉的台幣市值；下方百分比是現金占組合總市值的比例。")
@@ -6634,7 +6862,7 @@ if auth_user:
                 "目標比例(%)": "{:.2f}%", "偏離(百分點)": "{:+.2f}",
                 "目標市值(TWD)": "NT${:,.0f}", "調整金額參考(TWD)": "NT${:+,.0f}"
             }), use_container_width=True, hide_index=True)
-            st.caption("持倉明細中的台幣市值 = 數量 × 最新價格 × 換算匯率；未實現損益估算 = 台幣市值 − 已填台幣成本。目前比例 = 目前市值 ÷ 組合總市值；偏離 = 目前比例 − 目標比例（以百分點表示）；目標市值 = 組合總市值 × 目標比例。調整金額參考 = 目標市值 − 目前市值，正數代表相對目標不足、負數代表相對目標超出。此數值不是下單指示，尚未納入交易成本、稅費、價差、流動性與稅務差異。")
+            st.caption("**欄位怎麼看：**台幣市值是依持有數量、最新價格與匯率估算；未實現損益是目前估值和你填寫成本的差額；目前比例呈現各資產占組合的比重；配置偏離顯示與目標比重相差多少。調整金額為回到目標配置所需的估算差額，正數表示相對不足、負數表示相對超出。成本價容易變成心理錨點，應同時重新檢查持有理由和整體風險；調整金額不是下單指示，尚未計入交易成本、稅費、價差、流動性與稅務差異。")
             st.caption("點選下方持倉股票列，可選擇使用個股即時診斷或加入操盤手自訂觀察代碼。")
             holdings_view = calc[["代碼", "名稱", "資產類型", "幣別", "數量", "最新價格", "換算台幣匯率", "台幣市值", "台幣成本", "未實現損益估算", "更新時間"]]
             holdings_display = holdings_view.copy()
