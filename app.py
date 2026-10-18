@@ -1406,6 +1406,27 @@ def init_db():
         updated_at TEXT NOT NULL,
         PRIMARY KEY(symbol, trade_date)
     )''')
+    # Keep public-market Top 10 snapshots so repeated appearances can be
+    # counted from observed report dates without inventing missing sessions.
+    c.execute('''CREATE TABLE IF NOT EXISTS institutional_top10_appearances (
+        snapshot_date TEXT NOT NULL,
+        investor TEXT NOT NULL,
+        ranking_type TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        stock_name TEXT NOT NULL DEFAULT '',
+        market TEXT NOT NULL DEFAULT '',
+        data_date TEXT NOT NULL DEFAULT '',
+        rank_value REAL,
+        captured_at TEXT NOT NULL,
+        PRIMARY KEY(snapshot_date, investor, ranking_type, ticker)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS institutional_top10_snapshot_days (
+        snapshot_date TEXT NOT NULL,
+        investor TEXT NOT NULL,
+        ranking_type TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        PRIMARY KEY(snapshot_date, investor, ranking_type)
+    )''')
     chip_cols = [row[1] for row in c.execute("PRAGMA table_info(chip_flow_observations)").fetchall()]
     if "volume_shares" not in chip_cols:
         c.execute("ALTER TABLE chip_flow_observations ADD COLUMN volume_shares REAL")
@@ -3423,6 +3444,137 @@ def build_institutional_rankings(trades, shares_by_code, limit=10):
         rows.append(row)
     return pd.DataFrame(rows)
 
+
+def institutional_top10_sort_specs(investor):
+    """Return the four stable Top 10 category definitions used for display and tracking."""
+    return [
+        (f'{investor}買賣超佔股本比(%)', False, '買賣超佔股本比最高'),
+        (f'{investor}買賣超佔股本比(%)', True, '買賣超佔股本比最低'),
+        (f'{investor}買進佔股本比(%)', False, '買進佔股本比最高'),
+        (f'{investor}賣出佔股本比(%)', False, '賣出佔股本比最高'),
+    ]
+
+
+def save_institutional_top10_snapshot(ranking_data):
+    """Persist current Top 10 membership once per latest available report date."""
+    if not isinstance(ranking_data, pd.DataFrame) or ranking_data.empty or '資料日期' not in ranking_data:
+        return None, 0
+    if not {'上市', '上櫃'}.issubset(set(ranking_data.get('市場', pd.Series(dtype=str)).dropna().astype(str))):
+        return None, 0
+    normalized_dates = ranking_data['資料日期'].map(_normalize_chip_trade_date).dropna()
+    if normalized_dates.empty:
+        return None, 0
+    snapshot_date = str(normalized_dates.max())
+    captured_at = pd.Timestamp.now(tz='Asia/Taipei').isoformat(timespec='seconds')
+    rows = []
+    snapshot_days = []
+    for investor in ('外資', '投信', '自營商'):
+        for value_column, ascending, ranking_type in institutional_top10_sort_specs(investor):
+            snapshot_days.append((snapshot_date, investor, ranking_type, captured_at))
+            if value_column not in ranking_data:
+                continue
+            ranked = ranking_data.dropna(subset=[value_column]).sort_values(value_column, ascending=ascending).head(10)
+            for _, item in ranked.iterrows():
+                rows.append((
+                    snapshot_date,
+                    investor,
+                    ranking_type,
+                    str(item.get('股票代碼') or ''),
+                    str(item.get('股票名稱') or ''),
+                    str(item.get('市場') or ''),
+                    _normalize_chip_trade_date(item.get('資料日期')) or '',
+                    _finite_number(item.get(value_column)),
+                    captured_at,
+                ))
+    try:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            conn.execute('DELETE FROM institutional_top10_appearances WHERE snapshot_date=?', (snapshot_date,))
+            conn.execute('DELETE FROM institutional_top10_snapshot_days WHERE snapshot_date=?', (snapshot_date,))
+            conn.executemany('''INSERT INTO institutional_top10_snapshot_days
+                (snapshot_date, investor, ranking_type, captured_at) VALUES (?, ?, ?, ?)''', snapshot_days)
+            conn.executemany('''INSERT INTO institutional_top10_appearances
+                (snapshot_date, investor, ranking_type, ticker, stock_name, market, data_date, rank_value, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', rows)
+        return snapshot_date, len(rows)
+    except Exception:
+        return snapshot_date, 0
+
+
+def load_institutional_top10_consecutive_appearances(investor, snapshot_date, lookback_snapshots=120):
+    """List current Top 10 entries with consecutive captured snapshots in the same category."""
+    if not snapshot_date:
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            history = pd.read_sql_query('''
+                SELECT snapshot_date, investor, ranking_type, ticker, stock_name, market, data_date, rank_value
+                FROM institutional_top10_appearances
+                WHERE snapshot_date IN (
+                    SELECT DISTINCT snapshot_date
+                    FROM institutional_top10_snapshot_days
+                    WHERE investor=? AND snapshot_date<=?
+                    ORDER BY snapshot_date DESC LIMIT ?
+                )
+                AND investor=?
+                ORDER BY snapshot_date DESC
+            ''', conn, params=(str(investor), str(snapshot_date), int(lookback_snapshots), str(investor)))
+            observed_days = pd.read_sql_query('''
+                SELECT snapshot_date, ranking_type
+                FROM institutional_top10_snapshot_days
+                WHERE investor=? AND snapshot_date IN (
+                    SELECT DISTINCT snapshot_date
+                    FROM institutional_top10_snapshot_days
+                    WHERE investor=? AND snapshot_date<=?
+                    ORDER BY snapshot_date DESC LIMIT ?
+                )
+                ORDER BY snapshot_date DESC
+            ''', conn, params=(str(investor), str(investor), str(snapshot_date), int(lookback_snapshots)))
+    except Exception:
+        return pd.DataFrame()
+    if history.empty or observed_days.empty:
+        return pd.DataFrame()
+
+    output = []
+    current_rows = history[history['snapshot_date'].astype(str) == str(snapshot_date)]
+    for ranking_type in current_rows['ranking_type'].dropna().unique():
+        category_history = history[history['ranking_type'] == ranking_type]
+        dates = observed_days.loc[
+            observed_days['ranking_type'] == ranking_type, 'snapshot_date'
+        ].dropna().astype(str).unique().tolist()
+        dates = sorted(dates, reverse=True)
+        membership = {
+            day: set(category_history.loc[category_history['snapshot_date'].astype(str) == day, 'ticker'].astype(str))
+            for day in dates
+        }
+        latest_members = current_rows[current_rows['ranking_type'] == ranking_type]
+        for _, item in latest_members.iterrows():
+            ticker = str(item.get('ticker') or '')
+            streak_dates = []
+            for day in dates:
+                if day not in membership or ticker not in membership[day]:
+                    break
+                streak_dates.append(day)
+            if len(streak_dates) < 2:
+                continue
+            output.append({
+                '榜單類型': str(ranking_type),
+                '股票代碼': ticker,
+                '股票名稱': str(item.get('stock_name') or ticker),
+                '市場': str(item.get('market') or ''),
+                '連續已記錄快照數': len(streak_dates),
+                '起始快照日': streak_dates[-1],
+                '最近快照日': streak_dates[0],
+                '本次資料日期': str(item.get('data_date') or ''),
+                '佔股本比(%)': _finite_number(item.get('rank_value')),
+            })
+    result = pd.DataFrame(output)
+    if not result.empty:
+        result = result.sort_values(
+            ['連續已記錄快照數', '榜單類型', '佔股本比(%)'],
+            ascending=[False, True, False],
+        ).reset_index(drop=True)
+    return result
+
 def signature_save_to_db(t):
     try:
         stock = yf.Ticker(t)
@@ -4529,7 +4681,7 @@ if auth_user:
     ).strip() or "gpt-5.5"
     st.sidebar.caption("ChatGPT API 使用量依 OpenAI API 帳戶計費；ChatGPT 訂閱不包含 API 額度。")
 
-    st.sidebar.markdown("### 🎛️ 個人自訂看盤面板")
+    st.sidebar.markdown("### 🎛️ 看盤資料設定")
     selected_tf = st.sidebar.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4)
     tf_mapping = {
         "1分鐘": {"p": "7d", "i": "1m"}, "5分鐘": {"p": "7d", "i": "5m"}, "30分鐘": {"p": "30d", "i": "30m"}, "60分鐘": {"p": "60d", "i": "60m"},
@@ -4538,7 +4690,7 @@ if auth_user:
     }
     cfg = tf_mapping[selected_tf]
 
-    with st.sidebar.expander("🛠️ 均線指標快速視窗設定", expanded=True):
+    with st.sidebar.expander("🛠️ 均線指標快速視窗設定", expanded=False):
         preset_ma = st.selectbox("📊 選擇均線快捷套組", options=["標準視窗 (5日 / 10日 / 20日)", "極短線 (3日 / 5日 / 10日)", "波段趨勢 (20日 / 60日 / 120日)", "自訂均線配置"], index=0)
         default_days = [5, 10, 20, 60, 240] if preset_ma == "標準視窗 (5日 / 10日 / 20日)" else ([3, 5, 10, 20, 60] if preset_ma == "極短線 (3日 / 5日 / 10日)" else [20, 60, 120, 240, 500])
         default_actives = [True, True, True, False, False]
@@ -5190,6 +5342,30 @@ if auth_user:
                 st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量 {ma_display_html}", unsafe_allow_html=True)
                 st.info("🧠 市場行為觀察：" + build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf))
 
+                chart_window_options = {"最近 60 根": 60, "最近 120 根": 120, "最近 240 根": 240, "全部資料": None}
+                chart_window_key = f"chart_window_{auth_user['id']}_{selected_stock}_{selected_tf}"
+                chart_window_label = st.selectbox(
+                    "圖表顯示範圍",
+                    options=list(chart_window_options),
+                    index=1,
+                    key=chart_window_key,
+                    help="只調整畫面顯示範圍，不會刪除歷史資料、均線計算或標線。",
+                )
+                requested_bars = chart_window_options[chart_window_label]
+                visible_bars = min(len(df_chart), requested_bars) if requested_bars else len(df_chart)
+                chart_x_range = [len(df_chart) - visible_bars - 0.5, len(df_chart) - 0.5]
+                st.caption(
+                    f"目前顯示最近 {visible_bars} 根 K 棒；均線仍用完整資料計算。"
+                    "縮放／移動用滑鼠或觸控操作；畫線在圖表右上角，刪除請用圖表下方的標線按鈕。"
+                )
+
+                with st.expander("🧭 K 線圖快速操作指南", expanded=False):
+                    st.markdown(
+                        "- **縮放與移動：**電腦用滑鼠滾輪縮放、按住拖曳平移；手機用雙指縮放、單指拖曳。\n"
+                        "- **畫線或標記：**使用圖表右上角工具列，先選直線、矩形、圓形或文字，再在圖表上拖曳／點選。\n"
+                        "- **刪除標線：**圖表下方會列出每條標線的刪除按鈕，不必精準點選細線；「清除全部畫線」會一次刪除。"
+                    )
+
                 with st.expander("🎨 畫線顏色與粗細設定", expanded=False):
                     draw_color_col, draw_width_col = st.columns(2)
                     with draw_color_col:
@@ -5253,7 +5429,7 @@ if auth_user:
                 # 🚀 排版設定與畫線/文字預設色彩配置
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
-                    uirevision=f"chart-{selected_stock}-{selected_tf}",
+                    uirevision=f"chart-{selected_stock}-{selected_tf}-{chart_window_label}",
                     editrevision=int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0)),
                     height=520,
                     margin=dict(l=10, r=10, t=25, b=10), 
@@ -5261,12 +5437,14 @@ if auth_user:
                     showlegend=False,
                     xaxis=dict(
                         type='category',
+                        range=chart_x_range,
                         showgrid=True, 
                         gridcolor="rgba(128,128,128,0.2)",
                         nticks=10
                     ),
                     xaxis2=dict(
                         type='category',
+                        range=chart_x_range,
                         showgrid=True,
                         gridcolor="rgba(128,128,128,0.2)",
                         nticks=10
@@ -7069,14 +7247,20 @@ if auth_user:
                     lambda row: row.get('股票名稱') if row.get('股票名稱') and row.get('股票名稱') != row.get('股票代碼')
                     else STOCK_NAME_MAP.get(f"{row.get('股票代碼')}.TWO" if row.get('市場') == '上櫃' else f"{row.get('股票代碼')}.TW", row.get('股票代碼')),
                     axis=1)
+                top10_snapshot_date, top10_saved_count = save_institutional_top10_snapshot(ranking_data)
+                if top10_snapshot_date and top10_saved_count:
+                    st.caption(
+                        f"連續上榜觀察已記錄至 {top10_snapshot_date}；同一資料日重載不會重複計數。"
+                        "追蹤從本功能開始載入後逐步累積。"
+                    )
+                elif top10_snapshot_date is None:
+                    st.warning("本次上市或上櫃資料不完整，為避免把不完整榜單算成全市場連續紀錄，本次未新增追蹤快照。")
+                else:
+                    st.warning("本次全市場榜單快照未能保存；連續上榜統計暫不更新。")
                 investor_tabs = st.tabs(['外資', '投信', '自營商'])
                 for investor, investor_tab in zip(('外資', '投信', '自營商'), investor_tabs):
                     with investor_tab:
-                        sort_specs = [
-                            (f'{investor}買賣超佔股本比(%)', False, '買賣超佔股本比最高'),
-                            (f'{investor}買賣超佔股本比(%)', True, '買賣超佔股本比最低'),
-                            (f'{investor}買進佔股本比(%)', False, '買進佔股本比最高'),
-                            (f'{investor}賣出佔股本比(%)', False, '賣出佔股本比最高')]
+                        sort_specs = institutional_top10_sort_specs(investor)
                         ranking_cols = st.columns(2)
                         for index, (column, ascending, title) in enumerate(sort_specs):
                             ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
@@ -7103,6 +7287,20 @@ if auth_user:
                                     selected_ticker = f"{chosen['股票代碼']}{ticker_suffix}"
                                     action_key = f"inst_action_{investor}_{index}"
                                     _render_stock_actions(selected_ticker, str(chosen["股票名稱"]), action_key)
+                        st.markdown("#### 🔁 連續出現在 Top 10 的個股")
+                        st.caption(
+                            "同一法人、同一榜單類型，連續出現在本系統已保存的不同全市場資料快照中才列出。"
+                            "只計已記錄快照，不代表每個交易日都完整記錄；本功能啟用前的日期不會補造。"
+                        )
+                        streak_rows = load_institutional_top10_consecutive_appearances(investor, top10_snapshot_date)
+                        if streak_rows.empty:
+                            st.info("目前尚無連續 2 次已記錄快照仍上榜的個股；系統會從本次及後續成功載入的完整資料逐步累積。")
+                        else:
+                            streak_display = streak_rows.copy()
+                            streak_display['佔股本比(%)'] = streak_display['佔股本比(%)'].map(
+                                lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
+                            )
+                            st.dataframe(streak_display, use_container_width=True, hide_index=True)
                 if market_errors:
                     st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))
 
