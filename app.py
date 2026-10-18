@@ -2926,6 +2926,181 @@ def build_institutional_screen(trades, shares_by_code, tickers, investor, min_ne
             rows.append(row)
     return pd.DataFrame(rows)
 
+
+def record_institutional_strategy_snapshot(trades, shares_by_code, tickers):
+    """Save official daily institutional flows for the strategy's Taiwan watchlist."""
+    saved = 0
+    for ticker in dict.fromkeys(str(value) for value in tickers):
+        code = ticker.replace('.TWO', '').replace('.TW', '').strip()
+        trade = trades.get(code)
+        if trade and save_chip_flow_observation(code, trade, shares_by_code.get(code)):
+            saved += 1
+    return saved
+
+
+def build_institutional_flow_streaks(tickers, trades, shares_by_code, investor, minimum_observations=2):
+    """Summarize same-direction net-flow streaks from captured official report dates."""
+    net_columns = {
+        '外資': 'foreign_net',
+        '投信': 'trust_net',
+        '自營商': 'dealer_net',
+    }
+    net_column = net_columns.get(investor)
+    if not net_column:
+        return pd.DataFrame()
+
+    rows = []
+    for ticker in dict.fromkeys(str(value) for value in tickers):
+        code = ticker.replace('.TWO', '').replace('.TW', '').strip()
+        trade = trades.get(code)
+        current_date = _normalize_chip_trade_date(trade.get('日期')) if trade else None
+        if not current_date:
+            continue
+
+        history = load_chip_flow_observations(code, limit=120)
+        if history.empty:
+            continue
+        history = history.sort_values('trade_date', ascending=False).reset_index(drop=True)
+        # Only report a streak if the latest observation belongs to this scan's data date.
+        if str(history.iloc[0].get('trade_date')) != current_date:
+            continue
+        latest_net = _finite_number(history.iloc[0].get(net_column))
+        if latest_net is None or latest_net == 0:
+            continue
+
+        direction = 1 if latest_net > 0 else -1
+        streak_values = []
+        streak_dates = []
+        for _, observation in history.iterrows():
+            net_value = _finite_number(observation.get(net_column))
+            if net_value is None or net_value == 0 or (1 if net_value > 0 else -1) != direction:
+                break
+            streak_values.append(net_value)
+            streak_dates.append(str(observation.get('trade_date') or ''))
+        if len(streak_values) < int(minimum_observations):
+            continue
+
+        shares = _finite_number(shares_by_code.get(code))
+        if not shares or shares <= 0:
+            shares = _finite_number(history.iloc[0].get('issued_shares'))
+        cumulative_net = sum(streak_values)
+        rows.append({
+            '股票代碼': ticker,
+            '股票名稱': str(trade.get('股票名稱') or ticker),
+            '市場': str(trade.get('市場') or ''),
+            '連續方向': '連續淨買超' if direction > 0 else '連續淨賣超',
+            '連續已記錄資料日': len(streak_values),
+            '最新單日淨額（股）': latest_net,
+            '連續期間累計淨額（股）': cumulative_net,
+            '連續期間累計佔股本（%）': cumulative_net / shares * 100 if shares else None,
+            '起始資料日': streak_dates[-1],
+            '最新資料日': current_date,
+        })
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result['_累計流量絕對值'] = pd.to_numeric(
+            result['連續期間累計佔股本（%）'], errors='coerce'
+        ).abs()
+        result = result.sort_values(
+            ['連續已記錄資料日', '_累計流量絕對值'],
+            ascending=[False, False],
+            na_position='last',
+        ).drop(columns=['_累計流量絕對值']).reset_index(drop=True)
+    return result
+
+
+def interpret_institutional_price_volume(flow_direction, price_change_pct, volume_change_pct):
+    """Explain whether recent price/volume behavior agrees with observed institutional flow."""
+    price_state = (
+        '上漲' if price_change_pct is not None and price_change_pct >= 0.5
+        else '下跌' if price_change_pct is not None and price_change_pct <= -0.5
+        else '接近平盤' if price_change_pct is not None else None
+    )
+    volume_state = (
+        '量增' if volume_change_pct is not None and volume_change_pct >= 10
+        else '量縮' if volume_change_pct is not None and volume_change_pct <= -10
+        else '量能變化不大' if volume_change_pct is not None else None
+    )
+    is_buying = flow_direction == '連續淨買超'
+
+    if price_state == '上漲' and volume_state == '量增':
+        if is_buying:
+            return '法人連續買超、價升量增，流向與近期價格反應一致；仍可能伴隨追價，不能當成續漲保證。'
+        return '法人連續賣超，但股價上漲且量增，流向與價格不同步；可能有其他買盤承接，不能只憑此判定出貨。'
+    if price_state == '下跌' and volume_state == '量增':
+        if is_buying:
+            return '法人連續買超，但股價下跌且量增，價格尚未配合，賣壓可能較強；不能直接解讀為吸籌。'
+        return '法人連續賣超、價跌量增，流向與近期價格反應一致，賣壓值得留意；仍不是未來跌勢保證。'
+    if is_buying and price_state == '下跌':
+        return '法人連續買超但股價走弱，價格尚未配合；先觀察賣壓是否減輕，不要直接視為吸籌。'
+    if not is_buying and price_state == '上漲':
+        return '法人連續賣超但股價走強，流向與價格不同步；可能有其他買盤承接，勿只憑法人流向判定出貨。'
+    if price_state == '上漲' and volume_state == '量縮':
+        return '股價上漲但成交量縮，價格有走高、參與度未同步增加；價量確認仍有限。'
+    if price_state == '下跌' and volume_state == '量縮':
+        return '股價下跌但成交量縮，走勢偏弱但成交未擴大；可觀察後續是否止穩。'
+    if price_state and volume_state:
+        return f'近5日股價{price_state}、成交{volume_state}；與法人連續流向的配合尚不明確，避免單一指標下結論。'
+    return '股價或成交量資料不足，暫不判斷與法人流向是否配合。'
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_institutional_price_volume_context(ticker, as_of_date):
+    """Fetch recent daily closes/volumes ending on the institutional report date."""
+    try:
+        normalized_as_of = _normalize_chip_trade_date(as_of_date)
+        if not normalized_as_of:
+            return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
+        as_of = pd.Timestamp(normalized_as_of)
+        start = (as_of - pd.Timedelta(days=90)).strftime('%Y-%m-%d')
+        end = (as_of + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        history = yf.download(
+            str(ticker), start=start, end=end, interval='1d',
+            auto_adjust=False, progress=False, threads=False,
+        )
+        if history is None or history.empty:
+            return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
+        if isinstance(history.columns, pd.MultiIndex):
+            matched_level = next((
+                level for level in range(history.columns.nlevels)
+                if str(ticker) in history.columns.get_level_values(level).astype(str)
+            ), None)
+            if matched_level is not None:
+                history = history.xs(str(ticker), axis=1, level=matched_level)
+            if isinstance(history.columns, pd.MultiIndex):
+                history.columns = history.columns.get_level_values(0)
+        if 'Close' not in history.columns or 'Volume' not in history.columns:
+            return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
+
+        history = history[['Close', 'Volume']].copy()
+        history.index = pd.to_datetime(history.index, errors='coerce')
+        if getattr(history.index, 'tz', None) is not None:
+            history.index = history.index.tz_localize(None)
+        history = history.loc[history.index <= as_of]
+        history['Close'] = pd.to_numeric(history['Close'], errors='coerce')
+        history['Volume'] = pd.to_numeric(history['Volume'], errors='coerce')
+        history = history.dropna(subset=['Close', 'Volume']).sort_index()
+        if history.empty:
+            return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
+
+        price_change_pct = None
+        if len(history) >= 6 and float(history['Close'].iloc[-6]) != 0:
+            price_change_pct = (float(history['Close'].iloc[-1]) / float(history['Close'].iloc[-6]) - 1) * 100
+        volume_change_pct = None
+        if len(history) >= 10:
+            previous_volume = float(history['Volume'].iloc[-10:-5].mean())
+            recent_volume = float(history['Volume'].iloc[-5:].mean())
+            if previous_volume > 0:
+                volume_change_pct = (recent_volume / previous_volume - 1) * 100
+        return {
+            '股價資料日': history.index[-1].strftime('%Y-%m-%d'),
+            '近5日股價變化(%)': price_change_pct,
+            '近5日均量變化(%)': volume_change_pct,
+        }
+    except Exception:
+        return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_tdcc_concentration(ticker):
     """Fetch weekly TDCC shareholding distribution; return big-holder/retail ratios and dates."""
@@ -7210,13 +7385,41 @@ if auth_user:
             st.write("篩選條件：所選法人的當日淨買進規模需達到你設定的門檻。表格仍列出外資、投信、自營商三方的買進、賣出與淨流向規模，方便比較交易方向和強弱。")
             st.caption("🧠 **心理讀法：**單日法人買超容易引發跟隨心理，但它只代表已發生的交易。觀察資料日期、連續性、股價與成交量；不能由買超直接推論法人正在吸籌或股價必漲。")
         if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
+            st.session_state.pop('inst_strategy_flow_streak', None)
             taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
             if not taiwan_tickers:
                 st.warning("請先在上方自訂觀察名單加入台股代碼，例如 2330.TW、3293.TWO。")
             else:
                 with st.spinner("正在取得 TWSE／TPEx 官方法人交易與股數資料…"):
                     inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
+                saved_flow_count = record_institutional_strategy_snapshot(inst_trades, inst_shares, taiwan_tickers)
                 inst_result = build_institutional_screen(inst_trades, inst_shares, taiwan_tickers, inst_investor, float(inst_min_net_pct))
+                flow_streaks = build_institutional_flow_streaks(
+                    taiwan_tickers, inst_trades, inst_shares, inst_investor
+                )
+                if not flow_streaks.empty:
+                    price_volume_contexts = []
+                    with st.spinner("補上連續進出個股的近期價量資料…"):
+                        for _, streak_row in flow_streaks.iterrows():
+                            price_context = fetch_institutional_price_volume_context(
+                                streak_row['股票代碼'], streak_row['最新資料日']
+                            )
+                            price_context['價量心理重點'] = interpret_institutional_price_volume(
+                                streak_row['連續方向'],
+                                price_context.get('近5日股價變化(%)'),
+                                price_context.get('近5日均量變化(%)'),
+                            )
+                            price_volume_contexts.append(price_context)
+                    flow_streaks = pd.concat(
+                        [flow_streaks.reset_index(drop=True), pd.DataFrame(price_volume_contexts)],
+                        axis=1,
+                    )
+                st.session_state['inst_strategy_flow_streak'] = {
+                    'investor': inst_investor,
+                    'watchlist_count': len(set(taiwan_tickers)),
+                    'saved_count': saved_flow_count,
+                    'data': flow_streaks,
+                }
                 if inst_result.empty:
                     st.info("此條件下沒有符合標的，或官方資料暫時缺漏。可調低淨買超門檻或檢查代碼格式。")
                 else:
@@ -7230,6 +7433,31 @@ if auth_user:
                                        file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
                 if inst_errors:
                     st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
+        saved_flow_streak = st.session_state.get('inst_strategy_flow_streak')
+        if isinstance(saved_flow_streak, dict):
+            st.markdown("#### 🔁 法人連續進出觀察")
+            st.caption(
+                f"目前依自訂觀察名單追蹤「{saved_flow_streak.get('investor', '所選法人')}」，"
+                f"本次清單 {saved_flow_streak.get('watchlist_count', 0)} 檔，其中 {saved_flow_streak.get('saved_count', 0)} 檔成功保存官方資料。"
+                "同一股票同一資料日重跑會更新資料、不增加次數；名單只列出連續至少 2 個已記錄資料日方向相同的股票。"
+                "只計系統實際保存的官方資料日，未記錄的交易日不會補造，因此不代表中間每個交易日都連續進出。"
+            )
+            st.caption("價量補充：股價比較近5個交易日收盤變化，成交量比較最近5日平均與前5日平均；日期未對齊或資料不足時會留白，不以缺值推論方向。")
+            streak_table = saved_flow_streak.get('data')
+            if not isinstance(streak_table, pd.DataFrame) or streak_table.empty:
+                st.info("目前尚無符合條件的連續淨買超或淨賣超個股；請在後續不同官方資料日再次執行，系統才會累積新的觀察。")
+            else:
+                streak_display = streak_table.copy()
+                for column in ('最新單日淨額（股）', '連續期間累計淨額（股）'):
+                    streak_display[column] = streak_display[column].map(
+                        lambda value: f"{value:+,.0f}" if pd.notna(value) else "—"
+                    )
+                for column in ('連續期間累計佔股本（%）', '近5日股價變化(%)', '近5日均量變化(%)'):
+                    if column in streak_display.columns:
+                        streak_display[column] = streak_display[column].map(
+                            lambda value: f"{value:+.2f}%" if pd.notna(value) else "—"
+                        )
+                st.dataframe(streak_display, use_container_width=True, hide_index=True)
 
     if selected_module == "📊 當日全市場三大法人佔股本比 Top 10":
         st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
