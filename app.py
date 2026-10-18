@@ -2948,6 +2948,36 @@ def get_trader_watchlist_symbols():
     return normalized
 
 
+def dataframe_to_excel_compatible_csv_bytes(frame):
+    """Serialize a comma-delimited CSV with an explicit UTF-8 BOM for Excel."""
+    csv_text = frame.to_csv(index=False, sep=',', lineterminator='\r\n')
+    return b'\xef\xbb\xbf' + csv_text.encode('utf-8')
+
+
+def dataframe_to_excel_workbook_bytes(frame, sheet_name='法人策略結果'):
+    """Build an Excel workbook with readable widths, frozen headers, and filters."""
+    from openpyxl.utils import get_column_letter
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        frame.to_excel(writer, index=False, sheet_name=sheet_name)
+        worksheet = writer.sheets[sheet_name]
+        worksheet.freeze_panes = 'A2'
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for column_index, column_name in enumerate(frame.columns, start=1):
+            values = [str(column_name)] + [
+                str(value) for value in frame[column_name].dropna().tolist()
+            ]
+            display_width = max((len(value) for value in values), default=10)
+            worksheet.column_dimensions[get_column_letter(column_index)].width = min(
+                max(display_width + 2, 12), 42
+            )
+            if str(column_name).endswith('(%)'):
+                for row_index in range(2, len(frame) + 2):
+                    worksheet.cell(row=row_index, column=column_index).number_format = '+0.0000"%";-0.0000"%";0.0000"%'
+    return output.getvalue()
+
+
 def record_institutional_strategy_snapshot(trades, shares_by_code, tickers):
     """Save official daily institutional flows for the strategy's Taiwan watchlist."""
     saved = 0
@@ -7451,8 +7481,28 @@ if auth_user:
                         '自營商買進佔股本比(%)', '自營商賣出佔股本比(%)', '自營商買賣超佔股本比(%)']
                     pct_cols = [c for c in inst_display_cols if c.endswith('(%)')]
                     st.dataframe(inst_result[inst_display_cols].style.format({c: '{:+.4f}%' for c in pct_cols}), use_container_width=True)
-                    st.download_button("下載法人策略結果 CSV", inst_result[inst_display_cols].to_csv(index=False, encoding='utf-8-sig'),
-                                       file_name='taiwan_institutional_screen.csv', mime='text/csv', key='download_inst_screen')
+                    export_frame = inst_result[inst_display_cols].copy()
+                    csv_col, excel_col = st.columns(2)
+                    with csv_col:
+                        st.download_button(
+                            "下載 CSV（UTF-8 中文相容）",
+                            data=dataframe_to_excel_compatible_csv_bytes(export_frame),
+                            file_name='taiwan_institutional_screen.csv',
+                            mime='text/csv; charset=utf-8',
+                            key='download_inst_screen',
+                        )
+                    with excel_col:
+                        try:
+                            excel_bytes = dataframe_to_excel_workbook_bytes(export_frame)
+                            st.download_button(
+                                "下載 Excel（直接開啟推薦）",
+                                data=excel_bytes,
+                                file_name='taiwan_institutional_screen.xlsx',
+                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                key='download_inst_screen_excel',
+                            )
+                        except Exception:
+                            st.caption("目前環境無法產生 Excel 檔；若 CSV 欄位未自動分開，可用試算表的「匯入文字／CSV」功能選逗號分隔。")
                 if inst_errors:
                     st.caption("有官方來源未能連線：" + "；".join(inst_errors[:2]))
         saved_flow_streak = st.session_state.get('inst_strategy_flow_streak')
