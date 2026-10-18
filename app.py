@@ -2821,8 +2821,9 @@ def get_finmind_api_token():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_finmind_broker_branch(stock_code, trade_date, api_token):
+def fetch_finmind_broker_branch(stock_code, trade_date, api_token, account_scope=""):
     """Fetch one Taiwan stock's daily branch details from FinMind's authenticated endpoint."""
+    # account_scope is included in the cache key so different app users do not share cached results.
     if not api_token:
         return pd.DataFrame(), "尚未設定 FinMind API Token。"
     try:
@@ -3684,8 +3685,18 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
 # 🔐 使用者帳號登入與自助註冊
 def _logout_account():
     for key in list(st.session_state.keys()):
-        if key == "auth_user" or key.startswith(("port_", "portfolio_", "login_", "register_", "recovery_", "password_reset_", "reset_")) or key == "pending_recovery_email":
+        if key == "auth_user" or key.startswith((
+            "port_", "portfolio_", "login_", "register_", "recovery_",
+            "password_reset_", "reset_", "finmind_user_token_",
+            "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_",
+        )) or key == "pending_recovery_email":
             st.session_state.pop(key, None)
+
+
+def _clear_finmind_session_token(token_key, acknowledgement_key):
+    """Remove a user-entered provider token and its acknowledgement from this session."""
+    st.session_state.pop(token_key, None)
+    st.session_state.pop(acknowledgement_key, None)
 
 
 st.sidebar.markdown("### 🔒 操盤手帳號")
@@ -4858,39 +4869,106 @@ if auth_user:
                                 top_rows = pd.concat([breakdown.head(10), breakdown.nsmallest(10, "買賣超")]).drop_duplicates()
                                 st.dataframe(top_rows, hide_index=True, use_container_width=True)
 
-                        st.markdown("##### 自動帶入（FinMind）")
-                        st.caption("設定 FINMIND_TOKEN 後，會依目前股票與日期自動取得分點資料；分點資料通常於交易日盤後更新。")
-                        finmind_token = get_finmind_api_token()
-                        if finmind_token:
+                        st.markdown("##### 選擇分點資料來源")
+                        st.caption("可輸入自己的 FinMind Token 自動帶入，或改用 CSV；FinMind 資料通常於交易日盤後更新。")
+                        st.warning(
+                            "授權提醒：FinMind 將商業 web／app 使用列為 Sponsor Pro 授權範圍，並禁止原始資料再散布或建立鏡像 API。"
+                            "即使使用者自行輸入 Token，也不會自動取得本網站展示資料的授權；公開提供前請管理者向 FinMind 確認。"
+                        )
+                        st.markdown("[查看 FinMind 方案與資料授權](https://finmind.github.io/en/Pricing/)")
+
+                        account_id = str(auth_user.get("id", "guest"))
+                        user_token_key = f"finmind_user_token_{account_id}"
+                        source_key = f"branch_data_source_{account_id}"
+                        shared_token = get_finmind_api_token()
+                        source_options = ["輸入自己的 FinMind Token（自動帶入）", "手動上傳 CSV"]
+                        if shared_token:
+                            source_options.insert(1, "使用網站管理者設定的共用 Token")
+                        if st.session_state.get(source_key) not in source_options:
+                            st.session_state[source_key] = source_options[0]
+                        st.caption("自填 Token 需要每位使用者自己的 FinMind Sponsor 以上方案，且方案需包含券商分點資料。")
+                        branch_source = st.radio(
+                            "請選擇一種方式",
+                            source_options,
+                            key=source_key,
+                            help="自填 Token 只保留在目前登入工作階段；CSV 不需要 API Token。",
+                        )
+
+                        if branch_source == "輸入自己的 FinMind Token（自動帶入）":
+                            st.caption(
+                                "請使用你自己的 FinMind Token。Token 會由本 App 伺服器代為呼叫 FinMind；"
+                                "本版本不會寫入帳號資料庫，登出時會清除。請只在你信任的服務輸入 Token。"
+                            )
+                            finmind_token = st.text_input(
+                                "你的 FinMind API Token",
+                                type="password",
+                                key=user_token_key,
+                                help="券商分點 API 需要你的 FinMind 帳號方案包含此資料集。",
+                            ).strip()
+                            token_ack_key = f"finmind_token_ack_{account_id}"
+                            st.button(
+                                "清除目前輸入的 Token",
+                                key=f"clear_finmind_token_{account_id}",
+                                on_click=_clear_finmind_session_token,
+                                args=(user_token_key, token_ack_key),
+                            )
+                            if finmind_token:
+                                token_acknowledged = st.checkbox(
+                                    "我確認此 Token 屬於我、我的方案包含券商分點資料，並同意本次由 App 伺服器代為查詢。",
+                                    key=token_ack_key,
+                                )
+                            else:
+                                token_acknowledged = False
+                                st.info("請輸入自己的 FinMind Token；若不使用 API，請改選「手動上傳 CSV」。")
+                            active_finmind_token = finmind_token
+                            active_finmind_ack = token_acknowledged
+                            source_label = "FinMind（個人 Token）"
+
+                        elif branch_source == "使用網站管理者設定的共用 Token":
+                            st.info("此 Token 由網站管理者設定，所有選用此方式的使用者會共用同一資料方案與查詢額度。")
+                            token_ack_key = f"finmind_shared_ack_{account_id}"
+                            active_finmind_ack = st.checkbox(
+                                "我了解這是網站共用資料來源，並同意本次查詢。",
+                                key=token_ack_key,
+                            )
+                            active_finmind_token = shared_token
+                            source_label = "FinMind（網站共用 Token）"
+
+                        else:
+                            active_finmind_token = ""
+                            active_finmind_ack = False
+                            source_label = ""
+
+                        if branch_source == "手動上傳 CSV":
+                            branch_file = st.file_uploader(
+                                "選擇券商分點 CSV 檔",
+                                type=["csv"],
+                                key=f"chip_branch_upload_{account_id}_{selected_stock}",
+                            )
+                            if branch_file is not None:
+                                branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
+                                _render_branch_summary(branch_summary, "依上傳檔案所含資料期間彙總")
+                        elif active_finmind_token and active_finmind_ack:
                             from datetime import datetime as _datetime
                             from zoneinfo import ZoneInfo as _ZoneInfo
                             default_branch_date = pd.Timestamp(trade_date).date() if trade_date else _datetime.now(_ZoneInfo("Asia/Taipei")).date()
                             branch_trade_date = st.date_input(
                                 "分點資料日期",
                                 value=default_branch_date,
-                                key=f"chip_branch_date_{stock_code}",
+                                key=f"chip_branch_date_{account_id}_{stock_code}",
                             )
                             branch_date_text = branch_trade_date.strftime("%Y-%m-%d")
                             with st.spinner(f"自動讀取 {stock_code} 的券商分點資料…"):
-                                branch_frame, branch_error = fetch_finmind_broker_branch(stock_code, branch_date_text, finmind_token)
+                                branch_frame, branch_error = fetch_finmind_broker_branch(
+                                    stock_code, branch_date_text, active_finmind_token, account_scope=account_id
+                                )
                             if branch_error:
                                 st.info(f"FinMind：{branch_error}")
                             else:
                                 auto_summary = summarize_broker_branch_frame(branch_frame, stock_code)
-                                _render_branch_summary(auto_summary, f"FinMind｜{branch_date_text}")
-                        else:
-                            st.info("尚未設定 FinMind Token；可在部署環境的 Streamlit secrets 或 FINMIND_TOKEN 環境變數中設定。")
-                            st.caption("分點 API 需要 FinMind Sponsor 以上方案；若此程式作為商業服務提供給他人，請先核對資料授權方案。")
-
-                        st.markdown("##### 手動匯入備援 CSV")
-                        branch_file = st.file_uploader(
-                            "選擇券商分點 CSV 檔",
-                            type=["csv"],
-                            key=f"chip_branch_upload_{selected_stock}",
-                        )
-                        if branch_file is not None:
-                            branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
-                            _render_branch_summary(branch_summary, "依上傳檔案所含資料期間彙總")
+                                _render_branch_summary(auto_summary, f"{source_label}｜{branch_date_text}")
+                        elif branch_source != "手動上傳 CSV" and active_finmind_token and not active_finmind_ack:
+                            st.info("請先完成上方確認，才會使用所選 Token 發出查詢。")
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
