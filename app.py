@@ -3027,6 +3027,76 @@ def _broker_csv_metadata_stock_code(text, delimiter, header_line):
     return None
 
 
+def _normalize_broker_csv_metadata(text):
+    """Normalize Excel stock-code cells and harmless spaces after quoted CSV fields."""
+    lines = text.splitlines(keepends=True)
+    metadata_labels = ("股票代號", "股票代碼", "證券代號", "證券代碼")
+    for index, line in enumerate(lines[:100]):
+        if any(label in line for label in metadata_labels):
+            lines[index] = re.sub(r'(?<![^,\t;|])="([^"]*)"', r"\1", line)
+    text = "".join(lines)
+    # Some Taiwan broker CSV exports leave a space between the final quote and
+    # the delimiter/newline. Python's strict CSV parser rejects that harmless padding.
+    return re.sub(r'"[ \t]+(?=[,;\t|]|\r?\n|$)', '"', text)
+
+
+def _broker_branch_csv_header_groups(header_fields):
+    """Find one or more side-by-side broker tables separated by blank columns."""
+    sections = []
+    current = []
+    for index, value in enumerate(header_fields):
+        if not str(value).strip():
+            if current:
+                sections.append(current)
+                current = []
+        else:
+            current.append(index)
+    if current:
+        sections.append(current)
+
+    def is_broker_table(indices):
+        kinds = {_broker_branch_csv_column_kind(header_fields[index]) for index in indices}
+        return {"buy", "sell"}.issubset(kinds) and bool({"code", "branch", "branch_id"}.intersection(kinds))
+
+    matching_sections = [indices for indices in sections if is_broker_table(indices)]
+    if matching_sections:
+        return matching_sections
+    all_columns = list(range(len(header_fields)))
+    return [all_columns] if is_broker_table(all_columns) else []
+
+
+def _combine_broker_branch_csv_tables(frame, header_fields):
+    """Normalize repeated side-by-side tables into one row-oriented broker table."""
+    groups = _broker_branch_csv_header_groups(header_fields)
+    if not groups:
+        return frame
+
+    canonical_names = {
+        "code": "stock_id",
+        "branch_id": "securities_trader_id",
+        "branch": "securities_trader",
+        "buy": "buy_shares",
+        "sell": "sell_shares",
+    }
+    normalized_frames = []
+    for indices in groups:
+        role_indices = {}
+        for index in indices:
+            kind = _broker_branch_csv_column_kind(header_fields[index])
+            if kind in canonical_names and kind not in role_indices and index < frame.shape[1]:
+                role_indices[kind] = index
+        if not {"buy", "sell"}.issubset(role_indices):
+            continue
+        group_frame = pd.DataFrame(index=frame.index)
+        for kind, index in role_indices.items():
+            group_frame[canonical_names[kind]] = frame.iloc[:, index]
+        normalized_frames.append(group_frame)
+
+    if not normalized_frames:
+        return frame
+    return pd.concat(normalized_frames, ignore_index=True, sort=False)
+
+
 def summarize_broker_branch_frame(frame, stock_code):
     """Aggregate price-level branch rows into one buy/sell total per broker branch."""
     if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -3104,12 +3174,13 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
     last_parse_error = None
     for encoding in encodings:
         try:
-            text = raw_content.decode(encoding)
+            text = _normalize_broker_csv_metadata(raw_content.decode(encoding))
         except (UnicodeDecodeError, LookupError):
             continue
 
         for delimiter in delimiters:
             header_line = None
+            header_fields = None
             try:
                 reader = csv.reader(io.StringIO(text), delimiter=delimiter)
                 for row in reader:
@@ -3121,6 +3192,7 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
                     if has_trade_columns and has_stock_or_branch:
                         # csv.reader.line_num is one-based; pandas skiprows is zero-based.
                         header_line = reader.line_num - 1
+                        header_fields = row
                         break
             except csv.Error as exc:
                 last_parse_error = str(exc)
@@ -3142,6 +3214,7 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
             except Exception as exc:
                 last_parse_error = str(exc)
                 continue
+            frame = _combine_broker_branch_csv_tables(frame, header_fields or list(frame.columns))
             code_col = next((column for column in frame.columns if _broker_branch_csv_column_kind(column) == "code"), None)
             if code_col is None:
                 metadata_code = _broker_csv_metadata_stock_code(text, delimiter, header_line)
@@ -3161,8 +3234,8 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
 
     if last_parse_error:
         return {
-            "error": "CSV 欄位格式不一致，無法安全匯入。請確認資料列沒有未加引號的多餘分隔符，"
-                     f"或重新另存為 UTF-8／Big5 CSV。（{last_parse_error}）"
+            "error": "CSV 引號或欄位分隔格式不一致，無法安全匯入。請確認每列引號成對、欄位分隔一致。"
+                     f"（{last_parse_error}）"
         }
     return {
         "error": "找不到可辨識的 CSV 標題列。請確認檔案包含股票代號、買進股數與賣出股數欄位；"
