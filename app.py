@@ -1,7 +1,7 @@
 # ==============================================================================
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
-import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
+import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl, html
 import streamlit.components.v1 as components
 from email.message import EmailMessage
 try:
@@ -5634,10 +5634,8 @@ if auth_user:
                         ma_header_values.append(
                             f"<span style='color:{c}; font-weight:bold;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
                         )
-                chart_header_annotation = "<br>".join(
-                    [f"<b>目前時間軸：{selected_tf}</b>"] + ma_header_values
-                )
-                chart_top_margin = max(80, 34 + 18 * (1 + len(ma_header_values)))
+                chart_header_annotation = "<br>".join(ma_header_values)
+                chart_top_margin = max(110, 64 + 18 * len(ma_header_values))
                 st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量")
                 selected_indicator_text = ", ".join(selected_chart_indicators) if selected_chart_indicators else "未選擇"
                 selected_overlay_text = ", ".join(selected_chart_overlays) if selected_chart_overlays else "未選擇"
@@ -5667,8 +5665,8 @@ if auth_user:
                 with st.expander("🧭 K 線圖快速操作指南", expanded=False):
                     st.markdown(
                         "- **縮放與移動：**電腦用滑鼠滾輪縮放、按住拖曳平移；手機用雙指縮放、單指拖曳。\n"
-                        "- **畫線或標記：**使用圖表右上角工具列，先選直線、矩形、圓形或文字，再在圖表上拖曳／點選。\n"
-                        "- **刪除標線：**圖表下方會列出每條標線的刪除按鈕，不必精準點選細線；「清除全部畫線」會一次刪除。"
+                        "- **畫線或標記：**使用圖表右上角工具列；也可以用下方文字標記輸入文字與顏色。\n"
+                        "- **刪除標記：**圖表下方可刪除線條；文字標記可在文字設定中個別刪除；清除全部會一併移除。"
                     )
 
                 with st.expander("🎨 畫線顏色與粗細設定", expanded=False):
@@ -5678,10 +5676,57 @@ if auth_user:
                     with draw_width_col:
                         draw_line_width = st.slider("線條粗細", min_value=0.5, max_value=10.0, value=2.5, step=0.5, key=f"draw_line_width_{selected_stock}",
                                                     help="設定接下來繪製的趨勢線、矩形與圓形邊框粗細。")
-                clear_shapes = st.button("🧹 清除全部畫線", key=f"clear_shapes_{auth_user['id']}_{selected_stock}_{selected_tf}", use_container_width=True)
+                user_chart_notes_key = f"chart_text_annotations_{auth_user['id']}_{selected_stock}_{selected_tf}"
+                chart_notes = st.session_state.get(user_chart_notes_key, [])
+                if not isinstance(chart_notes, list):
+                    chart_notes = []
+                st.session_state[user_chart_notes_key] = chart_notes
+                with st.expander("📝 輸入文字與顏色標記", expanded=False):
+                    chart_note_text = st.text_input(
+                        "輸入要顯示在圖表上的文字",
+                        key=f"chart_note_text_{auth_user['id']}_{selected_stock}_{selected_tf}",
+                        max_chars=80,
+                    )
+                    chart_note_color = st.color_picker(
+                        "文字顏色",
+                        value="#FBBF24",
+                        key=f"chart_note_color_{auth_user['id']}_{selected_stock}_{selected_tf}",
+                    )
+                    if st.button(
+                        "➕ 加到最新一根 K 棒附近",
+                        key=f"add_chart_note_{auth_user['id']}_{selected_stock}_{selected_tf}",
+                        use_container_width=True,
+                    ):
+                        if chart_note_text.strip():
+                            chart_notes.append({"text": chart_note_text.strip(), "color": chart_note_color})
+                            st.session_state[user_chart_notes_key] = chart_notes
+                            st.success("文字標記已加入；可在圖上拖曳調整位置。")
+                        else:
+                            st.warning("請先輸入要顯示的文字。")
+                    if chart_notes:
+                        st.caption("目前文字標記：")
+                        for note_index, note in enumerate(list(chart_notes)):
+                            note_col, delete_col = st.columns([0.78, 0.22])
+                            with note_col:
+                                st.caption(f"{note_index + 1}. {note.get('text', '')}｜{note.get('color', '')}")
+                            with delete_col:
+                                if st.button(
+                                    "刪除",
+                                    key=f"delete_chart_note_{auth_user['id']}_{selected_stock}_{selected_tf}_{note_index}",
+                                    use_container_width=True,
+                                ):
+                                    chart_notes.pop(note_index)
+                                    st.session_state[user_chart_notes_key] = chart_notes
+                clear_shapes = st.button(
+                    "🧹 清除全部畫線與文字標記",
+                    key=f"clear_shapes_{auth_user['id']}_{selected_stock}_{selected_tf}",
+                    use_container_width=True,
+                )
                 if clear_shapes:
                     clear_key = f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}"
                     st.session_state[clear_key] = int(st.session_state.get(clear_key, 0)) + 1
+                    chart_notes.clear()
+                    st.session_state[user_chart_notes_key] = chart_notes
                 
                 # 主圖、成交量與使用者選擇的技術指標各自使用獨立面板。
                 chart_rows = 2 + len(selected_chart_indicators)
@@ -5901,6 +5946,8 @@ if auth_user:
 
                 # 🚀 排版設定與畫線/文字預設色彩配置
                 chart_x_axes = {}
+                bottom_axis_context = selected_chart_indicators[-1] if selected_chart_indicators else "成交量"
+                time_axis_title = f"週期：{selected_tf}｜{bottom_axis_context}"
                 for axis_index in range(1, chart_rows + 1):
                     axis_name = "xaxis" if axis_index == 1 else f"xaxis{axis_index}"
                     chart_x_axes[axis_name] = dict(
@@ -5912,8 +5959,15 @@ if auth_user:
                         tickangle=-30,
                         tickfont=dict(size=10),
                         automargin=True,
+                        title=dict(text=time_axis_title if axis_index == chart_rows else ""),
                     )
                 fig.update_layout(
+                    title=dict(
+                        text=f"【{html.escape(str(c_name), quote=False)}】K 線圖｜{selected_tf}",
+                        x=0.01, xanchor="left", y=0.99, yanchor="top",
+                        font=dict(size=16, color="#F8FAFC"),
+                        subtitle=dict(text=""),
+                    ),
                     xaxis_rangeslider_visible=False,
                     uirevision=(
                         f"chart-{selected_stock}-{selected_tf}-{chart_window_label}-"
@@ -5921,29 +5975,57 @@ if auth_user:
                     ),
                     editrevision=int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0)),
                     height=chart_height,
-                    margin=dict(l=12, r=12, t=chart_top_margin, b=36),
+                    margin=dict(l=12, r=12, t=chart_top_margin, b=54),
                     dragmode='pan', 
                     showlegend=False,
-                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right"),
-                    yaxis2=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="量"),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="股價（元）"),
+                    yaxis2=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="成交量"),
                     newshape=dict(
                         line=dict(color=draw_color, width=draw_line_width),
                         fillcolor=draw_color,
                         opacity=0.6
                     ),
+                    annotationdefaults=dict(
+                        font=dict(color=draw_color, size=14),
+                        bgcolor="rgba(15,23,42,0.88)",
+                        bordercolor=draw_color,
+                        borderwidth=1,
+                        borderpad=4,
+                        showarrow=False,
+                    ),
                     **chart_x_axes
                 )
-                fig.add_annotation(
-                    xref="paper", yref="paper", x=0.01, y=1.02,
-                    xanchor="left", yanchor="bottom", align="left",
-                    text=chart_header_annotation,
-                    showarrow=False,
-                    font=dict(size=12, color="#F8FAFC"),
-                    bgcolor="rgba(15,23,42,0.92)",
-                    bordercolor="rgba(148,163,184,0.5)",
-                    borderwidth=1,
-                    borderpad=6,
-                )
+                if chart_header_annotation:
+                    fig.add_annotation(
+                        xref="paper", yref="paper", x=0.01, y=1.02,
+                        xanchor="left", yanchor="bottom", align="left",
+                        text=chart_header_annotation,
+                        showarrow=False,
+                        font=dict(size=12, color="#F8FAFC"),
+                        bgcolor="rgba(15,23,42,0.92)",
+                        bordercolor="rgba(148,163,184,0.5)",
+                        borderwidth=1,
+                        borderpad=6,
+                    )
+                close_for_note = _finite_number(df_chart["Close"].iloc[-1])
+                if close_for_note is not None and date_strings:
+                    note_y_offsets = [0, 20, -20, 40, -40, 60, -60]
+                    for note_index, note in enumerate(chart_notes):
+                        note_text = str(note.get("text", "")).strip()
+                        if not note_text:
+                            continue
+                        note_color = str(note.get("color", "#FBBF24"))
+                        fig.add_annotation(
+                            x=date_strings[-1], y=close_for_note,
+                            xref="x", yref="y",
+                            xanchor="right", yanchor="bottom", xshift=-8,
+                            yshift=note_y_offsets[note_index % len(note_y_offsets)],
+                            text=html.escape(note_text, quote=False),
+                            showarrow=False,
+                            font=dict(color=note_color, size=14),
+                            bgcolor="rgba(15,23,42,0.88)",
+                            bordercolor=note_color, borderwidth=1, borderpad=4,
+                        )
                 
                 chart_key = f"candlestick_chart_{auth_user['id']}_{selected_stock}_{selected_tf}"
                 clear_revision = int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0))
@@ -5970,7 +6052,10 @@ if auth_user:
                     }
                 )
                 render_plotly_delete_hotkey(st, chart_key, clear_revision)
-                st.caption("單筆刪除：先點標線邊界使其選取，再按工具列橡皮擦；電腦也可將游標移到圖表內按 Delete。手機可左右滑動工具列找到橡皮擦，或按上方清除全部。")
+                st.caption(
+                    "線條可先點選邊界再按工具列橡皮擦，電腦也可在圖表內按 Delete；"
+                    "新增文字可在文字設定中個別刪除。清除全部會移除畫線與輸入式文字標記。"
+                )
 
             if selected_module == "💸 配息複利策略":
                 render_dividend_tab(st, default_ticker=selected_stock)
