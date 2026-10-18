@@ -288,6 +288,75 @@ def _finite_number(value: Any) -> Optional[float]:
     return number if np.isfinite(number) else None
 
 
+def _free_cash_flow_from_statements(stock_obj):
+    """Return a defensible FCF estimate, never annualizing incomplete quarters or missing capex."""
+    operating_cashflow_labels = (
+        "Operating Cash Flow",
+        "Total Cash From Operating Activities",
+        "Cash Flow From Continuing Operating Activities",
+    )
+    capex_labels = ("Capital Expenditure", "Capital Expenditures")
+
+    def read_row(frame, labels):
+        if frame is None or frame.empty:
+            return None
+        for label in labels:
+            if label in frame.index:
+                values = pd.to_numeric(frame.loc[label], errors="coerce").dropna()
+                if not values.empty:
+                    parsed_dates = pd.to_datetime(values.index, errors="coerce")
+                    if len(parsed_dates) and not pd.isna(parsed_dates).any():
+                        values.index = parsed_dates
+                        values = values.sort_index(ascending=False)
+                    return values
+        return None
+
+    try:
+        quarterly = stock_obj.quarterly_cashflow
+    except Exception:
+        quarterly = pd.DataFrame()
+    ocf_quarterly = read_row(quarterly, operating_cashflow_labels)
+    capex_quarterly = read_row(quarterly, capex_labels)
+    if ocf_quarterly is not None and capex_quarterly is not None:
+        if len(ocf_quarterly) >= 4 and len(capex_quarterly) >= 4:
+            ttm_ocf = float(ocf_quarterly.iloc[:4].sum())
+            ttm_capex = abs(float(capex_quarterly.iloc[:4].sum()))
+            return ttm_ocf - ttm_capex, "近四季財報估算"
+
+    # If quarterly coverage is incomplete, use only the latest full-year
+    # statement. Never sum four annual columns or multiply one quarter by four.
+    try:
+        annual = stock_obj.cashflow
+    except Exception:
+        annual = pd.DataFrame()
+    ocf_annual = read_row(annual, operating_cashflow_labels)
+    capex_annual = read_row(annual, capex_labels)
+    if ocf_annual is not None and capex_annual is not None:
+        return float(ocf_annual.iloc[0]) - abs(float(capex_annual.iloc[0])), "最新年度財報估算"
+    return None, "財報現金流欄位不足，未估算"
+
+
+def _peg_from_company_data(info):
+    """Use reported PEG or estimate from annual earnings growth, never one-quarter growth."""
+    info = info or {}
+    reported_peg = _finite_number(info.get("pegRatio"))
+    if reported_peg is not None and reported_peg > 0:
+        return reported_peg, "yfinance PEG 欄位"
+
+    pe = _finite_number(info.get("trailingPE"))
+    if pe is None or pe <= 0:
+        pe = _finite_number(info.get("forwardPE"))
+    annual_growth = _finite_number(info.get("earningsGrowth"))
+    if pe is None or pe <= 0 or annual_growth is None or annual_growth <= 0:
+        return None, "PEG 或年度盈餘成長資料不足"
+
+    # yfinance's earningsGrowth value is a decimal ratio (0.20 = 20%).
+    growth_percent = annual_growth * 100.0
+    if growth_percent <= 0:
+        return None, "年度盈餘成長資料不足"
+    return pe / growth_percent, "以本益比與年度盈餘成長估算"
+
+
 def score_dividend_quality(snapshot: Mapping[str, Any], rules: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
     """Return an independent 0-100 score, data coverage, screening reasons and risks."""
     config = dict(DEFAULT_RULES)
@@ -1681,9 +1750,10 @@ def _confirm_recovery_email(user_id, code):
     return True
 
 def parse_roe(raw_roe):
-    if raw_roe is None or np.isnan(raw_roe) or not np.isfinite(raw_roe):
+    value = _finite_number(raw_roe)
+    if value is None:
         return None
-    val = float(raw_roe)
+    val = value
     if abs(val) > 3.0:
         val = val / 100.0
     return val
@@ -2145,6 +2215,9 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
     period = f"{frame.index[0]:%Y-%m-%d} 至 {frame.index[-1]:%Y-%m-%d}；前70%訓練、後30%樣本外測試"
     assumptions = (
         f"共 {len(frame)} 筆日線；成本假設：每邊手續費 {fee:.4f}%、賣出交易稅 {tax:.3f}%、每邊滑價 {slip:.2f}%；"
+        + ("美股回測手續費與交易稅預設為 0，實際費用依券商、商品與交易方式而異，結果可能偏樂觀；請再用自訂回測填入實際費率。"
+           if not is_taiwan_stock else "台股回測以一般個股費率估算；券商折扣與 ETF 等商品稅率可能不同，請依實際交易成本調整。")
+        + "訊號在收盤資料確認並以同一根收盤價模擬成交，屬理想化假設；真實下單價格可能不同。"
         "回測逐項比較 MA20 突破與站穩、MA5／20 交叉、五線排列、KD、MACD、成交量、RSI、布林通道、BIAS、ATR、OBV、CCI、DMI／ADX 與 EMA12／26。"
         "各策略使用表列的明確進出場條件；指標週期採常用預設（RSI 14、布林 20、BIAS／CCI 20、ATR／ADX 14、成交量均線 20）。"
         "各策略套用固定停損 8%、移動停損 12%、預設風險報酬 1:3；ATR 候選另依進場時 ATR 設定 2 倍波動停損。"
@@ -2173,12 +2246,15 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             "period": period, "assumptions": assumptions, "recommendation": recommendation,
             "advice": advice}
 
-def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_pct, peg_value):
+def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_pct, peg_value,
+                                            momentum_window="近一年",
+                                            explanation_style="一般白話｜專業易讀"):
     """Translate three research factors into cautious, plain-language behavior cues."""
     gvi = _finite_number(gvi_value)
     momentum = _finite_number(momentum_pct)
     fcf_yield = _finite_number(fcf_yield_pct)
     peg = _finite_number(peg_value)
+    momentum_window = str(momentum_window or "目前可用資料區間")
     notes = {}
     checks = {}
 
@@ -2203,13 +2279,13 @@ def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_
         checks["動能趨勢面"] = None
     elif momentum >= 80:
         notes["動能趨勢面"] = (
-            "價格接近近一年可用收盤高位，表示趨勢延續較受關注，也可能吸引順勢買盤；"
+            f"價格接近{momentum_window}可用收盤高位，表示趨勢延續較受關注，也可能吸引順勢買盤；"
             "同時要留意追價與交易過度擁擠的風險，不能把強勢直接當成後續上漲保證。"
         )
         checks["動能趨勢面"] = True
     else:
         notes["動能趨勢面"] = (
-            "價格離近一年可用收盤高位較遠，順勢追價的支持相對較弱；"
+            f"價格離{momentum_window}可用收盤高位較遠，順勢追價的支持相對較弱；"
             "這不等於股票便宜，可能是整理或趨勢轉弱，需搭配其他資料判讀。"
         )
         checks["動能趨勢面"] = False
@@ -2249,6 +2325,42 @@ def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_
             "三個研究角度出現分歧，這是提醒使用者避免確認偏誤的時點："
             "不要只挑支持原有看法的指標，應先找出價值、趨勢與現金流訊號不一致的原因。"
         )
+    if str(explanation_style).startswith("生動童趣"):
+        notes = {
+            "GVI 價值面": (
+                "像看公司這棵樹最近結了多少果實：目前達到設定的研究線，可能有人想多看一眼；"
+                "還要確認果實年年都有，不能只憑這次分數說股票便宜。"
+                if checks["GVI 價值面"] is True else
+                "這次價值條件沒有達到設定線，像考卷有一題還不夠好；不代表公司一定不好或股票一定貴。"
+                if checks["GVI 價值面"] is False else
+                "價值資料缺幾片拼圖，先不猜它便宜還是昂貴。"
+            ),
+            "動能趨勢面": (
+                f"價格接近{momentum_window}的可用高點，像跑者跑得很快，容易吸引人跟上；"
+                "也可能突然喘一下，不能把強勢當成保證。"
+                if checks["動能趨勢面"] is True else
+                f"價格離{momentum_window}的可用高點還有距離，趨勢支持比較弱；"
+                "這不等於便宜，可能是在休息，也可能正在轉弱。"
+                if checks["動能趨勢面"] is False else
+                "歷史價格資料太少，像比賽只看了一小段影片，先不判斷跑勢。"
+            ),
+            "QARP 現金流與估值面": (
+                "現金流和成長估值兩題都達到設定線，可能吸引重視真實現金的投資人；"
+                "還要確認公司未來能不能繼續產生現金。"
+                if checks["QARP 現金流與估值面"] is True else
+                "現金流或成長估值至少一題沒達到設定線；先找出是哪一題，不能直接說公司很差或太貴。"
+                if checks["QARP 現金流與估值面"] is False else
+                "現金流或成長資料不夠，像少了幾題考卷，先不要急著打分數。"
+            ),
+        }
+        if not available_checks:
+            overall = "三張考卷的資料都不夠，先補資料再比較。"
+        elif passed_count == len(available_checks) and len(available_checks) == 3:
+            overall = "三個角度目前都達到研究線，像三張考卷都過了設定分數；這不代表下一次一定考得好。"
+        elif passed_count == 0:
+            overall = "目前已評估的條件都沒達到研究線；不要為了得到想要的答案而偷偷降低標準。"
+        else:
+            overall = "三個角度的答案不一樣，像拼圖還沒拼好；先找出價值、趨勢和現金流為什麼不一致。"
     return {"notes": notes, "checks": checks, "overall": overall}
 
 
@@ -2282,8 +2394,8 @@ def build_price_volume_market_psychology(change_pct, volume_ratio, timeframe_nam
     return f"{interval}價格變化接近持平；可視為目前方向不明，避免只憑單一週期推斷市場情緒。"
 
 
-def _render_market_psychology_guide(st, selected_module):
-    """Show a concise behavior-focused reading guide for the active module."""
+def _render_market_psychology_guide(st, selected_module, explanation_style="一般白話｜專業易讀"):
+    """Show a behavior-focused guide in the selected language and layout style."""
     guides = {
         "📊 彩色 K 線圖與成交量": "K 線和成交量呈現已發生的交易結果。價升量增可能代表參與度提高，也可能伴隨追價；單根 K 棒不能辨認投資人身分或確定情緒。",
         "📦 籌碼流向參考": "分點家數反映淨買方或淨賣方參與的分點廣度；分點不是投資人身分。再看淨額集中程度、價格和資料期間，避免直接貼上主力吸籌或散戶接盤標籤。",
@@ -2296,16 +2408,47 @@ def _render_market_psychology_guide(st, selected_module):
         "📊 當日全市場三大法人佔股本比 Top 10": "排行容易讓人把『名次高』誤當成『勝率高』。單日法人流量只說明當日交易相對股本的大小；避免追逐榜單，先確認資料日期和是否連續出現。",
         "🧭 投資組合理財": "成本價容易成為心理錨點，虧損時也可能讓人不願重新評估。預先設定配置和風險檢查門檻，有助於降低情緒化決策；門檻仍須符合個人承受能力，不代表最佳配置。",
     }
+    playful_guides = {
+        "📊 彩色 K 線圖與成交量": "把 K 線想成價格的天氣紀錄，成交量像是今天有多少人來操場。人變多不代表明天一定漲，還要看價格往哪裡走。",
+        "📦 籌碼流向參考": "券商分點像很多個售票窗口；窗口數量多，不代表背後的人一定是散戶或大戶。還要一起看買賣金額、集中程度、日期和股價。",
+        "🤖 網格自動生成器": "網格像在價格範圍裡放一排階梯，漲到一格就照規則賣、跌到一格就照規則買。若價格一直往同一方向跑，階梯可能不再適合。",
+        "⚖️ 網格／持有／定期定額比較": "三種方法像三種走路方式：一次出發、分次出發、或照價格階梯調整。哪一種比較適合，要看途中跌多少、花多少成本，不能只看終點誰最高。",
+        "🧪 技術指標自訂策略回測": "回測像拿舊比賽錄影練習：以前這樣做的結果可以參考，但下一場可能不一樣。要看練習次數、扣掉費用後的結果和最深跌幅。",
+        "💸 配息複利策略": "股息像公司把一部分成果分給股東，不是憑空多出一筆錢。若股價下跌或公司少發股息，收到的錢可能補不回去。",
+        "🚀 華爾街機構級三核心策略雷達": "三核心像三張不同科目的考卷：價值、趨勢、現金流。三張答案不一樣時，要先找原因；高分只是符合研究條件，不是保證賺錢。",
+        "🏦 台股三大法人獨立選股策略": "法人買賣超像公告的當日收據，不是他們手上還剩多少，也不能預告明天。先看日期、連續幾天，再和股價、成交量一起看。",
+        "📊 當日全市場三大法人佔股本比 Top 10": "Top 10 像今天的排行榜，只告訴我們今天誰的交易比較大，不代表名次高就比較會漲。先看日期，再看後面幾天有沒有延續。",
+        "🧭 投資組合理財": "投資組合像把積木分成幾盒，不要只盯著其中一盒。要看每盒比例、總共可能跌多少，還要留意成本價會不會讓自己捨不得重新檢查。",
+    }
     note = guides.get(selected_module)
     if note:
-        st.info(f"🧠 市場心理重點｜{selected_module}\n\n{note}")
-        st.caption("這些是可能的行為線索，不是對投資人心理的直接測量，也不是買賣訊號。")
+        if explanation_style.startswith("生動童趣"):
+            with st.expander(f"🧩 生活比喻版｜{selected_module}", expanded=True):
+                st.success(playful_guides.get(selected_module, note))
+                st.caption("這些比喻只幫助理解資料，不代表明天走勢，也不是買賣訊號。")
+        else:
+            st.info(f"🧠 市場心理重點｜{selected_module}\n\n{note}")
+            st.caption("這些是可能的行為線索，不是對投資人心理的直接測量，也不是買賣訊號。")
 
 
-def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_context, backtest_summary):
+def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_context, backtest_summary,
+                               explanation_style="一般白話｜專業易讀"):
     research_mode = "必須使用網路搜尋查證近期資料，並附上可點擊的來源與日期。" if provider == "ChatGPT" else "目前使用者選擇 Gemini；只能根據提供的資料與新聞線索分析，不可假裝已完成即時網路搜尋，來源不足時明確寫出資料限制。"
+    if explanation_style.startswith("生動童趣"):
+        style_instruction = (
+            "採用生動童趣、生活比喻的說法，讓沒有金融背景的人甚至小朋友也能聽懂；"
+            "例如把回測說成回看舊比賽、把多空說成拔河，但每個比喻後要立刻說明真實數據代表什麼。"
+            "句子短、先講意思再講術語，不用幼稚語氣、不鼓勵小朋友投資、不把股票說成遊戲，也不弱化虧損風險。"
+        )
+    else:
+        style_instruction = (
+            "採用一般投資人容易閱讀的白話專業風格；先講結論和數據，再補充必要術語，"
+            "句子精簡自然，不使用艱深或官樣文章。"
+        )
     return f"""你是謹慎的台灣與美國股票研究助理，請使用繁體中文寫一份重點清楚、白話、有資料依據的個股研究報告。
 股票：{symbol}（{name}）
+目前選擇的解說風格：{explanation_style}
+風格要求：{style_instruction}
 量化與策略雷達資料：
 {quant_summary}
 
@@ -5223,6 +5366,14 @@ if auth_user:
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
     )
+    st.sidebar.markdown("### 🗣️ 解說風格與版面")
+    explanation_style = st.sidebar.radio(
+        "選擇顯示方式",
+        options=["一般白話｜專業易讀", "生動童趣｜生活比喻"],
+        key="explanation_style_selector",
+        help="切換說明用詞、提示卡片和 AI 報告風格；不會改動行情資料、指標公式或策略門檻。",
+    )
+    st.sidebar.caption("童趣版用比喻幫助理解，仍保留虧損風險、資料限制與非買賣指令提醒。")
 
     def _jump_to_stock_diagnosis(ticker):
         st.session_state["selected_stock_input"] = str(ticker).strip().upper()
@@ -5573,7 +5724,7 @@ if auth_user:
                     with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="資料來源最近更新的價格；可能不是即時成交價，請留意下方資料時間。"); st.caption(f"📢 即時報價 ({cache_time_str})")
                     
                     if bv_val is not None:
-                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；不是合理價或未來報酬預測。"); st.caption("📢 最新重算")
+                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；公式假設目前 ROE 未來五年維持不變，這不是預測，且尚未證明能穩定改善績效。"); st.caption("📢 最新重算")
                         with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str, help="公司以股東權益創造盈餘的比率；需搭配產業特性及財報期間判讀。"); st.caption(f"📢 {roe_src}")
                         with gc4: st.metric(label="📖 每股淨值", value=bv_str, help="公司帳面資產扣除負債後，平均分配到每一股的金額；不等於股票的市場價格。"); st.caption(f"📢 {bv_src}")
                         with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="顯示目前股價相對每股帳面價值的倍數；產業間差異大，跨產業比較要小心。"); st.caption("📢 溢價程度")
@@ -5591,45 +5742,22 @@ if auth_user:
                 L = len(df_chart)
                 close_today = price_val
                 close_history = pd.to_numeric(df_chart['Close'], errors='coerce').dropna() if 'Close' in df_chart.columns else pd.Series(dtype=float)
+                momentum_window_text = f"最近最多 252 根{selected_tf} K 棒"
                 high_252d = float(close_history.tail(min(252, len(close_history))).max()) if len(close_history) >= 50 else np.nan
                 momentum_score = float((close_today / high_252d) * 100) if pd.notna(high_252d) and high_252d > 0 else None
 
-                fcf_main = info_obj_main.get('freeCashflow')
-                mcap_main = info_obj_main.get('marketCap')
-                if (fcf_main is None or np.isnan(fcf_main)) and mcap_main and mcap_main > 0:
-                    try:
-                        cf_main = stock_obj_main.quarterly_cashflow
-                        if cf_main.empty: cf_main = stock_obj_main.cashflow
-                        if not cf_main.empty:
-                            ocf, capex = None, None
-                            for ocf_k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'Cash Flow From Continuing Operating Activities']:
-                                if ocf_k in cf_main.index:
-                                    s = cf_main.loc[ocf_k].dropna()
-                                    ocf = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                    break
-                            for cap_k in ['Capital Expenditure', 'Capital Expenditures']:
-                                if cap_k in cf_main.index:
-                                    s = cf_main.loc[cap_k].dropna()
-                                    capex = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                    break
-                            if ocf is not None:
-                                capex_val = abs(float(capex)) if capex is not None else 0.0
-                                fcf_main = float(ocf) - capex_val
-                    except Exception:
-                        pass
+                fcf_main = _finite_number(info_obj_main.get('freeCashflow'))
+                fcf_basis_main = "yfinance 公司資料欄位"
+                if fcf_main is None:
+                    fcf_main, fcf_basis_main = _free_cash_flow_from_statements(stock_obj_main)
+                mcap_main = _finite_number(info_obj_main.get('marketCap'))
+                fcf_yield_main = (
+                    fcf_main / mcap_main * 100.0
+                    if fcf_main is not None and mcap_main is not None and mcap_main > 0
+                    else None
+                )
                 
-                fcf_yield_main = (float(fcf_main) / float(mcap_main) * 100.0) if (fcf_main and mcap_main and float(mcap_main) > 0) else None
-                
-                peg_raw_main = info_obj_main.get('pegRatio')
-                peg_val_main = float(peg_raw_main) if (peg_raw_main and not np.isnan(peg_raw_main) and peg_raw_main > 0) else None
-                if peg_val_main is None:
-                    try:
-                        pe_val = info_obj_main.get('trailingPE') or info_obj_main.get('forwardPE')
-                        growth_val = info_obj_main.get('earningsGrowth') or info_obj_main.get('earningsQuarterlyGrowth')
-                        if pe_val and growth_val and float(pe_val) > 0 and float(growth_val) > 0:
-                            peg_val_main = float(pe_val) / (float(growth_val) * 100.0)
-                    except Exception:
-                        pass
+                peg_val_main, peg_basis_main = _peg_from_company_data(info_obj_main)
 
                 scores = {}
                 reasons = {}
@@ -5651,10 +5779,10 @@ if auth_user:
                     reasons['動能突破雷達'] = "有效歷史收盤資料少於 50 根，動能值缺失且不納入評分。"
                 elif momentum_score >= 80:
                     scores['動能突破雷達'] = 95 if momentum_score >= 95 else 85
-                    reasons['動能突破雷達'] = f"目前價格約在近一年可用最高收盤價的 {momentum_score:.1f}%，達到趨勢研究門檻。"
+                    reasons['動能突破雷達'] = f"目前價格約在{momentum_window_text}可用最高收盤價的 {momentum_score:.1f}%，達到趨勢研究門檻。"
                 else:
                     scores['動能突破雷達'] = 50
-                    reasons['動能突破雷達'] = f"目前價格約在近一年可用最高收盤價的 {momentum_score:.1f}%，未達趨勢研究門檻。"
+                    reasons['動能突破雷達'] = f"目前價格約在{momentum_window_text}可用最高收盤價的 {momentum_score:.1f}%，未達趨勢研究門檻。"
 
                 # 3. QARP 現金流策略評分
                 if fcf_yield_main is None or peg_val_main is None:
@@ -5668,7 +5796,8 @@ if auth_user:
                     reasons['QARP 現金流雷達'] = f"現金流收益參考為 {fcf_yield_main:.2f}%，成長估值參考為 {peg_val_main:.2f}；至少一項未達目前研究門檻。"
 
                 three_core_psychology = build_three_core_market_psychology_notes(
-                    gvi_val, momentum_score, fcf_yield_main, peg_val_main
+                    gvi_val, momentum_score, fcf_yield_main, peg_val_main,
+                    momentum_window_text, explanation_style,
                 )
 
                 # 顯示目前門檻的符合度，不把它解讀為實證優勢或進場建議。
@@ -5708,6 +5837,24 @@ if auth_user:
                         None: "資料不足，暫不解讀現金流與估值。",
                     },
                 }
+                if explanation_style.startswith("生動童趣"):
+                    compact_psychology = {
+                        "GVI 價值面": {
+                            True: "像果樹目前有成果；還要看能否持續。",
+                            False: "這次沒達研究線，不等於公司一定差。",
+                            None: "資料缺幾片，先不猜。",
+                        },
+                        "動能趨勢面": {
+                            True: "像跑得快的選手；留意會不會喘。",
+                            False: "趨勢支持較弱；不代表價格便宜。",
+                            None: "歷史資料太少，先不判跑勢。",
+                        },
+                        "QARP 現金流與估值面": {
+                            True: "兩項都達研究線；確認現金流能否續航。",
+                            False: "至少一題未達標；先找出原因。",
+                            None: "現金流或成長資料不夠。",
+                        },
+                    }
                 factor_details = [
                     {
                         "strategy": "GVI 價值雷達",
@@ -5718,7 +5865,7 @@ if auth_user:
                     {
                         "strategy": "動能突破雷達",
                         "psych_key": "動能趨勢面",
-                        "threshold": "近一年可用最高收盤價比值達 80% 以上；至少需 50 根有效收盤資料",
+                        "threshold": f"{momentum_window_text}最高收盤價比值達 80% 以上；至少需 50 根有效收盤資料",
                         "highlight": f"高點比值 {momentum_score:.1f}%" if momentum_score is not None else "動能資料不足",
                     },
                     {
@@ -5750,6 +5897,15 @@ if auth_user:
                     compact_overall = "目前可評估的條件都未達門檻，避免為了看多而放寬標準。"
                 else:
                     compact_overall = "訊號有分歧；先查明價值、趨勢與現金流差異，避免只挑支持原看法的資料。"
+                if explanation_style.startswith("生動童趣"):
+                    if not known_core_checks:
+                        compact_overall = "三張考卷資料都不夠，先補齊再比較。"
+                    elif all(value is True for value in known_core_checks) and len(known_core_checks) == 3:
+                        compact_overall = "三個角度都達研究線，像三張考卷都過線；不代表下一次一定考得好。"
+                    elif all(value is False for value in known_core_checks):
+                        compact_overall = "目前已評估的條件都沒過線，先別為了想看多就降低標準。"
+                    else:
+                        compact_overall = "三個答案不一樣，像拼圖還沒拼好；先找出差異原因。"
 
                 compact_cards = []
                 for item in factor_details:
@@ -5799,10 +5955,10 @@ if auth_user:
                         )
                         detail_sources = {
                             "GVI 價值雷達": f"每股淨值：{bv_src}；ROE：{roe_src}；股價：yfinance 行情資料。",
-                            "動能突破雷達": "來源：目前股票歷史收盤資料；依目前畫面可用資料計算，資料長度不足時不評分。",
+                            "動能突破雷達": f"來源：目前股票歷史收盤資料；比較{momentum_window_text}，至少需 50 根有效收盤資料。",
                             "QARP 現金流雷達": (
-                                "自由現金流／市值參考取自 yfinance 公司資料；若自由現金流缺漏，系統改用可取得的營運現金流與資本支出補算。"
-                                "PEG 優先取 yfinance PEG；缺漏時才以可取得的本益比與盈餘成長資料估算。"
+                                f"自由現金流依據：{fcf_basis_main}；搭配 yfinance 市值計算參考值。若使用年度財報，期間可能較近四季資料更舊。"
+                                f"PEG 依據：{peg_basis_main}；估算只採年度盈餘成長，不以單季成長替代。"
                             ),
                         }
                         for item in factor_details:
@@ -5929,7 +6085,8 @@ if auth_user:
                                             branch_snapshot, ai_close_window, selected_tf
                                         )
                                     ai_psychology = build_three_core_market_psychology_notes(
-                                        gvi_val, momentum_score, fcf_yield_main, peg_val_main
+                                        gvi_val, momentum_score, fcf_yield_main, peg_val_main,
+                                        momentum_window_text, explanation_style,
                                     )
                                     ai_psychology_lines = [
                                         f"• {factor}：{interpretation}"
@@ -5950,6 +6107,7 @@ if auth_user:
                                     quant_summary = (
                                         f"成長價值研究分數={gvi_str}；股東權益報酬率={roe_str}；股價淨值比={pb_str}；"
                                         f"目前研究比對分數最高的單項條件={best_strategy}（{best_score}/100，這是條件比對分數，不是勝率）；"
+                                        f"動能比值區間={momentum_window_text}；"
                                         f"價量動能估算={chip_status_text}；目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%\n"
                                         f"三核心白話心理解讀：\n{market_psychology_brief}"
                                     )
@@ -5966,6 +6124,7 @@ if auth_user:
                                         ai_backtest["text"]
                                         + "\n\n系統依樣本外門檻與最新日線整理的條件式建議：\n"
                                         + str(ai_backtest.get("advice", "回測資料不足，暫不提出策略建議。")),
+                                        explanation_style=explanation_style,
                                     )
                                     if provider_name == "ChatGPT":
                                         success_report, ai_sources = generate_openai_research(
@@ -5996,12 +6155,21 @@ if auth_user:
                                     st.session_state[f"{report_key}_sources"] = ai_sources
                                     st.session_state[f"{report_key}_psychology"] = market_psychology_brief
                                     st.session_state[f"{report_key}_branch_context"] = broker_branch_ai_context
+                                    st.session_state[f"{report_key}_style"] = explanation_style
                                 except Exception as ai_e:
                                     st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
                     
                     if f"ai_report_{selected_stock}" in st.session_state:
                         report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
                         st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
+                        report_style = st.session_state.get(
+                            f"ai_report_{selected_stock}_style", "一般白話｜專業易讀"
+                        )
+                        if report_style != explanation_style:
+                            st.caption(
+                                f"此份報告以「{report_style}」產生；上方已切換為「{explanation_style}」。"
+                                "如要更新報告文字，請重新執行 AI 分析。"
+                            )
                         saved_report_branch_context = st.session_state.get(
                             f"ai_report_{selected_stock}_branch_context", ""
                         )
@@ -6024,7 +6192,11 @@ if auth_user:
                             with st.expander("查看本次 AI 分析使用的分點摘要", expanded=False):
                                 st.markdown(saved_branch_context)
                         ai_report = st.session_state[f"ai_report_{selected_stock}"]
-                        st.markdown(ai_report)
+                        if explanation_style.startswith("生動童趣"):
+                            with st.expander("🧩 生活比喻版研究筆記", expanded=True):
+                                st.markdown(ai_report)
+                        else:
+                            st.markdown(ai_report)
                         saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
                         saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
                         if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
@@ -6112,6 +6284,7 @@ if auth_user:
                                     email_body = (
                                         f"個股：{selected_stock} {c_name}\n"
                                         f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                                        f"解說風格：{report_style}\n\n"
                                         f"{email_branch_section}"
                                         f"{email_branch_interpretation}"
                                         f"{email_backtest_section}"
@@ -6154,7 +6327,7 @@ if auth_user:
 
         # Keep the behavior guide with the active panel, below the terminal
         # header and market overview instead of placing it at the page top.
-        _render_market_psychology_guide(st, selected_module)
+        _render_market_psychology_guide(st, selected_module, explanation_style)
 
         if df_chart is None or df_chart.empty:
             if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略"]:
@@ -8056,8 +8229,22 @@ if auth_user:
                             entry_conds, exit_conds,
                             float(bt_rr_multiple) if bt_rr_enabled else None,
                         )
-                        st.markdown("#### 🧭 操盤手回測條件提示")
+                        st.markdown("#### 🧭 回測後方向參考")
                         st.info(f"**判讀：{backtest_advice['status']}**\n\n" + "\n\n".join(f"- {note}" for note in backtest_advice["notes"]))
+                        if explanation_style.startswith("生動童趣"):
+                            child_backtest_explanations = {
+                                "可優先列入觀察": "這套方法在舊資料練習中有些表現不錯，可以繼續觀察；但舊比賽贏過，不保證下一場也贏。",
+                                "繼續觀察": "目前有一些線索，但還有問號；先多看幾段資料，不急著照做。",
+                                "樣本不足": "練習的買賣次數太少，還看不出這套方法穩不穩。",
+                                "暫不建議直接採用": "舊資料裡這套方法有明顯弱點，先不要只靠它決定進出場。",
+                            }
+                            st.success(
+                                "🧩 用生活比喻說："
+                                + child_backtest_explanations.get(
+                                    backtest_advice["status"],
+                                    "這是舊資料的練習結果，不能保證下一次會一樣。",
+                                )
+                            )
                         st.caption("提示會一起參考交易筆數、賺錢交易比例、賺賠金額比、每筆平均損益、同期比較和較晚期間。40%／55% 勝率、20／30 筆、較晚期間 10 筆及 1.2 賺賠比只是畫面提示門檻，不是保證獲利標準。網格比較沿用另一頁的資金與成本設定；請先確認設定相同。")
 
                         dca_total_return = None
@@ -8156,7 +8343,7 @@ if auth_user:
                         if strategy_metrics["cagr"] is None:
                             st.info("回測時間跨度或有效資料筆數不足，為避免年化數字失真，平均每年報酬和報酬起伏參考數值暫不顯示。")
                         st.caption(
-                            "模擬假設所有本金可投入且可買零碎股；進場及指標訊號依收盤價處理。啟用風險報酬停利時，停損／停利以當根最高價、最低價判斷並以觸發價成交；若開盤跳空越過觸發價，按開盤價估算。"
+                            "模擬假設所有本金可投入且可買零碎股；指標訊號以收盤資料確認並假設同一根收盤價成交，屬理想化假設，實際下單價可能不同。啟用風險報酬停利時，停損／停利以當根最高價、最低價判斷並以觸發價成交；若開盤跳空越過觸發價，按開盤價估算。"
                             "同一根 K 棒同時碰到停損與停利時，採較保守的停損先出；日線無法還原當日價格先後。直接買進持有使用相同價格資料，沒有另外估算股息。"
                         )
 
@@ -8169,13 +8356,17 @@ if auth_user:
         col_s1, col_s2, col_s3 = st.columns(3)
         with col_s1:
             strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
-            st.caption("研究假設：以 ROE 與淨值資料計算 GVI。財報更新較慢，產業間可比性有限。")
+            st.caption("研究假設：以 ROE 與淨值資料計算 GVI，並假設目前 ROE 未來五年維持不變；財報更新較慢，產業間可比性有限。")
         with col_s2:
             strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
             st.caption("研究假設：以可用歷史高點計算距離。歷史資料少於 50 根時不評分、不納入篩選。")
         with col_s3:
             strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
             st.caption("研究假設：以自由現金流收益率與 PEG 作條件；缺少任一資料時不計入。")
+        st.caption(
+            f"動能比值比較最近最多 252 根「{selected_tf}」K 棒的最高收盤價；時間軸切換會改變比較期間，"
+            "至少 50 根有效收盤資料才計算，不一定等同近一年。"
+        )
 
         with st.expander("📐 GVI、動能與 QARP 的獨立樣本外驗證", expanded=False):
             st.warning(
@@ -8189,7 +8380,7 @@ if auth_user:
             st.dataframe(validation_status, use_container_width=True, hide_index=True)
             st.caption(
                 "有效比較需以相同股票池與期間，比較未加條件的基準組和逐一加入單一因子的組合；先鎖定參數，再用未參與調參的後段資料檢查超額報酬、回撤、換手與交易成本。"
-                "缺少歷史點時財報時不會以當期基本面回填過去，避免前視偏誤。"
+                "缺少歷史點時財報時不會以當期基本面回填過去，避免前視偏誤。動能採最近最多 252 根所選週期 K 棒，切換時間軸會改變區間。"
             )
 
         st.info(
@@ -8283,7 +8474,10 @@ if auth_user:
             if result_view.empty:
                 st.info("本次無符合標的。已完整套用目前勾選的條件，沒有放寬條件或回退顯示未通過的股票。")
                 return
-            st.caption("GVI、動能、自由現金流與成長估值是研究用估算；策略評分只表示本次股票池中的相對排序，不是勝率或預期報酬。價格接近高位可能吸引順勢買盤，也可能增加追價風險；價量動能不是實際籌碼或法人資料。")
+            if explanation_style.startswith("生動童趣"):
+                st.caption("分數像這次班上的相對排名，不是考試及格率；換一批股票或勾選條件，名次就可能改變。GVI 假設目前 ROE 五年不變，像假設樹每年都結一樣多果實，並不是未來保證。")
+            else:
+                st.caption("GVI、動能、自由現金流與成長估值是研究用估算；策略評分只表示本次股票池中的相對排序，不是勝率或預期報酬。股票池或勾選條件改變時會重新排名，不宜跨次比較。GVI 假設目前 ROE 未來五年不變，尚未證明能穩定改善績效。價格接近高位可能吸引順勢買盤，也可能增加追價風險；價量動能不是實際籌碼或法人資料。")
             st.caption("點選明細表中的股票列，再選擇個股即時診斷或加入操盤手自訂觀察代碼。")
             table_event = st.dataframe(
                 result_view,
@@ -8356,44 +8550,17 @@ if auth_user:
                     stock_obj = yf.Ticker(t)
                     info_obj = stock_obj.info if hasattr(stock_obj, 'info') and stock_obj.info else {}
                 
-                    fcf = info_obj.get('freeCashflow')
-                    mcap = info_obj.get('marketCap') or row['mcap']
+                    fcf = _finite_number(info_obj.get('freeCashflow'))
+                    if fcf is None:
+                        fcf, _fcf_basis = _free_cash_flow_from_statements(stock_obj)
+                    mcap = _finite_number(info_obj.get('marketCap')) or _finite_number(row.get('mcap'))
+                    fcf_yield = (
+                        fcf / mcap * 100.0
+                        if fcf is not None and mcap is not None and mcap > 0
+                        else None
+                    )
 
-                    if (fcf is None or np.isnan(fcf)) and mcap and mcap > 0:
-                        try:
-                            cf = stock_obj.quarterly_cashflow
-                            if cf.empty: cf = stock_obj.cashflow
-                            if not cf.empty:
-                                ocf, capex = None, None
-                                for ocf_k in ['Operating Cash Flow', 'Total Cash From Operating Activities', 'Cash Flow From Continuing Operating Activities']:
-                                    if ocf_k in cf.index:
-                                        s = cf.loc[ocf_k].dropna()
-                                        ocf = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                        break
-                                for cap_k in ['Capital Expenditure', 'Capital Expenditures']:
-                                    if cap_k in cf.index:
-                                        s = cf.loc[cap_k].dropna()
-                                        capex = float(s.iloc[:4].sum()) if len(s) >= 4 else float(s.iloc[0]) * 4
-                                        break
-                                if ocf is not None:
-                                    capex_val = abs(float(capex)) if capex is not None else 0.0
-                                    fcf = float(ocf) - capex_val
-                        except Exception:
-                            pass
-
-                    fcf_yield = (float(fcf) / float(mcap) * 100.0) if (fcf and mcap and float(mcap) > 0) else None
-
-                    peg_raw = info_obj.get('pegRatio')
-                    peg_val = float(peg_raw) if (peg_raw and not np.isnan(peg_raw) and peg_raw > 0) else None
-
-                    if peg_val is None:
-                        try:
-                            pe_val = info_obj.get('trailingPE') or info_obj.get('forwardPE')
-                            growth_val = info_obj.get('earningsGrowth') or info_obj.get('earningsQuarterlyGrowth')
-                            if pe_val and growth_val and float(pe_val) > 0 and float(growth_val) > 0:
-                                peg_val = float(pe_val) / (float(growth_val) * 100.0)
-                        except Exception:
-                            pass
+                    peg_val, _peg_basis = _peg_from_company_data(info_obj)
 
                     df_hist, chip_status_text, _ = calculate_chip_and_backtest(t, df_hist, selected_tf)
                 
