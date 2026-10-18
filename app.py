@@ -4114,13 +4114,16 @@ def compute_backtest_indicators(df, ma_entry_p=20, ma_exit_p=20, rsi_p=14, bb_p=
     return df_calc
 
 
-def compute_kline_indicator_frame(df):
+def compute_kline_indicator_frame(df, **indicator_kwargs):
     """Build the commonly used chart indicators without changing backtest rules."""
-    frame = compute_backtest_indicators(df)
+    frame = compute_backtest_indicators(df, **indicator_kwargs)
     high = pd.to_numeric(frame["High"], errors="coerce")
     low = pd.to_numeric(frame["Low"], errors="coerce")
     close = pd.to_numeric(frame["Close"], errors="coerce")
     volume = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0)
+
+    frame["EMA12"] = close.ewm(span=12, adjust=False).mean()
+    frame["EMA26"] = close.ewm(span=26, adjust=False).mean()
 
     previous_close = close.shift(1)
     true_range = pd.concat(
@@ -4197,6 +4200,20 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
     dif_arr = df_calc['DIF'].to_numpy()
     dem_arr = df_calc['DEM'].to_numpy()
     rsi_arr = df_calc['RSI'].to_numpy()
+    def indicator_values(column_name):
+        if column_name not in df_calc.columns:
+            return np.full(len(df_calc), np.nan, dtype=float)
+        return pd.to_numeric(df_calc[column_name], errors='coerce').to_numpy(dtype=float)
+
+    bias_arr = indicator_values('BIAS')
+    atr_arr = indicator_values('ATR')
+    obv_arr = indicator_values('OBV')
+    cci_arr = indicator_values('CCI')
+    adx_arr = indicator_values('ADX')
+    plus_di_arr = indicator_values('PLUS_DI')
+    minus_di_arr = indicator_values('MINUS_DI')
+    ema12_arr = indicator_values('EMA12')
+    ema26_arr = indicator_values('EMA26')
     bb_upper = df_calc['BB_Upper'].to_numpy()
     bb_lower = df_calc['BB_Lower'].to_numpy()
     bb_middle = df_calc['BB_Middle'].to_numpy() if 'BB_Middle' in df_calc.columns else np.full(len(df_calc), np.nan)
@@ -4264,6 +4281,39 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             elif entry_conds['bb_mode'] == '觸及布林下軌反彈':
                 buy_checks.append(lows[i-1] <= bb_lower[i-1] and closes[i] > bb_lower[i])
 
+            bias_mode = entry_conds.get('bias_mode', '停用')
+            if bias_mode == '向上突破 0%':
+                buy_checks.append(np.isfinite(bias_arr[i-1:i+1]).all() and bias_arr[i-1] <= 0 <= bias_arr[i])
+            elif bias_mode == '自 −5% 向上回升':
+                buy_checks.append(np.isfinite(bias_arr[i-1:i+1]).all() and bias_arr[i-1] <= -5 < bias_arr[i])
+
+            if entry_conds.get('atr_mode') == '低波動篩選':
+                atr_pct = (atr_arr[i] / closes[i] * 100) if closes[i] > 0 and np.isfinite(atr_arr[i]) else np.nan
+                buy_checks.append(np.isfinite(atr_pct) and atr_pct <= float(entry_conds.get('atr_pct_limit', 4.0)))
+
+            obv_mode = entry_conds.get('obv_mode', '停用')
+            if obv_mode == 'OBV 高於前一根':
+                buy_checks.append(np.isfinite(obv_arr[i-1:i+1]).all() and obv_arr[i] > obv_arr[i-1])
+
+            cci_mode = entry_conds.get('cci_mode', '停用')
+            if cci_mode == '上穿 −100':
+                buy_checks.append(np.isfinite(cci_arr[i-1:i+1]).all() and cci_arr[i-1] <= -100 < cci_arr[i])
+            elif cci_mode == '上穿 0':
+                buy_checks.append(np.isfinite(cci_arr[i-1:i+1]).all() and cci_arr[i-1] <= 0 < cci_arr[i])
+
+            if entry_conds.get('adx_mode') == '趨勢增強且 +DI 領先':
+                adx_floor = float(entry_conds.get('adx_threshold', 20.0))
+                buy_checks.append(
+                    np.isfinite([adx_arr[i], plus_di_arr[i], minus_di_arr[i]]).all()
+                    and adx_arr[i] >= adx_floor and plus_di_arr[i] > minus_di_arr[i]
+                )
+
+            if entry_conds.get('ema_mode') == 'EMA12 黃金交叉 EMA26':
+                buy_checks.append(
+                    np.isfinite([ema12_arr[i-1], ema26_arr[i-1], ema12_arr[i], ema26_arr[i]]).all()
+                    and ema12_arr[i-1] <= ema26_arr[i-1] and ema12_arr[i] > ema26_arr[i]
+                )
+
             if buy_checks and (all(buy_checks) if entry_conds['match_mode'] == 'ALL' else any(buy_checks)):
                 position = True
                 entry_price = float(closes[i])
@@ -4278,6 +4328,12 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                     float(exit_conds.get('stop_loss_pct', 0.0)),
                     float(exit_conds.get('trailing_stop_pct', 0.0)),
                 ]
+                atr_multiple_for_risk = float(exit_conds.get('atr_stop_multiple', 0.0) or 0.0)
+                entry_atr_for_risk = atr_arr[i] if i < len(atr_arr) else np.nan
+                if atr_multiple_for_risk > 0 and np.isfinite(entry_atr_for_risk) and entry_price > 0:
+                    configured_risk_pcts.append(
+                        float(entry_atr_for_risk) * atr_multiple_for_risk / entry_price * 100.0
+                    )
                 configured_risk_pcts = [value for value in configured_risk_pcts if value > 0]
                 if configured_risk_pcts:
                     initial_risk_pct = min(configured_risk_pcts)
@@ -4304,6 +4360,14 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                 if lows[i] <= trail_price or closes[i] <= trail_price:
                     exit_reasons.append(f"最高點回撤 (-{exit_conds['trailing_stop_pct']}%)")
                     stop_hits.append((trail_price, exit_reasons[-1]))
+
+            atr_stop_multiple = float(exit_conds.get('atr_stop_multiple', 0.0) or 0.0)
+            entry_atr_value = float(atr_arr[entry_index]) if entry_index is not None and np.isfinite(atr_arr[entry_index]) else np.nan
+            if atr_stop_multiple > 0 and np.isfinite(entry_atr_value):
+                atr_stop_price = entry_price - entry_atr_value * atr_stop_multiple
+                if atr_stop_price > 0 and (lows[i] <= atr_stop_price or closes[i] <= atr_stop_price):
+                    exit_reasons.append(f"ATR 停損（進場時波動幅度 × {atr_stop_multiple:g}）")
+                    stop_hits.append((atr_stop_price, exit_reasons[-1]))
 
             if exit_conds['ma_mode'] == '跌破均線' and not np.isnan(ma_exit[i-1]):
                 if closes[i-1] >= ma_exit[i-1] and closes[i] < ma_exit[i]:
@@ -4346,6 +4410,38 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             elif exit_conds['bb_mode'] == '站上布林中軌':
                 if np.isfinite(bb_middle[i-1]) and np.isfinite(bb_middle[i]) and closes[i-1] <= bb_middle[i-1] and closes[i] > bb_middle[i]:
                     exit_reasons.append("站上布林中軌停利")
+
+            bias_mode = exit_conds.get('bias_mode', '停用')
+            if bias_mode == '跌破 0%':
+                if np.isfinite(bias_arr[i-1:i+1]).all() and bias_arr[i-1] >= 0 > bias_arr[i]:
+                    exit_reasons.append("BIAS 跌破 0%")
+            elif bias_mode == '高檔回落並跌破 +5%':
+                if np.isfinite(bias_arr[i-1:i+1]).all() and bias_arr[i-1] >= 5 > bias_arr[i]:
+                    exit_reasons.append("BIAS 高檔回落至 +5% 以下")
+
+            if exit_conds.get('obv_mode') == 'OBV 低於前一根':
+                if np.isfinite(obv_arr[i-1:i+1]).all() and obv_arr[i] < obv_arr[i-1]:
+                    exit_reasons.append("OBV 低於前一根")
+
+            cci_mode = exit_conds.get('cci_mode', '停用')
+            if cci_mode == '跌破 +100':
+                if np.isfinite(cci_arr[i-1:i+1]).all() and cci_arr[i-1] >= 100 > cci_arr[i]:
+                    exit_reasons.append("CCI 跌破 +100")
+            elif cci_mode == '跌破 0':
+                if np.isfinite(cci_arr[i-1:i+1]).all() and cci_arr[i-1] >= 0 > cci_arr[i]:
+                    exit_reasons.append("CCI 跌破 0")
+
+            adx_mode = exit_conds.get('adx_mode', '停用')
+            if adx_mode == '+DI 跌破 −DI':
+                if np.isfinite([plus_di_arr[i-1], minus_di_arr[i-1], plus_di_arr[i], minus_di_arr[i]]).all() and plus_di_arr[i-1] >= minus_di_arr[i-1] and plus_di_arr[i] < minus_di_arr[i]:
+                    exit_reasons.append("DMI +DI 跌破 −DI")
+            elif adx_mode == 'ADX 低於門檻':
+                if np.isfinite(adx_arr[i]) and adx_arr[i] < float(exit_conds.get('adx_threshold', 20.0)):
+                    exit_reasons.append("ADX 趨勢強度低於設定門檻")
+
+            if exit_conds.get('ema_mode') == 'EMA12 死亡交叉 EMA26':
+                if np.isfinite([ema12_arr[i-1], ema26_arr[i-1], ema12_arr[i], ema26_arr[i]]).all() and ema12_arr[i-1] >= ema26_arr[i-1] and ema12_arr[i] < ema26_arr[i]:
+                    exit_reasons.append("EMA12 死亡交叉 EMA26")
 
             if exit_conds.get('five_ma_mode') == '排列失序' and not five_line_bullish(i):
                 exit_reasons.append("五線多頭排列失序")
@@ -5631,11 +5727,8 @@ if auth_user:
                     ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
                     if not ma_series.empty:
                         latest_ma_val = ma_series.to_numpy().flatten()[-1]
-                        ma_header_values.append(
-                            f"<span style='color:{c}; font-weight:bold;'>■ {p}MA: {latest_ma_val:,.2f}</span>"
-                        )
-                chart_header_annotation = "<br>".join(ma_header_values)
-                chart_top_margin = max(110, 64 + 18 * len(ma_header_values))
+                        ma_header_values.append((int(p), str(c), float(latest_ma_val)))
+                chart_top_margin = 72
                 st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量")
                 selected_indicator_text = ", ".join(selected_chart_indicators) if selected_chart_indicators else "未選擇"
                 selected_overlay_text = ", ".join(selected_chart_overlays) if selected_chart_overlays else "未選擇"
@@ -5975,7 +6068,7 @@ if auth_user:
                     ),
                     editrevision=int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0)),
                     height=chart_height,
-                    margin=dict(l=12, r=12, t=chart_top_margin, b=54),
+                        margin=dict(l=12, r=12, t=chart_top_margin, b=54),
                     dragmode='pan', 
                     showlegend=False,
                     yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="股價（元）"),
@@ -5995,18 +6088,6 @@ if auth_user:
                     ),
                     **chart_x_axes
                 )
-                if chart_header_annotation:
-                    fig.add_annotation(
-                        xref="paper", yref="paper", x=0.01, y=1.02,
-                        xanchor="left", yanchor="bottom", align="left",
-                        text=chart_header_annotation,
-                        showarrow=False,
-                        font=dict(size=12, color="#F8FAFC"),
-                        bgcolor="rgba(15,23,42,0.92)",
-                        bordercolor="rgba(148,163,184,0.5)",
-                        borderwidth=1,
-                        borderpad=6,
-                    )
                 close_for_note = _finite_number(df_chart["Close"].iloc[-1])
                 if close_for_note is not None and date_strings:
                     note_y_offsets = [0, 20, -20, 40, -40, 60, -60]
@@ -6030,6 +6111,19 @@ if auth_user:
                 chart_key = f"candlestick_chart_{auth_user['id']}_{selected_stock}_{selected_tf}"
                 clear_revision = int(st.session_state.get(f"shape_clear_revision_{auth_user['id']}_{selected_stock}_{selected_tf}", 0))
                 fig.update_layout(meta={"codex_chart_key": chart_key})
+                if ma_header_values:
+                    ma_header_html = "".join(
+                        f"<span style=\"color:{html.escape(color, quote=True)};font-weight:700;white-space:nowrap;\">■ MA{period}: {value:,.2f}</span>"
+                        for period, color, value in ma_header_values
+                    )
+                    st.markdown(
+                        "<div style=\"display:flex;flex-wrap:nowrap;gap:16px;align-items:center;"
+                        "overflow-x:auto;white-space:nowrap;padding:7px 10px;margin:2px 0 6px;"
+                        "border:1px solid rgba(148,163,184,.35);border-radius:8px;"
+                        "background:rgba(15,23,42,.55);font-size:.92rem;\">"
+                        f"{ma_header_html}</div>",
+                        unsafe_allow_html=True,
+                    )
                 st.plotly_chart(
                     fig, 
                     use_container_width=True, 
@@ -6045,8 +6139,17 @@ if auth_user:
                         ],
                         'displayModeBar': True, # 強制固定顯示右上角 ModeBar 工具列
                         'displaylogo': False,
-                        'editable': True,       # 開放圖上文字與形狀可點擊編輯
-                        'edits': {'shapePosition': True},
+                        'editable': True,
+                        # Keep drawing/shape dragging, but never expose fixed chart
+                        # labels or annotation source text as editable prompts.
+                        'edits': {
+                            'shapePosition': True,
+                            'annotationText': False,
+                            'axisTitleText': False,
+                            'titleText': False,
+                            'legendText': False,
+                            'colorbarTitleText': False,
+                        },
                         'scrollZoom': True,
                         'responsive': True
                     }
@@ -6882,55 +6985,132 @@ if auth_user:
                 bt_col1, bt_col2 = st.columns(2)
                 
                 with bt_col1:
-                    st.markdown("##### 🟢 進場 (買進) 策略下拉式選單")
-                    entry_ma_mode = st.selectbox("1. 均線策略 (MA)", ["停用", "突破均線", "站穩均線上"], index=1, key="bt_entry_ma_sel")
-                    entry_ma_p = st.number_input("買進均線資料根數 (MA)", min_value=1, max_value=240, value=20, key="bt_entry_ma_p")
-
+                    st.markdown("##### 🟢 進場條件")
+                    entry_indicator_options = [
+                        "均線 MA", "五線排列", "KD", "MACD", "成交量", "RSI", "布林通道",
+                        "BIAS 乖離率", "ATR 波動幅度", "OBV 能量潮", "CCI 順勢指標",
+                        "DMI／ADX 趨勢強度", "EMA12／EMA26",
+                    ]
+                    entry_selected_indicators = st.multiselect(
+                        "選擇要使用的進場指標",
+                        options=entry_indicator_options,
+                        default=["均線 MA"],
+                        key="bt_entry_indicators",
+                        help="只顯示已選指標的設定；未選指標不會加入買進條件。",
+                    )
+                    st.caption("多個進場條件可選擇同時成立（ALL）或任一成立（ANY）。")
+                    entry_ma_mode, entry_ma_p = "停用", 20
+                    entry_five_ma_mode = "停用"
+                    entry_kd_mode = entry_macd_mode = entry_vol_mode = "停用"
+                    entry_rsi_mode = entry_bb_mode = entry_bias_mode = "停用"
+                    entry_atr_mode = entry_obv_mode = entry_cci_mode = "停用"
+                    entry_adx_mode = entry_ema_mode = "停用"
+                    entry_atr_pct_limit, entry_adx_threshold = 4.0, 20.0
                     entry_ma_cross_pairs = []
-                    with st.expander("新增多組均線黃金交叉買進條件", expanded=False):
-                        st.caption("快線由下往上穿越慢線時成立。每組會依下方 ALL／ANY 規則，與其他已啟用買進條件一起判斷。最多可設定 10 組。")
-                        entry_ma_cross_count = st.number_input(
-                            "買進交叉組數", min_value=0, max_value=10, value=0, step=1,
-                            key="bt_entry_ma_cross_count",
+                    exit_ma_cross_pairs = []
+                    default_cross_pairs = [
+                        (5, 20), (10, 20), (10, 60), (20, 60), (20, 120),
+                        (60, 120), (60, 240), (5, 60), (20, 240), (120, 240),
+                    ]
+                    if "均線 MA" in entry_selected_indicators:
+                        entry_ma_mode = st.selectbox(
+                            "均線買進方式", ["停用", "突破均線", "站穩均線上"], index=1,
+                            key="bt_entry_ma_sel_v2",
                         )
-                        default_cross_pairs = [
-                            (5, 20), (10, 20), (10, 60), (20, 60), (20, 120),
-                            (60, 120), (60, 240), (5, 60), (20, 240), (120, 240),
-                        ]
-                        invalid_entry_cross = False
-                        for pair_index in range(int(entry_ma_cross_count)):
-                            fast_default, slow_default = default_cross_pairs[pair_index]
-                            pair_cols = st.columns(2)
-                            with pair_cols[0]:
-                                fast_period = st.number_input(
-                                    f"第 {pair_index + 1} 組快線資料根數",
-                                    min_value=1, max_value=240, value=fast_default, step=1,
-                                    key=f"bt_entry_ma_cross_fast_{pair_index + 1}",
-                                )
-                            with pair_cols[1]:
-                                slow_period = st.number_input(
-                                    f"第 {pair_index + 1} 組慢線資料根數",
-                                    min_value=1, max_value=240, value=slow_default, step=1,
-                                    key=f"bt_entry_ma_cross_slow_{pair_index + 1}",
-                                )
-                            if fast_period >= slow_period:
-                                invalid_entry_cross = True
-                            else:
-                                entry_ma_cross_pairs.append((int(fast_period), int(slow_period)))
-                        entry_ma_cross_pairs = _normalize_ma_cross_pairs(entry_ma_cross_pairs)
-                        if invalid_entry_cross:
-                            st.warning("快線天數必須小於慢線天數；不符合的組別會略過。")
-                    
-                    entry_kd_mode = st.selectbox("2. KD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_kd_sel")
-                    entry_macd_mode = st.selectbox("3. MACD 指標策略", ["停用", "黃金交叉"], index=0, key="bt_entry_macd_sel")
-                    entry_vol_mode = st.selectbox("4. 成交量策略", ["停用", "爆量 (大於20日均量1.5倍)", "爆量 (大於20日均量2.0倍)"], index=0, key="bt_entry_vol_sel")
-                    entry_rsi_mode = st.selectbox("5. RSI 指標策略", ["停用", "超賣回升 (RSI向上突破30)", "強勢突破 (RSI向上突破50)"], index=0, key="bt_entry_rsi_sel")
-                    entry_bb_mode = st.selectbox("6. 布林通道策略", ["停用", "突破布林上軌", "觸及布林下軌反彈"], index=0, key="bt_entry_bb_sel")
-                    
-                    entry_match_mode = st.radio("買進訊號判定邏輯", options=["同時滿足所有選定條件 (ALL)", "任一滿足即買進 (ANY)"], index=0, key="bt_match")
+                        entry_ma_p = st.number_input(
+                            "買進均線資料根數", min_value=1, max_value=240, value=20,
+                            key="bt_entry_ma_p",
+                        )
+                        with st.expander("新增多組均線黃金交叉買進條件", expanded=False):
+                            st.caption("快線由下往上穿越慢線時成立；最多可設定 10 組。")
+                            entry_ma_cross_count = st.number_input(
+                                "買進交叉組數", min_value=0, max_value=10, value=0, step=1,
+                                key="bt_entry_ma_cross_count",
+                            )
+                            invalid_entry_cross = False
+                            for pair_index in range(int(entry_ma_cross_count)):
+                                fast_default, slow_default = default_cross_pairs[pair_index]
+                                pair_cols = st.columns(2)
+                                with pair_cols[0]:
+                                    fast_period = st.number_input(
+                                        f"第 {pair_index + 1} 組快線資料根數", min_value=1,
+                                        max_value=240, value=fast_default, step=1,
+                                        key=f"bt_entry_ma_cross_fast_{pair_index + 1}",
+                                    )
+                                with pair_cols[1]:
+                                    slow_period = st.number_input(
+                                        f"第 {pair_index + 1} 組慢線資料根數", min_value=1,
+                                        max_value=240, value=slow_default, step=1,
+                                        key=f"bt_entry_ma_cross_slow_{pair_index + 1}",
+                                    )
+                                if fast_period >= slow_period:
+                                    invalid_entry_cross = True
+                                else:
+                                    entry_ma_cross_pairs.append((int(fast_period), int(slow_period)))
+                            entry_ma_cross_pairs = _normalize_ma_cross_pairs(entry_ma_cross_pairs)
+                            if invalid_entry_cross:
+                                st.warning("快線資料根數必須小於慢線；不符合的組別會略過。")
+                    if "五線排列" in entry_selected_indicators:
+                        entry_five_ma_mode = "五線開花"
+                        st.caption("五線開花：MA5＞MA10＞MA20＞MA60＞MA120，且均線同步上升時進場。")
+                    if "KD" in entry_selected_indicators:
+                        entry_kd_mode = "黃金交叉"
+                        st.caption("KD：K 線由下往上穿越 D 線時進場。")
+                    if "MACD" in entry_selected_indicators:
+                        entry_macd_mode = "黃金交叉"
+                        st.caption("MACD：DIF 由下往上穿越訊號線時進場。")
+                    if "成交量" in entry_selected_indicators:
+                        entry_vol_mode = st.selectbox(
+                            "成交量條件", ["停用", "爆量 (大於20日均量1.5倍)", "爆量 (大於20日均量2.0倍)"],
+                            index=1, key="bt_entry_vol_sel_v2",
+                        )
+                    if "RSI" in entry_selected_indicators:
+                        entry_rsi_mode = st.selectbox(
+                            "RSI 條件", ["停用", "超賣回升 (RSI向上突破30)", "強勢突破 (RSI向上突破50)"],
+                            index=1, key="bt_entry_rsi_sel_v2",
+                        )
+                    if "布林通道" in entry_selected_indicators:
+                        entry_bb_mode = st.selectbox(
+                            "布林通道條件", ["停用", "突破布林上軌", "觸及布林下軌反彈"],
+                            index=1, key="bt_entry_bb_sel_v2",
+                        )
+                    if "BIAS 乖離率" in entry_selected_indicators:
+                        entry_bias_mode = st.selectbox(
+                            "BIAS 條件", ["停用", "向上突破 0%", "自 −5% 向上回升"],
+                            index=1, key="bt_entry_bias_sel_v2",
+                        )
+                    if "ATR 波動幅度" in entry_selected_indicators:
+                        entry_atr_mode = "低波動篩選"
+                        entry_atr_pct_limit = st.number_input(
+                            "ATR／收盤價上限（%）", min_value=0.1, max_value=30.0,
+                            value=4.0, step=0.1, key="bt_entry_atr_limit",
+                            help="只在 ATR 相對收盤價不高於此數值時允許進場。",
+                        )
+                    if "OBV 能量潮" in entry_selected_indicators:
+                        entry_obv_mode = "OBV 高於前一根"
+                        st.caption("OBV：能量潮高於前一根 K 棒時進場。")
+                    if "CCI 順勢指標" in entry_selected_indicators:
+                        entry_cci_mode = st.selectbox(
+                            "CCI 條件", ["停用", "上穿 −100", "上穿 0"], index=1,
+                            key="bt_entry_cci_sel_v2",
+                        )
+                    if "DMI／ADX 趨勢強度" in entry_selected_indicators:
+                        entry_adx_mode = "趨勢增強且 +DI 領先"
+                        entry_adx_threshold = st.number_input(
+                            "ADX 趨勢強度門檻", min_value=5.0, max_value=60.0,
+                            value=20.0, step=1.0, key="bt_entry_adx_threshold",
+                        )
+                    if "EMA12／EMA26" in entry_selected_indicators:
+                        entry_ema_mode = "EMA12 黃金交叉 EMA26"
+                        st.caption("EMA：短期 EMA12 向上穿越 EMA26 時進場。")
+                    entry_match_mode = st.radio(
+                        "買進訊號判定邏輯",
+                        options=["同時滿足所有選定條件 (ALL)", "任一滿足即買進 (ANY)"],
+                        index=0, key="bt_match",
+                    )
 
                 with bt_col2:
-                    st.markdown("##### 🔴 離場 (停損/停利) 策略下拉式選單")
+                    st.markdown("##### 🔴 離場與風險控制")
                     stop_loss_pct = st.number_input("固定停損幅度 (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.5, key="bt_sl")
                     trailing_stop_pct = st.number_input("最高價移動回撤幅度 (%)", min_value=0.0, max_value=50.0, value=8.0, step=0.5, key="bt_trail")
                     bt_rr_enabled = st.checkbox(
@@ -6944,51 +7124,119 @@ if auth_user:
                         key="bt_rr_multiple", disabled=not bt_rr_enabled,
                         help="預設 3 代表風險報酬比 1:3；可改成 1.5、2、4 等。"
                     )
-                    if bt_rr_enabled and stop_loss_pct <= 0 and trailing_stop_pct <= 0:
-                        st.warning("目前固定停損與移動停損都為 0，沒有價格型停損距離可供計算；風險報酬停利目標不會生效。")
-                    else:
-                        st.caption("初始風險取固定停損與移動停損中較靠近進場價的價格型停損；目標價在買點成立時鎖定，移動停損後續上移不會改寫目標價。")
-                    
-                    exit_ma_mode = st.selectbox("1. 均線平倉策略 (MA)", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel")
-                    exit_ma_p = st.number_input("賣出均線資料根數 (MA)", min_value=1, max_value=240, value=20, key="bt_exit_ma_p")
-
+                    exit_indicator_options = entry_indicator_options
+                    exit_selected_indicators = st.multiselect(
+                        "選擇要使用的離場指標",
+                        options=exit_indicator_options,
+                        default=["均線 MA"],
+                        key="bt_exit_indicators",
+                        help="只顯示已選指標的設定；未選指標不會加入平倉條件。固定與移動停損獨立運作。",
+                    )
+                    exit_ma_mode, exit_ma_p = "停用", 20
+                    exit_five_ma_mode = "停用"
+                    exit_kd_mode = exit_macd_mode = exit_vol_mode = "停用"
+                    exit_rsi_mode = exit_bb_mode = exit_bias_mode = "停用"
+                    exit_obv_mode = exit_cci_mode = exit_adx_mode = exit_ema_mode = "停用"
+                    exit_adx_threshold = 20.0
+                    exit_atr_stop_multiple = 0.0
                     exit_ma_cross_pairs = []
-                    with st.expander("新增多組均線死亡交叉平倉條件", expanded=False):
-                        st.caption("快線由上往下跌破慢線時成立；任一組死亡交叉成立，就會作為一項平倉訊號。最多可設定 10 組。")
-                        exit_ma_cross_count = st.number_input(
-                            "平倉交叉組數", min_value=0, max_value=10, value=0, step=1,
-                            key="bt_exit_ma_cross_count",
+                    if "均線 MA" in exit_selected_indicators:
+                        exit_ma_mode = st.selectbox(
+                            "均線平倉方式", ["停用", "跌破均線"], index=1, key="bt_exit_ma_sel_v2",
                         )
-                        invalid_exit_cross = False
-                        for pair_index in range(int(exit_ma_cross_count)):
-                            fast_default, slow_default = default_cross_pairs[pair_index]
-                            pair_cols = st.columns(2)
-                            with pair_cols[0]:
-                                fast_period = st.number_input(
-                                    f"第 {pair_index + 1} 組快線資料根數",
-                                    min_value=1, max_value=240, value=fast_default, step=1,
-                                    key=f"bt_exit_ma_cross_fast_{pair_index + 1}",
-                                )
-                            with pair_cols[1]:
-                                slow_period = st.number_input(
-                                    f"第 {pair_index + 1} 組慢線資料根數",
-                                    min_value=1, max_value=240, value=slow_default, step=1,
-                                    key=f"bt_exit_ma_cross_slow_{pair_index + 1}",
-                                )
-                            if fast_period >= slow_period:
-                                invalid_exit_cross = True
-                            else:
-                                exit_ma_cross_pairs.append((int(fast_period), int(slow_period)))
-                        exit_ma_cross_pairs = _normalize_ma_cross_pairs(exit_ma_cross_pairs)
-                        if invalid_exit_cross:
-                            st.warning("快線天數必須小於慢線天數；不符合的組別會略過。")
-                    
-                    exit_kd_mode = st.selectbox("2. KD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_kd_sel")
-                    exit_macd_mode = st.selectbox("3. MACD 離場策略", ["停用", "死亡交叉"], index=0, key="bt_exit_macd_sel")
-                    exit_vol_mode = st.selectbox("4. 成交量離場策略", ["停用", "極端爆量倒貨 (大於20日均量2.5倍)"], index=0, key="bt_exit_vol_sel")
-                    exit_rsi_mode = st.selectbox("5. RSI 離場策略", ["停用", "超買警戒 (RSI跌破70)"], index=0, key="bt_exit_rsi_sel")
-                    exit_bb_mode = st.selectbox("6. 布林通道離場策略", ["停用", "跌破布林下軌", "觸及上軌拉回"], index=0, key="bt_exit_bb_sel")
-
+                        exit_ma_p = st.number_input(
+                            "賣出均線資料根數", min_value=1, max_value=240, value=20,
+                            key="bt_exit_ma_p",
+                        )
+                        with st.expander("新增多組均線死亡交叉平倉條件", expanded=False):
+                            st.caption("快線由上往下跌破慢線時成立；最多可設定 10 組。")
+                            exit_ma_cross_count = st.number_input(
+                                "平倉交叉組數", min_value=0, max_value=10, value=0, step=1,
+                                key="bt_exit_ma_cross_count",
+                            )
+                            invalid_exit_cross = False
+                            for pair_index in range(int(exit_ma_cross_count)):
+                                fast_default, slow_default = default_cross_pairs[pair_index]
+                                pair_cols = st.columns(2)
+                                with pair_cols[0]:
+                                    fast_period = st.number_input(
+                                        f"第 {pair_index + 1} 組快線資料根數", min_value=1,
+                                        max_value=240, value=fast_default, step=1,
+                                        key=f"bt_exit_ma_cross_fast_{pair_index + 1}",
+                                    )
+                                with pair_cols[1]:
+                                    slow_period = st.number_input(
+                                        f"第 {pair_index + 1} 組慢線資料根數", min_value=1,
+                                        max_value=240, value=slow_default, step=1,
+                                        key=f"bt_exit_ma_cross_slow_{pair_index + 1}",
+                                    )
+                                if fast_period >= slow_period:
+                                    invalid_exit_cross = True
+                                else:
+                                    exit_ma_cross_pairs.append((int(fast_period), int(slow_period)))
+                            exit_ma_cross_pairs = _normalize_ma_cross_pairs(exit_ma_cross_pairs)
+                            if invalid_exit_cross:
+                                st.warning("快線資料根數必須小於慢線；不符合的組別會略過。")
+                    if "五線排列" in exit_selected_indicators:
+                        exit_five_ma_mode = "排列失序"
+                        st.caption("任一均線排列不再維持 MA5＞MA10＞MA20＞MA60＞MA120 時離場。")
+                    if "KD" in exit_selected_indicators:
+                        exit_kd_mode = "死亡交叉"
+                        st.caption("KD：K 線由上往下跌破 D 線時離場。")
+                    if "MACD" in exit_selected_indicators:
+                        exit_macd_mode = "死亡交叉"
+                        st.caption("MACD：DIF 由上往下跌破訊號線時離場。")
+                    if "成交量" in exit_selected_indicators:
+                        exit_vol_mode = st.selectbox(
+                            "成交量離場條件", ["停用", "極端爆量倒貨 (大於20日均量2.5倍)"],
+                            index=1, key="bt_exit_vol_sel_v2",
+                        )
+                    if "RSI" in exit_selected_indicators:
+                        exit_rsi_mode = st.selectbox(
+                            "RSI 離場條件", ["停用", "超買警戒 (RSI跌破70)"],
+                            index=1, key="bt_exit_rsi_sel_v2",
+                        )
+                    if "布林通道" in exit_selected_indicators:
+                        exit_bb_mode = st.selectbox(
+                            "布林通道離場條件", ["停用", "跌破布林下軌", "觸及上軌拉回", "站上布林中軌"],
+                            index=1, key="bt_exit_bb_sel_v2",
+                        )
+                    if "BIAS 乖離率" in exit_selected_indicators:
+                        exit_bias_mode = st.selectbox(
+                            "BIAS 離場條件", ["停用", "跌破 0%", "高檔回落並跌破 +5%"],
+                            index=1, key="bt_exit_bias_sel_v2",
+                        )
+                    if "ATR 波動幅度" in exit_selected_indicators:
+                        exit_atr_stop_multiple = st.number_input(
+                            "ATR 停損倍數", min_value=0.5, max_value=10.0,
+                            value=2.0, step=0.5, key="bt_exit_atr_multiple",
+                            help="以進場時 ATR 固定停損價：進場價減去 ATR × 倍數。",
+                        )
+                    if "OBV 能量潮" in exit_selected_indicators:
+                        exit_obv_mode = "OBV 低於前一根"
+                        st.caption("OBV：能量潮低於前一根 K 棒時離場。")
+                    if "CCI 順勢指標" in exit_selected_indicators:
+                        exit_cci_mode = st.selectbox(
+                            "CCI 離場條件", ["停用", "跌破 +100", "跌破 0"],
+                            index=1, key="bt_exit_cci_sel_v2",
+                        )
+                    if "DMI／ADX 趨勢強度" in exit_selected_indicators:
+                        exit_adx_mode = st.selectbox(
+                            "DMI／ADX 離場條件", ["停用", "+DI 跌破 −DI", "ADX 低於門檻"],
+                            index=1, key="bt_exit_adx_sel_v2",
+                        )
+                        if exit_adx_mode == "ADX 低於門檻":
+                            exit_adx_threshold = st.number_input(
+                                "ADX 離場強度門檻", min_value=5.0, max_value=60.0,
+                                value=20.0, step=1.0, key="bt_exit_adx_threshold",
+                            )
+                    if "EMA12／EMA26" in exit_selected_indicators:
+                        exit_ema_mode = "EMA12 死亡交叉 EMA26"
+                        st.caption("EMA：EMA12 向下跌破 EMA26 時離場。")
+                    if bt_rr_enabled and stop_loss_pct <= 0 and trailing_stop_pct <= 0 and exit_atr_stop_multiple <= 0:
+                        st.warning("目前沒有價格型停損距離，風險報酬停利目標不會生效。")
+                    else:
+                        st.caption("價格停損與指標離場可同時運作；指標未勾選時不會加入策略。")
                 with st.expander("💰 績效分析設定（本金與交易成本）", expanded=False):
                     cost_cols = st.columns(4)
                     with cost_cols[0]:
@@ -7053,11 +7301,20 @@ if auth_user:
                         'ma_mode': entry_ma_mode,
                         'ma_p': entry_ma_p,
                         'ma_cross_pairs': entry_ma_cross_pairs,
+                        'five_ma_mode': entry_five_ma_mode,
                         'kd_mode': entry_kd_mode,
                         'macd_mode': entry_macd_mode,
                         'vol_mode': entry_vol_mode,
                         'rsi_mode': entry_rsi_mode,
                         'bb_mode': entry_bb_mode,
+                        'bias_mode': entry_bias_mode,
+                        'atr_mode': entry_atr_mode,
+                        'atr_pct_limit': float(entry_atr_pct_limit),
+                        'obv_mode': entry_obv_mode,
+                        'cci_mode': entry_cci_mode,
+                        'adx_mode': entry_adx_mode,
+                        'adx_threshold': float(entry_adx_threshold),
+                        'ema_mode': entry_ema_mode,
                         'match_mode': 'ALL' if "同時" in entry_match_mode else 'ANY'
                     }
                     
@@ -7067,14 +7324,22 @@ if auth_user:
                         'ma_mode': exit_ma_mode,
                         'ma_p': exit_ma_p,
                         'ma_cross_pairs': exit_ma_cross_pairs,
+                        'five_ma_mode': exit_five_ma_mode,
                         'kd_mode': exit_kd_mode,
                         'macd_mode': exit_macd_mode,
                         'vol_mode': exit_vol_mode,
                         'rsi_mode': exit_rsi_mode,
-                        'bb_mode': exit_bb_mode
+                        'bb_mode': exit_bb_mode,
+                        'bias_mode': exit_bias_mode,
+                        'atr_stop_multiple': float(exit_atr_stop_multiple),
+                        'obv_mode': exit_obv_mode,
+                        'cci_mode': exit_cci_mode,
+                        'adx_mode': exit_adx_mode,
+                        'adx_threshold': float(exit_adx_threshold),
+                        'ema_mode': exit_ema_mode,
                     }
                     
-                    df_calc = compute_backtest_indicators(
+                    df_calc = compute_kline_indicator_frame(
                         df_backtest, ma_entry_p=entry_ma_p, ma_exit_p=exit_ma_p,
                         entry_ma_cross_pairs=entry_ma_cross_pairs,
                         exit_ma_cross_pairs=exit_ma_cross_pairs,
@@ -7108,7 +7373,11 @@ if auth_user:
                                     entry_ma_mode != "停用", entry_kd_mode != "停用",
                                     entry_macd_mode != "停用", entry_vol_mode != "停用",
                                     entry_rsi_mode != "停用", entry_bb_mode != "停用",
-                                ))
+                                    entry_bias_mode != "停用", entry_atr_mode != "停用",
+                                    entry_obv_mode != "停用", entry_cci_mode != "停用",
+                                    entry_adx_mode != "停用", entry_ema_mode != "停用",
+                                    entry_five_ma_mode != "停用",
+                                )) or bool(entry_ma_cross_pairs)
                                 if entry_conds["match_mode"] == "ALL" and other_entry_enabled:
                                     st.warning("期間內有黃金交叉，但買進判定為 ALL，還必須同一根 K 棒符合其他啟用的買進條件。若只想測交叉，請把原均線策略及其他買進條件設為「停用」；若希望任一條件成立就買進，請改成 ANY。")
                         if exit_ma_cross_pairs:
