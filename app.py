@@ -3439,92 +3439,131 @@ def _logout_account():
             st.session_state.pop(key, None)
 
 
-st.sidebar.markdown("### 🔒 操盤手帳號登入")
+st.sidebar.markdown("### 🔒 操盤手帳號")
 auth_user = st.session_state.get("auth_user")
 if auth_user:
     st.sidebar.success(f"已登入：{auth_user['username']}")
     st.sidebar.button("登出", key="account_logout", on_click=_logout_account)
 else:
-    with st.sidebar.form("account_login_form"):
-        login_name = st.text_input("帳號", key="login_username").strip()
-        login_password = st.text_input("密碼", type="password", key="login_password")
-        login_submit = st.form_submit_button("登入", use_container_width=True)
-    if login_submit:
-        account = _verify_account(login_name, login_password)
-        if account:
-            st.session_state["auth_user"] = account
-            st.rerun()
-        st.sidebar.error("帳號或密碼不正確。")
-
-    with st.sidebar.expander("忘記密碼？"):
-        st.caption("驗證碼會寄到帳號的備援 Email；寄件服務需先設定 Gmail Secrets。")
-        with st.form("password_reset_request_form"):
-            reset_name = st.text_input("帳號", key="reset_request_username").strip()
-            request_reset = st.form_submit_button("寄送重設驗證碼", use_container_width=True)
-        if request_reset:
-            st.session_state["password_reset_username"] = reset_name
-            with sqlite3.connect(DB_FILE) as _conn:
-                reset_row = _conn.execute(
-                    "SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (reset_name,)
-                ).fetchone()
-            if reset_row:
-                try:
-                    _request_account_code(reset_row[0], "password_reset")
-                except Exception:
-                    st.sidebar.error("目前無法寄送驗證信，請稍後再試或聯絡系統管理者。")
-            st.sidebar.info("若帳號已設定備援信箱，驗證碼會寄到該信箱；請檢查垃圾郵件匣。")
-        reset_name = st.session_state.get("password_reset_username", "")
-        if reset_name:
-            with st.form("password_reset_complete_form"):
-                reset_code = st.text_input("六位數驗證碼", max_chars=6, key="password_reset_code")
-                reset_new_password = st.text_input("新密碼（至少 8 位）", type="password", key="password_reset_new_password")
-                reset_confirm = st.text_input("再次輸入新密碼", type="password", key="password_reset_confirm")
-                complete_reset = st.form_submit_button("重設密碼", use_container_width=True)
-            if complete_reset:
-                if len(reset_new_password) < 8:
-                    st.sidebar.error("新密碼至少需要 8 位。")
-                elif reset_new_password != reset_confirm:
-                    st.sidebar.error("兩次輸入的新密碼不一致。")
-                elif _reset_account_password(reset_name, reset_code, reset_new_password):
-                    st.session_state.pop("password_reset_username", None)
-                    st.sidebar.success("密碼已重設，請使用新密碼登入。")
-                else:
-                    st.sidebar.error("驗證碼無效、已逾時或錯誤次數過多。")
-
-    with st.sidebar.expander("尚未有帳號？建立新帳號"):
-        st.caption("第一個註冊帳號會接收升級前共用的投資組合資料。")
-        with st.form("account_register_form"):
-            register_name = st.text_input("建立帳號（3–32 位英數或底線）", key="register_username").strip()
-            register_email = st.text_input("備援 Email（用於忘記密碼）", key="register_email").strip().lower()
-            register_password = st.text_input("建立密碼（至少 8 位）", type="password", key="register_password")
-            register_confirm = st.text_input("再次輸入密碼", type="password", key="register_password_confirm")
-            register_submit = st.form_submit_button("註冊帳號", use_container_width=True)
-        if register_submit:
-            if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", register_name):
-                st.error("帳號需為 3–32 位英數字或底線。")
-            elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", register_email):
-                st.error("請輸入有效的 Email，作為忘記密碼時的驗證信箱。")
-            elif len(register_password) < 8:
-                st.error("密碼至少需要 8 位。")
-            elif register_password != register_confirm:
-                st.error("兩次輸入的密碼不一致。")
-            else:
-                try:
-                    user_id, is_first_account = _register_account(register_name, register_password, register_email)
-                    st.session_state["auth_user"] = {"id": user_id, "username": register_name}
-                    if is_first_account:
-                        st.session_state["account_notice"] = "已建立第一個帳號；原有共用投資組合資料已保留並歸入此帳號。"
-                    st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("這個帳號名稱已有人使用。")
+    st.sidebar.caption("登入後可使用操盤終端，投資組合資料依帳號分開保存。")
+    if not st.session_state.get("account_login_view", False):
+        st.markdown("""
+            <style>
+            .login-hero{max-width:820px;margin:9vh auto 1rem;padding:clamp(1.5rem,5vw,3.25rem);
+              border:1px solid rgba(148,163,184,.24);border-radius:24px;text-align:center;
+              background:radial-gradient(ellipse at 50% 0%,rgba(37,99,235,.22),transparent 62%),
+                         linear-gradient(145deg,#101a2b,#0b1220 68%,#111827);
+              box-shadow:0 24px 70px rgba(0,0,0,.35);}
+            .login-kicker{color:#60a5fa;font-size:.78rem;font-weight:800;letter-spacing:.16em;}
+            .login-hero h1{font-size:clamp(1.8rem,5vw,2.7rem);margin:.7rem 0;color:#f8fafc;}
+            .login-hero p{color:#aab7c8;font-size:1.02rem;line-height:1.7;margin:.35rem auto;max-width:570px;}
+            .login-pills{display:flex;justify-content:center;flex-wrap:wrap;gap:.55rem;margin-top:1.5rem;}
+            .login-pills span{border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.68);
+              border-radius:99px;padding:.42rem .8rem;color:#cbd5e1;font-size:.82rem;}
+            </style>
+            <section class="login-hero">
+              <div class="login-kicker">SECURE INVESTMENT WORKSPACE</div>
+              <h1>操盤手投資終端</h1>
+              <p>整合市場診斷、策略研究與個人投資組合，為你的分析流程提供清晰、專屬的工作空間。</p>
+              <div class="login-pills"><span>市場分析</span><span>策略研究</span><span>帳號專屬投資組合</span></div>
+            </section>
+        """, unsafe_allow_html=True)
+        splash_cols = st.columns([1, 1.3, 1])
+        with splash_cols[1]:
+            if st.button("🔐 登入或建立帳號", type="primary", use_container_width=True, key="open_account_login"):
+                st.session_state["account_login_view"] = True
+                st.rerun()
+        st.stop()
 
     st.markdown("""
-        <div style="width:100%; min-height:65vh; display:flex; flex-direction:column;
-                    justify-content:center; align-items:center; text-align:center;">
-            <h2 style="margin:0 0 0.8rem 0;">🔒 請登入以使用操盤終端</h2>
-            <p style="margin:0; color:#94A3B8;">新帳號的投資組合資料會與其他帳號分開保存。</p>
+        <div style="max-width:820px;margin:1.5rem auto 1rem;text-align:center;">
+          <div style="color:#60a5fa;font-size:.75rem;font-weight:800;letter-spacing:.14em;">SECURE INVESTMENT WORKSPACE</div>
+          <h2 style="margin:.35rem 0 .25rem;">登入操盤手終端</h2>
+          <p style="color:#94a3b8;margin:0;">投資組合資料僅會顯示在登入帳號中。</p>
         </div>
     """, unsafe_allow_html=True)
+    auth_columns = st.columns([1, 1.5, 1])
+    with auth_columns[1]:
+        login_tab, register_tab, reset_tab = st.tabs(["登入", "建立帳號", "忘記密碼"])
+        with login_tab:
+            with st.form("account_login_form_main"):
+                login_name = st.text_input("帳號", key="login_username_main").strip()
+                login_password = st.text_input("密碼", type="password", key="login_password_main")
+                login_submit = st.form_submit_button("登入", use_container_width=True)
+            if login_submit:
+                account = _verify_account(login_name, login_password)
+                if account:
+                    st.session_state["auth_user"] = account
+                    st.session_state.pop("account_login_view", None)
+                    st.rerun()
+                st.error("帳號或密碼不正確。")
+        with register_tab:
+            st.caption("第一個註冊帳號會接收升級前共用的投資組合資料；之後各帳號資料分開保存。")
+            with st.form("account_register_form_main"):
+                register_name = st.text_input("建立帳號（3–32 位英數或底線）", key="register_username_main").strip()
+                register_email = st.text_input("備援 Email（用於忘記密碼）", key="register_email_main").strip().lower()
+                register_password = st.text_input("建立密碼（至少 8 位）", type="password", key="register_password_main")
+                register_confirm = st.text_input("再次輸入密碼", type="password", key="register_password_confirm_main")
+                register_submit = st.form_submit_button("註冊並登入", use_container_width=True)
+            if register_submit:
+                if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", register_name):
+                    st.error("帳號需為 3–32 位英數字或底線。")
+                elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", register_email):
+                    st.error("請輸入有效的 Email，作為忘記密碼時的驗證信箱。")
+                elif len(register_password) < 8:
+                    st.error("密碼至少需要 8 位。")
+                elif register_password != register_confirm:
+                    st.error("兩次輸入的密碼不一致。")
+                else:
+                    try:
+                        user_id, is_first_account = _register_account(register_name, register_password, register_email)
+                        st.session_state["auth_user"] = {"id": user_id, "username": register_name}
+                        st.session_state.pop("account_login_view", None)
+                        if is_first_account:
+                            st.session_state["account_notice"] = "已建立第一個帳號；原有共用投資組合資料已保留並歸入此帳號。"
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("這個帳號名稱已有人使用。")
+        with reset_tab:
+            st.caption("驗證碼會寄到帳號的備援 Email；寄件服務需先設定 Gmail Secrets。")
+            with st.form("password_reset_request_form_main"):
+                reset_name_input = st.text_input("帳號", key="reset_request_username_main").strip()
+                request_reset = st.form_submit_button("寄送重設驗證碼", use_container_width=True)
+            if request_reset:
+                st.session_state["password_reset_username"] = reset_name_input
+                with sqlite3.connect(DB_FILE) as _conn:
+                    reset_row = _conn.execute(
+                        "SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (reset_name_input,)
+                    ).fetchone()
+                if reset_row:
+                    try:
+                        _request_account_code(reset_row[0], "password_reset")
+                    except Exception:
+                        st.error("目前無法寄送驗證信，請稍後再試或聯絡系統管理者。")
+                st.info("若帳號已設定備援信箱，驗證碼會寄到該信箱；請檢查垃圾郵件匣。")
+            reset_name = st.session_state.get("password_reset_username", "")
+            if reset_name:
+                with st.form("password_reset_complete_form_main"):
+                    st.caption(f"重設帳號：{reset_name}")
+                    reset_code = st.text_input("六位數驗證碼", max_chars=6, key="password_reset_code_main")
+                    reset_new_password = st.text_input("新密碼（至少 8 位）", type="password", key="password_reset_new_password_main")
+                    reset_confirm = st.text_input("再次輸入新密碼", type="password", key="password_reset_confirm_main")
+                    complete_reset = st.form_submit_button("重設密碼", use_container_width=True)
+                if complete_reset:
+                    if len(reset_new_password) < 8:
+                        st.error("新密碼至少需要 8 位。")
+                    elif reset_new_password != reset_confirm:
+                        st.error("兩次輸入的新密碼不一致。")
+                    elif _reset_account_password(reset_name, reset_code, reset_new_password):
+                        st.session_state.pop("password_reset_username", None)
+                        st.success("密碼已重設，請使用新密碼登入。")
+                    else:
+                        st.error("驗證碼無效、已逾時或錯誤次數過多。")
+    back_cols = st.columns([1, 1.5, 1])
+    with back_cols[1]:
+        if st.button("返回首頁", key="account_login_back", use_container_width=True):
+            st.session_state["account_login_view"] = False
+            st.rerun()
     st.stop()
 
 if st.session_state.pop("account_notice", None):
@@ -3600,6 +3639,52 @@ if auth_user:
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
     )
+
+    def _jump_to_stock_diagnosis(ticker):
+        st.session_state["selected_stock_input"] = str(ticker).strip().upper()
+        st.session_state["sidebar_strategy_selector"] = "📊 彩色 K 線圖與成交量"
+
+    def _queue_observer_ticker(ticker, notice_key):
+        ticker = str(ticker).strip().upper()
+        defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
+        existing = [str(code).strip().upper() for code in st.session_state.get("trader_watchlist_values", defaults)]
+        if ticker in existing:
+            st.session_state[notice_key] = f"{ticker} 已在操盤手自訂觀察名單中。"
+            return
+        try:
+            empty_index = existing.index("")
+        except ValueError:
+            st.session_state[notice_key] = "自訂觀察代碼欄位已滿，請先清出一格再加入。"
+            return
+        existing[empty_index] = ticker
+        st.session_state["trader_watchlist_values"] = existing
+        st.session_state["trader_watchlist_sync_needed"] = True
+        st.session_state[notice_key] = f"已將 {ticker} 加入操盤手自訂觀察代碼。"
+
+    def _render_stock_actions(ticker, stock_name, key_prefix):
+        st.caption(f"已選取：{stock_name}（{ticker}）。選擇要開啟的功能：")
+        action_cols = st.columns(2)
+        with action_cols[0]:
+            st.button(
+                "🔍 使用個股即時診斷",
+                key=f"{key_prefix}_diagnose",
+                on_click=_jump_to_stock_diagnosis,
+                args=(ticker,),
+                use_container_width=True,
+            )
+        with action_cols[1]:
+            notice_key = f"observer_action_notice_{key_prefix}"
+            st.button(
+                "➕ 加入自訂觀察代碼",
+                key=f"{key_prefix}_watch",
+                on_click=_queue_observer_ticker,
+                args=(ticker, notice_key),
+                use_container_width=True,
+            )
+        notice = st.session_state.pop(f"observer_action_notice_{key_prefix}", None)
+        if notice:
+            st.info(notice)
+
     st.markdown("""
         <div style="background: linear-gradient(135deg, rgba(20, 29, 49, 0.75) 0%, rgba(11, 16, 29, 0.9) 100%);
                     border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 1.2rem 1.6rem;
@@ -3895,8 +3980,9 @@ if auth_user:
                 # ======= 升級：計算三大策略所需數值與交叉分析 =======
                 L = len(df_chart)
                 close_today = price_val
-                high_252d = close_today * 1.05 if L < 50 else float(df_chart['Close'].tail(min(252, L)).max())
-                momentum_score = float((close_today / high_252d) * 100) if high_252d > 0 else 0.0
+                close_history = pd.to_numeric(df_chart['Close'], errors='coerce').dropna() if 'Close' in df_chart.columns else pd.Series(dtype=float)
+                high_252d = float(close_history.tail(min(252, len(close_history))).max()) if len(close_history) >= 50 else np.nan
+                momentum_score = float((close_today / high_252d) * 100) if pd.notna(high_252d) and high_252d > 0 else None
 
                 fcf_main = info_obj_main.get('freeCashflow')
                 mcap_main = info_obj_main.get('marketCap')
@@ -3939,32 +4025,42 @@ if auth_user:
                 reasons = {}
 
                 # 1. GVI 價值策略評分
-                if gvi_val is not None and gvi_val >= 0.20:
+                if gvi_val is None:
+                    scores['GVI 價值雷達'] = None
+                    reasons['GVI 價值雷達'] = "基本面資料不足，未評分。"
+                elif gvi_val >= 0.20:
                     scores['GVI 價值雷達'] = 90 if gvi_val >= 0.35 else 75
-                    reasons['GVI 價值雷達'] = f"GVI={gvi_val:.4f}，具備高 ROE 與足夠的安全邊際。"
+                    reasons['GVI 價值雷達'] = f"GVI={gvi_val:.4f}，符合目前設定的研究門檻；門檻尚未經樣本外驗證。"
                 else:
                     scores['GVI 價值雷達'] = 40
-                    reasons['GVI 價值雷達'] = "估值偏貴、安全邊際不足或因庫藏股致淨值為負。"
+                    reasons['GVI 價值雷達'] = f"GVI={gvi_val:.4f}，低於目前設定的研究門檻。"
 
                 # 2. 動能突破策略評分
-                if momentum_score >= 80:
+                if momentum_score is None:
+                    scores['動能突破雷達'] = None
+                    reasons['動能突破雷達'] = "有效歷史收盤資料少於 50 根，動能值缺失且不納入評分。"
+                elif momentum_score >= 80:
                     scores['動能突破雷達'] = 95 if momentum_score >= 95 else 85
-                    reasons['動能突破雷達'] = f"創高距離={momentum_score:.1f}%，技術面強勢突破，不受財報滯後影響。"
+                    reasons['動能突破雷達'] = f"現價／近 252 根可用資料最高收盤價={momentum_score:.1f}%，符合目前設定的研究門檻。"
                 else:
                     scores['動能突破雷達'] = 50
-                    reasons['動能突破雷達'] = "技術面處於整理或弱勢區間。"
+                    reasons['動能突破雷達'] = f"現價／近 252 根可用資料最高收盤價={momentum_score:.1f}%，低於目前設定的研究門檻。"
 
                 # 3. QARP 現金流策略評分
-                if fcf_yield_main is not None and fcf_yield_main >= 2.5 and (peg_val_main is None or peg_val_main <= 1.5):
+                if fcf_yield_main is None or peg_val_main is None:
+                    scores['QARP 現金流雷達'] = None
+                    reasons['QARP 現金流雷達'] = "自由現金流收益率或 PEG 資料不足，未評分。"
+                elif fcf_yield_main >= 2.5 and peg_val_main <= 1.5:
                     scores['QARP 現金流雷達'] = 90
-                    reasons['QARP 現金流雷達'] = f"自由現金流收益率={fcf_yield_main:.2f}%，現金流充沛且成長合理。"
+                    reasons['QARP 現金流雷達'] = f"自由現金流收益率={fcf_yield_main:.2f}%、PEG={peg_val_main:.2f}，符合目前設定的研究門檻。"
                 else:
                     scores['QARP 現金流雷達'] = 45
-                    reasons['QARP 現金流雷達'] = "現金流收益率偏低或 PEG 過高。"
+                    reasons['QARP 現金流雷達'] = f"自由現金流收益率={fcf_yield_main:.2f}%、PEG={peg_val_main:.2f}，未同時符合目前設定的研究門檻。"
 
-                # 選出最適策略
-                best_strategy = max(scores, key=scores.get)
-                best_score = scores[best_strategy]
+                # 顯示目前門檻的符合度，不把它解讀為實證優勢或進場建議。
+                valid_scores = {name: score for name, score in scores.items() if score is not None}
+                best_strategy = max(valid_scores, key=valid_scores.get) if valid_scores else "資料不足"
+                best_score = valid_scores.get(best_strategy, 0)
                 
                 if best_score >= 90:
                     valuation_color = "#00cc66"
@@ -3977,31 +4073,26 @@ if auth_user:
 
                 fin_src_display = f"BV: {bv_src} / ROE: {roe_src}"
 
-                advice = f"🎯 **最適推薦策略：【{best_strategy}】（匹配度：{best_score}分）**<br><br>"
+                advice = f"📊 **目前門檻相符項目：【{best_strategy}】（研究用分數：{best_score}分）**<br><br>"
                 advice += f"📌 **採用數據源**：{fin_src_display}<br>"
                 if was_missing_in_db:
                     advice += f"📡 **備援提示**：自動啟動多層次財報遞補機制以確保診斷不中斷。<br>"
-                advice += f"🔍 **交叉分析摘要**：<br>"
+                advice += f"🔍 **門檻比對摘要**：<br>"
                 for strat, sc in scores.items():
-                    icon = "✅" if strat == best_strategy else "🔹"
-                    advice += f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} **{strat}** ({sc}分)：{reasons[strat]}<br>"
-                    
-                advice += f"<br>💡 **操盤手執行建議**：<br>"
-                if best_strategy == 'GVI 價值雷達' and best_score >= 75:
-                    advice += "&nbsp;&nbsp;&nbsp;&nbsp;當前標的具備極佳價值邊際，建議採**分批逢低布局**或使用下方 **Tab 3 網格再平衡** 鎖定長期複利。"
-                elif best_strategy == '動能突破雷達' and best_score >= 80:
-                    advice += "&nbsp;&nbsp;&nbsp;&nbsp;價格動能強勁，建議順勢操作！可搭配下方 **Tab 4 均線/KD/RSI 動能回測條件** 嚴守移動停損。"
-                elif best_strategy == 'QARP 現金流雷達' and best_score >= 80:
-                    advice += "&nbsp;&nbsp;&nbsp;&nbsp;公司現金流極度健全，適合美股巨頭或高品質成長股，建議以**波段持有**搭配現金流指標觀察。"
-                else:
-                    advice += "&nbsp;&nbsp;&nbsp;&nbsp;三大核心策略目前皆無強烈進場訊號，建議**暫時觀望**或縮小部位應對。"
+                    icon = "●" if strat == best_strategy else "·"
+                    score_label = f"{sc}分" if sc is not None else "未評分"
+                    advice += f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} **{strat}**（{score_label}）：{reasons[strat]}<br>"
+                advice += (
+                    "<br>⚠️ **解讀方式**：以上只表示目前數值與程式門檻的相符程度。各因子尚未完成獨立樣本外比較，"
+                    "不代表長期報酬優勢，也不構成買賣或部位建議。"
+                )
 
                 # ======= 視覺化圖表整合 (Radar Chart) =======
                 diag_c1, diag_c2 = st.columns([1.5, 1])
                 with diag_c1:
                     st.markdown(
                         f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px; height: 100%;'>"
-                        f"<h5 style='margin:0; color:white;'>⚖️ 華爾街三大核心策略交叉診斷（智能備援版）</h5>"
+                        f"<h5 style='margin:0; color:white;'>⚖️ 三核心研究條件比對</h5>"
                         f"<p style='margin:10px 0 0 0; font-size:14px; color:#cccccc;'>{advice}</p>"
                         f"</div>", 
                         unsafe_allow_html=True
@@ -4074,7 +4165,7 @@ if auth_user:
                                     )
                                     quant_summary = (
                                         f"GVI={gvi_str}；ROE={roe_str}；PB={pb_str}；"
-                                        f"三核心推薦={best_strategy}（匹配度 {best_score}/100）；"
+                                        f"三核心目前門檻相符項目={best_strategy}（研究用分數 {best_score}/100，尚未完成獨立樣本外驗證，不代表績效優勢）；"
                                         f"短中期籌碼動能={chip_status_text}；"
                                         f"目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%"
                                     )
@@ -5314,17 +5405,38 @@ if auth_user:
         col_s1, col_s2, col_s3 = st.columns(3)
         with col_s1:
             strat_gvi = st.checkbox("開啟 GVI 價值雷達", value=True, key="strat_gvi_check")
-            st.caption("優點：結合 ROE 與淨值估值，重視安全邊際。\n\n限制：財報更新較慢，金融或特殊產業比較性較低。")
+            st.caption("研究假設：以 ROE 與淨值資料計算 GVI。財報更新較慢，產業間可比性有限。")
         with col_s2:
             strat_momentum = st.checkbox("開啟動能突破雷達", value=False, key="strat_momentum_check")
-            st.caption("優點：偏向強勢趨勢，可快速反映價格動能。\n\n限制：盤整時容易反覆訊號，追高風險較高。")
+            st.caption("研究假設：以可用歷史高點計算距離。歷史資料少於 50 根時不評分、不納入篩選。")
         with col_s3:
             strat_qarp = st.checkbox("開啟 QARP 現金流雷達", value=False, key="strat_qarp_check")
-            st.caption("優點：同時看自由現金流收益與 PEG，兼顧現金流和成長估值。\n\n限制：現金流與成長資料可能缺漏，週期性公司容易失真。")
+            st.caption("研究假設：以自由現金流收益率與 PEG 作條件；缺少任一資料時不計入。")
+
+        with st.expander("📐 GVI、動能與 QARP 的獨立樣本外驗證", expanded=False):
+            st.warning(
+                "這些門檻目前是研究假設，尚未證明具有穩定優勢。本版本沒有逐因子樣本外績效報告，選股分數不代表正期望值或買賣建議。"
+            )
+            validation_status = pd.DataFrame([
+                {"因子": "GVI", "驗證狀態": "未驗證", "資料限制": "目前只有當期 ROE／淨值，沒有歷史可得日期的財報快照。"},
+                {"因子": "動能", "驗證狀態": "未驗證", "資料限制": "可取歷史價格，但尚未執行獨立 walk-forward 樣本外比較。"},
+                {"因子": "QARP", "驗證狀態": "未驗證", "資料限制": "目前只有當期自由現金流／PEG，沒有歷史點時資料。"},
+            ])
+            st.dataframe(validation_status, use_container_width=True, hide_index=True)
+            st.caption(
+                "有效比較需以相同股票池與期間，比較未加條件的基準組和逐一加入單一因子的組合；先鎖定參數，再用未參與調參的後段資料檢查超額報酬、回撤、換手與交易成本。"
+                "缺少歷史點時財報時不會以當期基本面回填過去，避免前視偏誤。"
+            )
 
         st.markdown("#### ✍️ 操盤手自訂觀察代碼掃描區")
         st.caption("每個欄位輸入一檔股票代碼。台股上市請加 .TW、上櫃請加 .TWO；美股輸入代碼即可。下方掃描結果沿用台股／美股核心池的明細欄位與策略評分方式。")
         watch_defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
+        saved_watch_codes = list(st.session_state.get("trader_watchlist_values", watch_defaults))
+        sync_watch_widgets = bool(st.session_state.pop("trader_watchlist_sync_needed", False))
+        for watch_index in range(12):
+            watch_key = f"trader_watch_ticker_{watch_index + 1}"
+            if sync_watch_widgets or watch_key not in st.session_state:
+                st.session_state[watch_key] = saved_watch_codes[watch_index]
         watch_columns = st.columns(3)
         custom_scan_list = []
         duplicate_watch_codes = []
@@ -5341,6 +5453,10 @@ if auth_user:
                     duplicate_watch_codes.append(watch_code)
                 else:
                     custom_scan_list.append(watch_code)
+        st.session_state["trader_watchlist_values"] = [
+            str(st.session_state.get(f"trader_watch_ticker_{index + 1}", watch_defaults[index])).strip().upper()
+            for index in range(12)
+        ]
         if duplicate_watch_codes:
             st.caption("重複代碼已自動略過：" + "、".join(dict.fromkeys(duplicate_watch_codes)))
         st.caption(f"目前輸入 {len(custom_scan_list)} 檔；掃描結果會列出排名、股票代碼／名稱、股價、策略評分及已啟用指標明細。")
@@ -5390,14 +5506,12 @@ if auth_user:
         else:
             st.caption("技術指標回測完成後，條件勝率與報酬建議會出現在此處；紀錄保留於目前工作階段。")
 
-        def _load_selected_scan_stock_for_diagnosis():
-            ticker = st.session_state.get("stock_screen_selected_ticker")
-            if ticker:
-                st.session_state["selected_stock_input"] = ticker
-
         def render_stock_screen_results(result_view, title):
-            st.markdown(f"#### {title} (已依勾選核心策略評分動態排名 Top 20)")
-            st.caption("點選明細表中的股票列，再按下方「即時診斷」按鈕，即可將該股載入上方全球個股即時診斷。")
+            st.markdown(f"#### {title}（依已啟用研究條件排名，最多 20 檔）")
+            if result_view.empty:
+                st.info("本次無符合標的。已完整套用目前勾選的條件，沒有放寬條件或回退顯示未通過的股票。")
+                return
+            st.caption("點選明細表中的股票列，再選擇個股即時診斷或加入操盤手自訂觀察代碼。")
             table_event = st.dataframe(
                 result_view,
                 use_container_width=True,
@@ -5414,12 +5528,7 @@ if auth_user:
                     st.session_state["stock_screen_selected_ticker"] = str(selected_result["股票代碼"])
                     selected_name = str(selected_result.get("股票名稱", ""))
                     selected_ticker = str(selected_result["股票代碼"])
-                    st.button(
-                        f"🔍 即時診斷【{selected_name} {selected_ticker}】",
-                        key="stock_screen_diagnose_selected",
-                        on_click=_load_selected_scan_stock_for_diagnosis,
-                        use_container_width=True,
-                    )
+                    _render_stock_actions(selected_ticker, selected_name, "stock_screen_selected")
             else:
                 st.session_state.pop("stock_screen_selected_ticker", None)
 
@@ -5427,6 +5536,9 @@ if auth_user:
             st.session_state["stock_screen_result"] = None
             st.session_state.pop("stock_screen_selected_ticker", None)
             st.session_state.pop("stock_screen_results_table", None)
+            if not any((strat_gvi, strat_momentum, strat_qarp)):
+                st.info("請至少開啟一項研究條件，再執行掃描。")
+                return
             conn = sqlite3.connect(DB_FILE)
             try: df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
             except Exception: df_db = pd.DataFrame()
@@ -5441,7 +5553,9 @@ if auth_user:
             df_db = pd.read_sql_query("SELECT * FROM market_data", conn)
             conn.close()
 
-            if df_db.empty: return
+            if df_db.empty:
+                st.info("目前沒有可供篩選的快取資料。")
+                return
             
             df_filtered = df_db[df_db['ticker'].isin(filter_list)].copy()
             raw_portfolio = []
@@ -5457,7 +5571,9 @@ if auth_user:
                     L = len(df_hist)
                 
                     close_today = float(row['close']) if (L == 0 or 'Close' not in df_hist.columns) else float(df_hist['Close'].to_numpy().flatten()[-1])
-                    high_252d = close_today * 1.05 if L < 50 else float(df_hist['Close'].tail(min(252, L)).max())
+                    close_series = pd.to_numeric(df_hist['Close'], errors='coerce').dropna() if 'Close' in df_hist.columns else pd.Series(dtype=float)
+                    high_252d = float(close_series.tail(min(252, len(close_series))).max()) if len(close_series) >= 50 else np.nan
+                    momentum_value = (close_today / high_252d) * 100 if pd.notna(high_252d) and high_252d > 0 else np.nan
                 
                     bv_val = float(row['book_value']) if (pd.notnull(row['book_value']) and float(row['book_value']) > 0) else None
                     roe_val = parse_roe(row['roe'])
@@ -5511,12 +5627,12 @@ if auth_user:
                     raw_portfolio.append({
                         '股票代碼': t, '股票名稱': ch_name, '目前股價': close_today, 
                         'GVI值': gvi_live, 
-                        '動能分數': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
+                        '動能分數': momentum_value, 
                         '自由現金流收益': fcf_yield, 
                         '本益成長比(PEG)': peg_val, 
                         '⚡ 即時籌碼動能': chip_status_text, 
                         'gvi_raw': gvi_live, 
-                        'mo_raw': float((close_today / high_252d) * 100) if high_252d > 0 else 0.0, 
+                        'mo_raw': momentum_value, 
                         'fcf_raw': fcf_yield
                     })
                 except Exception as e_item: 
@@ -5526,21 +5642,27 @@ if auth_user:
                 df_res = pd.DataFrame(raw_portfolio)
             
                 if strat_gvi: df_res = df_res[df_res['gvi_raw'].notnull() & (df_res['gvi_raw'] >= 0.20)]
-                if strat_momentum: df_res = df_res[df_res['mo_raw'] >= 80.0]
+                if strat_momentum: df_res = df_res[df_res['mo_raw'].notnull() & (df_res['mo_raw'] >= 80.0)]
                 if strat_qarp: df_res = df_res[df_res['fcf_raw'].notnull() & (df_res['fcf_raw'] >= 2.5) & df_res['本益成長比(PEG)'].notnull() & (df_res['本益成長比(PEG)'] <= 1.5)]
-            
-                if df_res.empty: df_res = pd.DataFrame(raw_portfolio)
+
+                if df_res.empty:
+                    empty_view = pd.DataFrame(columns=['排名', '股票代碼', '股票名稱', '目前股價', '策略評分'])
+                    st.session_state["stock_screen_result"] = {"view": empty_view, "title": title}
+                    render_stock_screen_results(empty_view, title)
+                    return
                 
-                df_res['GVI_Rank'] = df_res['gvi_raw'].fillna(0).rank(pct=True)
-                df_res['MO_Rank'] = df_res['mo_raw'].fillna(0).rank(pct=True)
-                df_res['FCF_Rank'] = df_res['fcf_raw'].fillna(0).rank(pct=True)
+                df_res['GVI_Rank'] = df_res['gvi_raw'].rank(pct=True)
+                df_res['MO_Rank'] = df_res['mo_raw'].rank(pct=True)
+                df_res['FCF_Rank'] = df_res['fcf_raw'].rank(pct=True)
                 df_res['綜合分數'] = 0.0
                 active_strats = 0
             
                 if strat_gvi: df_res['綜合分數'] += df_res['GVI_Rank']; active_strats += 1
                 if strat_momentum: df_res['綜合分數'] += df_res['MO_Rank']; active_strats += 1
                 if strat_qarp: df_res['綜合分數'] += df_res['FCF_Rank']; active_strats += 1
-                if active_strats == 0: df_res['綜合分數'] = df_res['GVI_Rank']; active_strats = 1
+                if active_strats == 0:
+                    st.info("請至少開啟一項研究條件，再執行掃描。")
+                    return
             
                 df_res['策略評分_num'] = ((df_res['綜合分數'] / active_strats) * 100).round(1)
                 df_res = df_res.sort_values(by='綜合分數', ascending=False).head(20).reset_index(drop=True)
@@ -5548,7 +5670,7 @@ if auth_user:
                 df_res['排名'] = [f"第 {i+1} 名" for i in range(len(df_res))]
                 df_res['策略評分'] = df_res['策略評分_num'].astype(str) + " 分"
                 df_res['GVI價值指標'] = df_res['GVI值'].apply(lambda x: f"{x:.4f}" if (pd.notnull(x) and x is not None) else "資料不足")
-                df_res['動能(創高距離)'] = df_res['動能分數'].round(1).astype(str) + "%"
+                df_res['動能(創高距離)'] = df_res['動能分數'].apply(lambda value: f"{value:.1f}%" if pd.notna(value) else "資料不足")
                 df_res['自由現金流收益率'] = df_res['自由現金流收益'].apply(lambda x: f"{x:.2f}%" if (pd.notnull(x) and x is not None) else "資料不足")
                 df_res['本益成長比(PEG)'] = df_res['本益成長比(PEG)'].apply(lambda x: f"{x:.2f}" if (pd.notnull(x) and x is not None) else "資料不足")
             
@@ -5566,6 +5688,8 @@ if auth_user:
                     "title": title,
                 }
                 render_stock_screen_results(df_final_view, title)
+            else:
+                st.info("沒有取得可計算的股票資料，本次無符合標的。")
 
         scan_triggered_this_run = False
         col_btn1, col_btn2, col_btn3 = st.columns(3)
@@ -5620,7 +5744,7 @@ if auth_user:
 
     if selected_module == "📊 當日全市場三大法人佔股本比 Top 10":
         st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
-        st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。")
+        st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。點選任一表格中的股票列，即可選擇即時診斷或加入自訂觀察代碼。")
         if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
             st.session_state['inst_top10_loaded'] = True
             with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
@@ -5645,9 +5769,28 @@ if auth_user:
                         for index, (column, ascending, title) in enumerate(sort_specs):
                             ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
                             show = ranked[['股票代碼', '股票名稱', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
+                            show_display = show.copy()
+                            show_display['佔股本比(%)'] = show_display['佔股本比(%)'].apply(
+                                lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
+                            )
                             with ranking_cols[index % 2]:
                                 st.markdown(f"**{title} Top 10**")
-                                st.dataframe(show.style.format({'佔股本比(%)':'{:+.4f}%'}), use_container_width=True, hide_index=True)
+                                table_key = f"inst_top10_{investor}_{index}"
+                                top_event = st.dataframe(
+                                    show_display,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key=table_key,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                )
+                                top_rows = list(top_event.selection.rows)
+                                if top_rows:
+                                    chosen = show.iloc[int(top_rows[0])]
+                                    ticker_suffix = ".TWO" if str(chosen["市場"]) == "上櫃" else ".TW"
+                                    selected_ticker = f"{chosen['股票代碼']}{ticker_suffix}"
+                                    action_key = f"inst_action_{investor}_{index}"
+                                    _render_stock_actions(selected_ticker, str(chosen["股票名稱"]), action_key)
                 if market_errors:
                     st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))
 
@@ -5796,27 +5939,49 @@ if auth_user:
                 "目標市值(TWD)": "NT${:,.0f}", "調整金額參考(TWD)": "NT${:+,.0f}"
             }), use_container_width=True, hide_index=True)
             st.caption("調整金額參考 = 目標市值 − 目前市值；正數代表相對目標不足、負數代表相對目標超出。尚未納入交易成本、稅費、價差、流動性與稅務差異。")
-            st.dataframe(calc[["代碼", "名稱", "資產類型", "幣別", "數量", "最新價格", "換算台幣匯率", "台幣市值", "台幣成本", "未實現損益估算", "更新時間"]].style.format({
-                "最新價格": "{:,.4f}", "換算台幣匯率": "{:,.4f}", "台幣市值": "NT${:,.0f}",
-                "台幣成本": "NT${:,.0f}", "未實現損益估算": "NT${:+,.0f}"
-            }), use_container_width=True, hide_index=True)
+            st.caption("點選下方持倉股票列，可選擇使用個股即時診斷或加入操盤手自訂觀察代碼。")
+            holdings_view = calc[["代碼", "名稱", "資產類型", "幣別", "數量", "最新價格", "換算台幣匯率", "台幣市值", "台幣成本", "未實現損益估算", "更新時間"]]
+            holdings_display = holdings_view.copy()
+            for column in ("最新價格", "換算台幣匯率"):
+                holdings_display[column] = holdings_display[column].apply(lambda value: f"{value:,.4f}" if pd.notna(value) else "—")
+            for column in ("台幣市值", "台幣成本"):
+                holdings_display[column] = holdings_display[column].apply(lambda value: f"NT${value:,.0f}" if pd.notna(value) else "—")
+            holdings_display["未實現損益估算"] = holdings_display["未實現損益估算"].apply(
+                lambda value: f"NT${value:+,.0f}" if pd.notna(value) else "—"
+            )
+            holdings_event = st.dataframe(holdings_display, use_container_width=True, hide_index=True,
+                key=f"portfolio_holdings_table_{portfolio_user_id}", on_select="rerun", selection_mode="single-row")
+            holdings_rows = list(holdings_event.selection.rows)
+            if holdings_rows:
+                held_asset = calc.iloc[int(holdings_rows[0])]
+                if str(held_asset["資產類型"]) == "股票":
+                    held_ticker = str(held_asset["代碼"]).strip().upper()
+                    if held_ticker.isdigit():
+                        held_ticker = f"{held_ticker}.TW"
+                    _render_stock_actions(held_ticker, str(held_asset["名稱"]), "portfolio_holding_selected")
 
             st.markdown("#### 4. 更新或刪除持倉")
             ids = positions["id"].astype(int).tolist()
-            selected_id = st.selectbox("選擇要更新／刪除的持倉", ids, format_func=lambda x: f"ID {x}｜{positions.loc[positions['id'] == x, '代碼'].iloc[0]}｜{positions.loc[positions['id'] == x, '名稱'].iloc[0]}")
+            selected_id = st.selectbox(
+                "選擇要更新／刪除的持倉",
+                ids,
+                format_func=lambda x: f"ID {x}｜{positions.loc[positions['id'] == x, '代碼'].iloc[0]}｜{positions.loc[positions['id'] == x, '名稱'].iloc[0]}",
+                key=f"portfolio_selected_position_{portfolio_user_id}",
+            )
             selected_row = positions.loc[positions["id"] == selected_id].iloc[0]
-            with st.form("portfolio_update_position_form"):
+            update_widget_suffix = f"{portfolio_user_id}_{int(selected_id)}"
+            with st.form(f"portfolio_update_position_form_{update_widget_suffix}"):
                 u1, u2, u3 = st.columns(3)
                 with u1:
-                    u_name = st.text_input("名稱", value=str(selected_row["名稱"]), key="port_update_name")
-                    u_type = st.selectbox("資產類型", ["股票", "債券", "現金"], index=["股票", "債券", "現金"].index(selected_row["資產類型"]), key="port_update_type")
-                    u_currency = st.selectbox("幣別", ["TWD", "USD", "JPY", "HKD", "EUR"], index=["TWD", "USD", "JPY", "HKD", "EUR"].index(selected_row["幣別"]) if selected_row["幣別"] in ["TWD", "USD", "JPY", "HKD", "EUR"] else 0, key="port_update_currency")
+                    u_name = st.text_input("名稱", value=str(selected_row["名稱"]), key=f"port_update_name_{update_widget_suffix}")
+                    u_type = st.selectbox("資產類型", ["股票", "債券", "現金"], index=["股票", "債券", "現金"].index(selected_row["資產類型"]), key=f"port_update_type_{update_widget_suffix}")
+                    u_currency = st.selectbox("幣別", ["TWD", "USD", "JPY", "HKD", "EUR"], index=["TWD", "USD", "JPY", "HKD", "EUR"].index(selected_row["幣別"]) if selected_row["幣別"] in ["TWD", "USD", "JPY", "HKD", "EUR"] else 0, key=f"port_update_currency_{update_widget_suffix}")
                 with u2:
-                    u_quantity = st.number_input("數量", min_value=0.0, value=float(selected_row["數量"]), step=1.0, format="%.6f", key="port_update_quantity")
-                    u_price = st.number_input("最新價格", min_value=0.0, value=float(selected_row["最新價格"]), step=1.0, format="%.6f", key="port_update_price")
+                    u_quantity = st.number_input("數量", min_value=0.0, value=float(selected_row["數量"]), step=1.0, format="%.6f", key=f"port_update_quantity_{update_widget_suffix}")
+                    u_price = st.number_input("最新價格", min_value=0.0, value=float(selected_row["最新價格"]), step=1.0, format="%.6f", key=f"port_update_price_{update_widget_suffix}")
                 with u3:
-                    u_fx = st.number_input("換算台幣匯率", min_value=0.000001, value=float(selected_row["換算台幣匯率"]), step=0.1, format="%.6f", key="port_update_fx")
-                    u_cost = st.number_input("台幣總成本", min_value=0.0, value=float(selected_row["台幣成本"]), step=1000.0, key="port_update_cost")
+                    u_fx = st.number_input("換算台幣匯率", min_value=0.000001, value=float(selected_row["換算台幣匯率"]), step=0.1, format="%.6f", key=f"port_update_fx_{update_widget_suffix}")
+                    u_cost = st.number_input("台幣總成本", min_value=0.0, value=float(selected_row["台幣成本"]), step=1000.0, key=f"port_update_cost_{update_widget_suffix}")
                 uc1, uc2 = st.columns(2)
                 with uc1: update_position = st.form_submit_button("儲存此筆更新")
                 with uc2: delete_position = st.form_submit_button("刪除此筆持倉")
