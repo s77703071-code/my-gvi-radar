@@ -2927,6 +2927,27 @@ def build_institutional_screen(trades, shares_by_code, tickers, investor, min_ne
     return pd.DataFrame(rows)
 
 
+def get_trader_watchlist_symbols():
+    """Read the watchlist across module reruns without depending on another page's local variable."""
+    defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
+    saved_values = st.session_state.get("trader_watchlist_values")
+    if isinstance(saved_values, (list, tuple)):
+        source_values = saved_values
+    else:
+        widget_keys = [f"trader_watch_ticker_{index}" for index in range(1, 13)]
+        if any(key in st.session_state for key in widget_keys):
+            source_values = [st.session_state.get(key, "") for key in widget_keys]
+        else:
+            source_values = defaults
+
+    normalized = []
+    for value in source_values:
+        ticker = str(value or "").strip().upper()
+        if ticker and ticker not in normalized:
+            normalized.append(ticker)
+    return normalized
+
+
 def record_institutional_strategy_snapshot(trades, shares_by_code, tickers):
     """Save official daily institutional flows for the strategy's Taiwan watchlist."""
     saved = 0
@@ -7386,9 +7407,10 @@ if auth_user:
             st.caption("🧠 **心理讀法：**單日法人買超容易引發跟隨心理，但它只代表已發生的交易。觀察資料日期、連續性、股價與成交量；不能由買超直接推論法人正在吸籌或股價必漲。")
         if st.button("🏦 執行法人策略篩選", type='secondary', key='run_inst_screen'):
             st.session_state.pop('inst_strategy_flow_streak', None)
-            taiwan_tickers = [t for t in custom_scan_list if t.endswith(('.TW', '.TWO'))]
+            watchlist_symbols = get_trader_watchlist_symbols()
+            taiwan_tickers = [t for t in watchlist_symbols if t.endswith(('.TW', '.TWO'))]
             if not taiwan_tickers:
-                st.warning("請先在上方自訂觀察名單加入台股代碼，例如 2330.TW、3293.TWO。")
+                st.warning("目前自訂觀察清單沒有台股代碼。請先加入上市代碼（例如 2330.TW）或上櫃代碼（例如 3293.TWO）。")
             else:
                 with st.spinner("正在取得 TWSE／TPEx 官方法人交易與股數資料…"):
                     inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
