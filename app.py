@@ -2855,6 +2855,14 @@ def _broker_branch_csv_column_kind(column):
     if "代號" in compact or "代碼" in compact:
         if "證券" in compact or "股票" in compact:
             return "code"
+    if compact in {"securities_trader_id", "broker_id", "branch_id"} or (
+        "券商" in compact and ("代號" in compact or "代碼" in compact)
+    ):
+        return "branch_id"
+    if compact in {"securities_trader", "broker", "broker_branch", "branch", "branch_name"}:
+        return "branch"
+    if "券商" in compact or "分點" in compact:
+        return "branch"
     if compact in {"buy", "buy_volume", "buy_shares"}:
         return "buy"
     if "買進" in compact and any(unit in compact for unit in ("股數", "數量", "股")):
@@ -2863,6 +2871,30 @@ def _broker_branch_csv_column_kind(column):
         return "sell"
     if "賣出" in compact and any(unit in compact for unit in ("股數", "數量", "股")):
         return "sell"
+    return None
+
+
+def _normalize_broker_stock_code(value):
+    """Normalize Taiwan stock codes such as 3293, 3293.0, and 3293.TWO."""
+    text = str(value).strip().upper()
+    match = re.search(r"(?<!\d)(\d{4,6})(?!\d)", text)
+    return match.group(1) if match else text.replace(".TW", "").replace(".TWO", "")
+
+
+def _broker_csv_metadata_stock_code(text, delimiter, header_line):
+    """Read a stock code from metadata rows like `證券代號,3293` before the header."""
+    try:
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        for row in reader:
+            if reader.line_num - 1 >= header_line:
+                break
+            if row and _broker_branch_csv_column_kind(row[0]) == "code":
+                for cell in row[1:]:
+                    code = _normalize_broker_stock_code(cell)
+                    if code:
+                        return code
+    except csv.Error:
+        return None
     return None
 
 
@@ -2875,14 +2907,16 @@ def summarize_broker_branch_frame(frame, stock_code):
     sell_col = next((c for c in frame.columns if _broker_branch_csv_column_kind(c) == "sell"), None)
     if not all((code_col, buy_col, sell_col)):
         return {"error": "資料需包含股票代號、買進股數、賣出股數欄位。"}
-    selected = frame[frame[code_col].astype(str).str.strip().str.upper() == str(stock_code).strip().upper()].copy()
+    target_code = _normalize_broker_stock_code(stock_code)
+    frame_codes = frame[code_col].map(_normalize_broker_stock_code)
+    selected = frame[frame_codes == target_code].copy()
     if selected.empty:
         return {"error": "資料找不到目前分析股票。"}
 
     branch_id_col = next((c for c in selected.columns if str(c).lower() == "securities_trader_id"
                           or ('券商' in str(c) and '代號' in str(c))), None)
-    branch_name_col = next((c for c in selected.columns if str(c).lower() == "securities_trader"
-                            or ('券商' in str(c) and ('名稱' in str(c) or '分點' in str(c)))), None)
+    branch_name_col = next((c for c in selected.columns if _broker_branch_csv_column_kind(c) == "branch"
+                            or str(c).lower() == "securities_trader"), None)
     group_cols = [column for column in (branch_id_col, branch_name_col) if column]
     selected["_buy"] = pd.to_numeric(selected[buy_col].astype(str).str.replace(',', ''), errors='coerce')
     selected["_sell"] = pd.to_numeric(selected[sell_col].astype(str).str.replace(',', ''), errors='coerce')
@@ -2947,7 +2981,9 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
                     if reader.line_num > 100:
                         break
                     kinds = {_broker_branch_csv_column_kind(cell) for cell in row}
-                    if {"code", "buy", "sell"}.issubset(kinds):
+                    has_trade_columns = {"buy", "sell"}.issubset(kinds)
+                    has_stock_or_branch = bool({"code", "branch", "branch_id"}.intersection(kinds))
+                    if has_trade_columns and has_stock_or_branch:
                         # csv.reader.line_num is one-based; pandas skiprows is zero-based.
                         header_line = reader.line_num - 1
                         break
@@ -2971,6 +3007,14 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
             except Exception as exc:
                 last_parse_error = str(exc)
                 continue
+            code_col = next((column for column in frame.columns if _broker_branch_csv_column_kind(column) == "code"), None)
+            if code_col is None:
+                metadata_code = _broker_csv_metadata_stock_code(text, delimiter, header_line)
+                if metadata_code is None:
+                    return {"error": "CSV 標題列沒有股票代號，且前方資訊列也找不到「證券代號」；無法確認資料屬於哪一檔股票。"}
+                if metadata_code != _normalize_broker_stock_code(stock_code):
+                    return {"error": f"CSV 內的股票代號是 {metadata_code}，與目前選取的 {_normalize_broker_stock_code(stock_code)} 不一致。"}
+                frame["stock_id"] = metadata_code
             return summarize_broker_branch_frame(frame, stock_code)
 
     if last_parse_error:
