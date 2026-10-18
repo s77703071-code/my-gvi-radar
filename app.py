@@ -4401,7 +4401,6 @@ if auth_user:
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
     )
-    _render_market_psychology_guide(st, selected_module)
 
     def _jump_to_stock_diagnosis(ticker):
         st.session_state["selected_stock_input"] = str(ticker).strip().upper()
@@ -5166,6 +5165,10 @@ if auth_user:
                 </div>
             </div>
         """, unsafe_allow_html=True)
+
+        # Keep the behavior guide with the active panel, below the terminal
+        # header and market overview instead of placing it at the page top.
+        _render_market_psychology_guide(st, selected_module)
 
         if df_chart is None or df_chart.empty:
             if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略"]:
