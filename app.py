@@ -2911,7 +2911,7 @@ def summarize_broker_branch_frame(frame, stock_code):
     frame_codes = frame[code_col].map(_normalize_broker_stock_code)
     selected = frame[frame_codes == target_code].copy()
     if selected.empty:
-        return {"error": "資料找不到目前分析股票。"}
+        return {"error": f"目前分析標的是 {target_code}，但這份 CSV 找不到該股票的資料。請切換至 CSV 所屬股票，或匯入 {target_code} 的分點 CSV。"}
 
     branch_id_col = next((c for c in selected.columns if str(c).lower() == "securities_trader_id"
                           or ('券商' in str(c) and '代號' in str(c))), None)
@@ -3013,8 +3013,15 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
                 if metadata_code is None:
                     return {"error": "CSV 標題列沒有股票代號，且前方資訊列也找不到「證券代號」；無法確認資料屬於哪一檔股票。"}
                 if metadata_code != _normalize_broker_stock_code(stock_code):
-                    return {"error": f"CSV 內的股票代號是 {metadata_code}，與目前選取的 {_normalize_broker_stock_code(stock_code)} 不一致。"}
+                    return {"error": f"CSV 內的股票代號是 {metadata_code}，目前分析標的是 {_normalize_broker_stock_code(stock_code)}。請切換至 {metadata_code}，或匯入目前標的的分點 CSV。"}
                 frame["stock_id"] = metadata_code
+            else:
+                csv_codes = frame[code_col].map(_normalize_broker_stock_code).dropna().unique().tolist()
+                target_code = _normalize_broker_stock_code(stock_code)
+                if csv_codes and target_code not in csv_codes:
+                    shown_codes = ", ".join(csv_codes[:5])
+                    more_codes = " 等" if len(csv_codes) > 5 else ""
+                    return {"error": f"這份 CSV 包含 {shown_codes}{more_codes}；目前分析標的是 {target_code}。請切換至 CSV 所屬股票，或匯入 {target_code} 的分點 CSV。"}
             return summarize_broker_branch_frame(frame, stock_code)
 
     if last_parse_error:
@@ -4957,6 +4964,10 @@ if auth_user:
                 else:
                     st.info("集保持股級距資料目前僅適用台股。")
 
+                st.caption(
+                    f"個股分點參考目前對應 {stock_code}；要查看其他股票，請先在左側更換分析標的，"
+                    "並匯入該股票的券商分點 CSV。"
+                )
                 with st.expander("🔎 選用：券商分點買賣明細", expanded=False):
                     st.caption("分點資料反映券商帳戶交易彙整，無法辨認最終投資人身分，也不等於主力或散戶流向。")
                     if not is_taiwan_stock:
@@ -4979,6 +4990,23 @@ if auth_user:
                             st.caption(
                                 f"{source_label}；淨買超前 15 分點合計 {branch_summary['top_net_buy']:+,.0f} 股，"
                                 f"淨賣超前 15 分點合計 {branch_summary['top_net_sell']:+,.0f} 股。"
+                            )
+                            trend_item = flow_summary.get("trend")
+                            trend_status = trend_item.get("status", "") if trend_item else ""
+                            if "偏強" in trend_status:
+                                trend_label = "偏強"
+                            elif "偏弱" in trend_status:
+                                trend_label = "偏弱"
+                            elif "整理" in trend_status:
+                                trend_label = "整理"
+                            else:
+                                trend_label = "資料不足"
+                            net_shares = branch_summary["net_shares"]
+                            branch_direction = "淨買超" if net_shares > 0 else "淨賣超" if net_shares < 0 else "買賣接近平衡"
+                            st.info(
+                                f"個股參考（{stock_code}）：近期價格走勢{trend_label}；"
+                                f"該分點資料期間合計{branch_direction} {abs(net_shares):,.0f} 股。"
+                                "價格趨勢與分點資料涵蓋期間可能不同，請分開解讀；這是市場觀察參考，不代表因果或買賣訊號。"
                             )
                             breakdown = branch_summary.get("breakdown")
                             if isinstance(breakdown, pd.DataFrame) and not breakdown.empty:
@@ -5056,6 +5084,10 @@ if auth_user:
                             source_label = ""
 
                         if branch_source == "手動上傳 CSV":
+                            st.info(
+                                f"目前分析標的是 {stock_code}。分點 CSV 僅用來分析該檔股票；如要分析其他股票，"
+                                "請先在左側更換股票代碼，再匯入該股票的 CSV。"
+                            )
                             branch_file = st.file_uploader(
                                 "選擇券商分點 CSV 檔",
                                 type=["csv"],
