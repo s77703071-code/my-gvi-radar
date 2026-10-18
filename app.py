@@ -2940,13 +2940,19 @@ def summarize_broker_branch_frame(frame, stock_code):
     breakdown = grouped[["分點", "_buy", "_sell", "買賣超"]].rename(
         columns={"_buy": "買進股數", "_sell": "賣出股數"}
     ).sort_values("買賣超", ascending=False).reset_index(drop=True)
+    positive_net_total = float(grouped.loc[grouped["買賣超"] > 0, "買賣超"].sum())
+    negative_net_total = float(-grouped.loc[grouped["買賣超"] < 0, "買賣超"].sum())
+    top_net_buy = float(grouped.nlargest(15, "買賣超")["買賣超"].clip(lower=0).sum())
+    top_net_sell = float(grouped.nsmallest(15, "買賣超")["買賣超"].clip(upper=0).sum())
     return {
         "net_shares": float(grouped["買賣超"].sum()),
         "buyers": buyers,
         "sellers": sellers,
         "count_unit": count_unit,
-        "top_net_buy": float(grouped.nlargest(15, "買賣超")["買賣超"].clip(lower=0).sum()),
-        "top_net_sell": float(grouped.nsmallest(15, "買賣超")["買賣超"].clip(upper=0).sum()),
+        "top_net_buy": top_net_buy,
+        "top_net_sell": top_net_sell,
+        "top_net_buy_share_pct": top_net_buy / positive_net_total * 100.0 if positive_net_total > 0 else None,
+        "top_net_sell_share_pct": abs(top_net_sell) / negative_net_total * 100.0 if negative_net_total > 0 else None,
         "breakdown": breakdown,
     }
 
@@ -4982,14 +4988,24 @@ if auth_user:
                             branch_cols = st.columns(3)
                             count_suffix = "家" if branch_summary["count_unit"] == "分點" else "列"
                             with branch_cols[0]:
-                                st.metric("分點合計淨買賣超", f"{branch_summary['net_shares']:+,.0f} 股", delta_color="off")
+                                st.metric("分點淨額合計（核對）", f"{branch_summary['net_shares']:+,.0f} 股", delta_color="off")
                             with branch_cols[1]:
-                                st.metric(f"淨買超{branch_summary['count_unit']}數", f"{branch_summary['buyers']:,} {count_suffix}", delta_color="off")
+                                st.metric(f"淨買超{branch_summary['count_unit']}家數", f"{branch_summary['buyers']:,} {count_suffix}", delta_color="off")
                             with branch_cols[2]:
-                                st.metric(f"淨賣超{branch_summary['count_unit']}數", f"{branch_summary['sellers']:,} {count_suffix}", delta_color="off")
+                                st.metric(f"淨賣超{branch_summary['count_unit']}家數", f"{branch_summary['sellers']:,} {count_suffix}", delta_color="off")
+                            buy_share = branch_summary.get("top_net_buy_share_pct")
+                            sell_share = branch_summary.get("top_net_sell_share_pct")
+                            buy_share_text = f"，約占全部淨買超 {buy_share:.1f}%" if buy_share is not None else ""
+                            sell_share_text = f"，約占全部淨賣超 {sell_share:.1f}%" if sell_share is not None else ""
                             st.caption(
-                                f"{source_label}；淨買超前 15 分點合計 {branch_summary['top_net_buy']:+,.0f} 股，"
-                                f"淨賣超前 15 分點合計 {branch_summary['top_net_sell']:+,.0f} 股。"
+                                f"{source_label}；淨買超前 15 個{branch_summary['count_unit']}合計 "
+                                f"{branch_summary['top_net_buy']:+,.0f} 股{buy_share_text}；淨賣超前 15 個"
+                                f"{branch_summary['count_unit']}合計 {branch_summary['top_net_sell']:+,.0f} 股{sell_share_text}。"
+                            )
+                            st.caption(
+                                "讀法：買超／賣超家數只表示各分點淨額為正或負的數量，不代表散戶／大戶人數。"
+                                "在資料涵蓋完整且口徑一致時，分點淨額合計接近 0 常是買賣相抵的核對結果，並非方向訊號；"
+                                "前 15 比例反映分點淨額集中程度，也不能識別最終投資人。"
                             )
                             trend_item = flow_summary.get("trend")
                             trend_status = trend_item.get("status", "") if trend_item else ""
