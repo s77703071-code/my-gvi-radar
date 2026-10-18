@@ -1832,9 +1832,10 @@ def collect_stock_research_context(stock_obj, info_obj, market_snapshot):
     return "\n".join(lines)
 
 def run_ai_candidate_backtests(history, is_taiwan_stock):
-    """Evaluate a small fixed set of existing-system strategies, split chronologically."""
+    """Compare the full built-in indicator strategy set using chronological holdout data."""
     if history is None or history.empty:
-        return {"table": pd.DataFrame(), "best": None, "text": "無法下載可用日線歷史資料，因此沒有進行策略回測。"}
+        no_data = "無法下載可用日線歷史資料，因此沒有進行策略回測，也不提供依回測條件產生的策略建議。"
+        return {"table": pd.DataFrame(), "best": None, "text": no_data, "advice": no_data}
     frame = history.copy()
     if isinstance(frame.columns, pd.MultiIndex):
         frame.columns = frame.columns.get_level_values(0)
@@ -1842,7 +1843,8 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         frame.index = frame.index.tz_localize(None)
     required = ["Open", "High", "Low", "Close", "Volume"]
     if any(column not in frame.columns for column in required):
-        return {"table": pd.DataFrame(), "best": None, "text": "日線資料缺少必要的開高低收或成交量欄位，沒有進行策略回測。"}
+        no_data = "日線資料缺少必要的開高低收或成交量欄位，沒有進行策略回測，也不提供依回測條件產生的策略建議。"
+        return {"table": pd.DataFrame(), "best": None, "text": no_data, "advice": no_data}
     frame = frame[required].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     frame = frame.dropna(subset=required).sort_index()
     frame = frame.loc[frame["Close"] > 0]
@@ -1850,10 +1852,11 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         return {
             "table": pd.DataFrame(), "best": None,
             "text": f"目前只有 {len(frame)} 筆有效日線（至少需要約 2 年資料），不足以分成前 70% 與後 30% 做基本樣本外比較。",
+            "advice": "目前有效日線不足以做樣本外檢查，因此不提供策略進場建議；請補足歷史資料或先觀察。",
         }
 
     split = int(len(frame) * 0.70)
-    indicator_frame = compute_backtest_indicators(frame)
+    indicator_frame = compute_kline_indicator_frame(frame)
     fee = 0.1425 if is_taiwan_stock else 0.0
     tax = 0.3 if is_taiwan_stock else 0.0
     slip = 0.05
@@ -1885,6 +1888,132 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         },
     ]
 
+    def add_candidate(name, conditions, entry_updates, exit_updates):
+        entry = {
+            "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [], "five_ma_mode": "停用",
+            "kd_mode": "停用", "macd_mode": "停用", "vol_mode": "停用",
+            "rsi_mode": "停用", "bb_mode": "停用", "bias_mode": "停用",
+            "atr_mode": "停用", "atr_pct_limit": 4.0, "obv_mode": "停用",
+            "cci_mode": "停用", "adx_mode": "停用", "adx_threshold": 20.0,
+            "ema_mode": "停用", "match_mode": "ALL",
+        }
+        exit_rules = {
+            "stop_loss_pct": 8.0, "trailing_stop_pct": 12.0,
+            "ma_mode": "停用", "ma_p": 20, "ma_cross_pairs": [],
+            "five_ma_mode": "停用", "kd_mode": "停用", "macd_mode": "停用",
+            "vol_mode": "停用", "rsi_mode": "停用", "bb_mode": "停用",
+            "bias_mode": "停用", "atr_stop_multiple": 0.0, "obv_mode": "停用",
+            "cci_mode": "停用", "adx_mode": "停用", "adx_threshold": 20.0,
+            "ema_mode": "停用",
+        }
+        entry.update(entry_updates)
+        exit_rules.update(exit_updates)
+        candidates.append({
+            "name": name, "conditions": conditions,
+            "entry": entry, "exit": exit_rules,
+        })
+
+    # The AI report uses standard, explainable presets to compare every
+    # indicator available in the custom backtest panel. Users can still tune
+    # their own periods and thresholds in that panel.
+    add_candidate(
+        "MA20 突破／跌破",
+        "收盤向上突破 MA20 進場；收盤向下跌破 MA20 離場。",
+        {"ma_mode": "突破均線"}, {"ma_mode": "跌破均線"},
+    )
+    add_candidate(
+        "MA20 站穩／跌破",
+        "收盤站在 MA20 上方進場；收盤向下跌破 MA20 離場。",
+        {"ma_mode": "站穩均線上"}, {"ma_mode": "跌破均線"},
+    )
+    add_candidate(
+        "MA5／MA20 黃金與死亡交叉",
+        "MA5 向上穿越 MA20 進場；MA5 向下跌破 MA20 離場。",
+        {"ma_cross_pairs": [(5, 20)]}, {"ma_cross_pairs": [(5, 20)]},
+    )
+    add_candidate(
+        "成交量放大 1.5 倍＋MA20 突破",
+        "收盤向上突破 MA20，且成交量達 20 日均量 1.5 倍時進場；跌破 MA20 或成交量達均量 2.5 倍時離場。",
+        {"ma_mode": "突破均線", "vol_mode": "爆量 (大於20日均量1.5倍)"},
+        {"ma_mode": "跌破均線", "vol_mode": "極端爆量倒貨 (大於20日均量2.5倍)"},
+    )
+    add_candidate(
+        "成交量放大 2 倍＋MA20 突破",
+        "收盤向上突破 MA20，且成交量達 20 日均量 2 倍時進場；跌破 MA20 或成交量達均量 2.5 倍時離場。",
+        {"ma_mode": "突破均線", "vol_mode": "爆量 (大於20日均量2.0倍)"},
+        {"ma_mode": "跌破均線", "vol_mode": "極端爆量倒貨 (大於20日均量2.5倍)"},
+    )
+    add_candidate(
+        "RSI 強勢突破 50／跌破 70",
+        "RSI 向上突破 50 進場；RSI 從 70 以上跌回 70 以下離場。",
+        {"rsi_mode": "強勢突破 (RSI向上突破50)"},
+        {"rsi_mode": "超買警戒 (RSI跌破70)"},
+    )
+    add_candidate(
+        "布林上軌突破／上軌拉回",
+        "收盤向上突破布林上軌進場；觸及上軌後收回上軌內側離場。",
+        {"bb_mode": "突破布林上軌"}, {"bb_mode": "觸及上軌拉回"},
+    )
+    add_candidate(
+        "BIAS 自 −5% 回升／跌破 0%",
+        "BIAS 從 −5% 以下回升並向上穿越 −5% 時進場；BIAS 向下跌破 0% 離場。",
+        {"bias_mode": "自 −5% 向上回升"}, {"bias_mode": "跌破 0%"},
+    )
+    add_candidate(
+        "BIAS 突破 0%／高檔回落",
+        "BIAS 向上穿越 0% 時進場；BIAS 從 +5% 以上回落並跌破 +5% 時離場。",
+        {"bias_mode": "向上突破 0%"}, {"bias_mode": "高檔回落並跌破 +5%"},
+    )
+    add_candidate(
+        "ATR 低波動篩選＋MA20 突破",
+        "收盤向上突破 MA20，且 ATR 不高於收盤價的 4% 時進場；跌破 MA20 或觸發進場時 ATR 的 2 倍停損時離場。",
+        {"ma_mode": "突破均線", "atr_mode": "低波動篩選", "atr_pct_limit": 4.0},
+        {"ma_mode": "跌破均線", "atr_stop_multiple": 2.0},
+    )
+    add_candidate(
+        "OBV 上升／轉弱",
+        "OBV 高於前一根 K 棒時進場；OBV 低於前一根 K 棒時離場。",
+        {"obv_mode": "OBV 高於前一根"}, {"obv_mode": "OBV 低於前一根"},
+    )
+    add_candidate(
+        "CCI 上穿 −100／跌破 +100",
+        "CCI 向上穿越 −100 時進場；CCI 從 +100 以上向下跌破 +100 時離場。",
+        {"cci_mode": "上穿 −100"}, {"cci_mode": "跌破 +100"},
+    )
+    add_candidate(
+        "CCI 上穿 0／跌破 0",
+        "CCI 向上穿越 0 時進場；CCI 向下跌破 0 時離場。",
+        {"cci_mode": "上穿 0"}, {"cci_mode": "跌破 0"},
+    )
+    add_candidate(
+        "DMI／ADX 趨勢增強＋方向反轉離場",
+        "ADX 達 20 且 +DI 高於 −DI 時進場；+DI 向下跌破 −DI 時離場。",
+        {"adx_mode": "趨勢增強且 +DI 領先", "adx_threshold": 20.0},
+        {"adx_mode": "+DI 跌破 −DI"},
+    )
+    add_candidate(
+        "DMI／ADX 趨勢增強＋ADX 轉弱離場",
+        "ADX 達 20 且 +DI 高於 −DI 時進場；ADX 低於 20 時離場。",
+        {"adx_mode": "趨勢增強且 +DI 領先", "adx_threshold": 20.0},
+        {"adx_mode": "ADX 低於門檻", "adx_threshold": 20.0},
+    )
+    add_candidate(
+        "EMA12／EMA26 黃金與死亡交叉",
+        "EMA12 向上穿越 EMA26 進場；EMA12 向下跌破 EMA26 離場。",
+        {"ema_mode": "EMA12 黃金交叉 EMA26"},
+        {"ema_mode": "EMA12 死亡交叉 EMA26"},
+    )
+    # Add readable rule descriptions to the five legacy candidates as well.
+    legacy_conditions = {
+        "五線開花（MA5／10／20／60／120）": "MA5＞MA10＞MA20＞MA60＞MA120 且五條均線同時上升時進場；排列失序離場。",
+        "MACD 黃金／死亡交叉": "DIF 向上穿越訊號線進場；DIF 向下跌破訊號線離場。",
+        "KD 黃金／死亡交叉": "K 線向上穿越 D 線進場；K 線向下跌破 D 線離場。",
+        "RSI 超賣回升／超買回落": "RSI 向上穿越 30 進場；RSI 從 70 以上跌回 70 以下離場。",
+        "布林通道下軌反彈／回到中軌": "觸及布林下軌後收回軌道內進場；收盤向上穿越中軌離場。",
+    }
+    for candidate in candidates:
+        candidate.setdefault("conditions", legacy_conditions.get(candidate["name"], "依該指標的交叉或門檻觸發；另套用風險控制。"))
+
     def score_period(part):
         dates = pd.DatetimeIndex(part.index).strftime("%Y-%m-%d").tolist()
         trades = run_strategy_backtest(part, entry, exit_rules, dates, risk_reward_ratio=3.0)
@@ -1900,6 +2029,15 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         test_part = indicator_frame.iloc[max(0, split - 1):].copy()
         train_result = score_period(train_part)
         test_result = score_period(test_part)
+        full_dates = pd.DatetimeIndex(indicator_frame.index).strftime("%Y-%m-%d").tolist()
+        full_trades = run_strategy_backtest(
+            indicator_frame, entry, exit_rules, full_dates, risk_reward_ratio=3.0
+        )
+        latest_triggered = bool(
+            not full_trades.empty
+            and "_entry_index" in full_trades.columns
+            and (pd.to_numeric(full_trades["_entry_index"], errors="coerce") == len(indicator_frame) - 1).any()
+        )
         train = train_result["strategy_metrics"] if train_result else {}
         test = test_result["strategy_metrics"] if test_result else {}
         test_count = int(test.get("trade_count", 0) or 0)
@@ -1913,22 +2051,34 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         )
         rows.append({
             "策略": candidate["name"],
+            "進出場條件": candidate.get("conditions", ""),
             "前70%交易數": int(train.get("trade_count", 0) or 0),
             "前70%平均每筆損益(%)": _finite_number(train.get("expectancy_pct")),
             "後30%交易數": test_count,
             "後30%平均每筆損益(%)": test_expectancy,
             "後30%賺賠金額比": test_pf,
             "後30%最大回撤(%)": test_mdd * 100.0 if test_mdd is not None else None,
+            "最新一根是否觸發": "有觸發" if latest_triggered else "未觸發",
             "樣本外檢查": "通過初步門檻" if passed else "未通過／資料不足",
             "_passed": passed,
+            "_latest_triggered": latest_triggered,
         })
     result_frame = pd.DataFrame(rows)
     passed_rows = result_frame.loc[result_frame["_passed"]].copy()
     if passed_rows.empty:
         best = None
         recommendation = "沒有策略同時通過樣本外交易數、成本後正期望、賺賠金額比及回撤門檻；本次不指定可執行策略，建議觀望或先用模擬交易。"
+        advice = (
+            "目前沒有任何內建指標策略通過樣本外檢查，因此不提供進場策略建議。即使最新一根 K 棒出現個別技術條件，"
+            "也不足以支持把它當成有效策略；先觀察、補充資料或用模擬交易，不要為了得到結論而放寬門檻。"
+        )
     else:
-        best_row = passed_rows.sort_values(["後30%平均每筆損益(%)", "後30%最大回撤(%)"], ascending=[False, False]).iloc[0]
+        currently_triggered_passed = passed_rows.loc[passed_rows["_latest_triggered"]]
+        recommendation_pool = currently_triggered_passed if not currently_triggered_passed.empty else passed_rows
+        best_row = recommendation_pool.sort_values(
+            ["後30%平均每筆損益(%)", "後30%最大回撤(%)"],
+            ascending=[False, False],
+        ).iloc[0]
         best = str(best_row["策略"])
         best_pf = _finite_number(best_row["後30%賺賠金額比"])
         best_pf_text = f"{best_pf:.2f}" if best_pf is not None else "樣本外尚無虧損交易"
@@ -1937,12 +2087,27 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
             f"{best_row['後30%平均每筆損益(%)']:.2f}%、交易 {int(best_row['後30%交易數'])} 筆、"
             f"賺賠金額比 {best_pf_text}、最大回撤 {best_row['後30%最大回撤(%)']:.2f}%。"
         )
+        if bool(best_row.get("_latest_triggered", False)):
+            advice = (
+                f"優先列入進一步研究的是「{best}」：它達到本系統的樣本外初步門檻，且最新可用日線"
+                f"（{frame.index[-1]:%Y-%m-%d}）觸發了該策略的進場條件。這只代表條件同時成立，不是買進指令；"
+                "仍須核對資料日期、流動性、公司事件與風險承受度，並依回測中的停損與停利規則先做模擬或小額驗證。"
+            )
+        else:
+            advice = (
+                f"「{best}」是樣本外表現相對較佳且通過初步門檻的研究候選，但最新可用日線"
+                f"（{frame.index[-1]:%Y-%m-%d}）尚未觸發其進場條件。建議列入觀察，等待規則訊號出現；"
+                "不要因歷史回測通過就提前追價或把它當成目前買進建議。"
+            )
+        other_passed = passed_rows.loc[passed_rows["策略"] != best, "策略"].astype(str).tolist()
+        if other_passed:
+            advice += " 其他通過初步門檻的候選策略：" + "、".join(other_passed[:5]) + ("等。" if len(other_passed) > 5 else "。")
     period = f"{frame.index[0]:%Y-%m-%d} 至 {frame.index[-1]:%Y-%m-%d}；前70%訓練、後30%樣本外測試"
     assumptions = (
         f"共 {len(frame)} 筆日線；成本假設：每邊手續費 {fee:.4f}%、賣出交易稅 {tax:.3f}%、每邊滑價 {slip:.2f}%；"
-        "五線開花定義為 MA5＞MA10＞MA20＞MA60＞MA120 且五條線均較前一交易日上升；排列失序時出場。"
-        "RSI 使用 14 日，RSI 上穿 30 進場、跌破 70 出場；布林通道使用 20 日均線與上下 2 倍標準差，下軌反彈進場、站上中軌出場。"
-        "MACD 與 KD 仍保留黃金／死亡交叉比較。各策略另套用固定停損 8%、移動停損 12%、預設風險報酬 1:3。"
+        "回測逐項比較 MA20 突破與站穩、MA5／20 交叉、五線排列、KD、MACD、成交量、RSI、布林通道、BIAS、ATR、OBV、CCI、DMI／ADX 與 EMA12／26。"
+        "各策略使用表列的明確進出場條件；指標週期採常用預設（RSI 14、布林 20、BIAS／CCI 20、ATR／ADX 14、成交量均線 20）。"
+        "各策略套用固定停損 8%、移動停損 12%、預設風險報酬 1:3；ATR 候選另依進場時 ATR 設定 2 倍波動停損。"
         "通過門檻為後段至少 5 筆交易、成本後平均單筆報酬大於 0、"
         "賺賠金額比大於 1（無虧損時不以缺值判失敗）且最大回撤不超過 30%。"
     )
@@ -1955,15 +2120,17 @@ def run_ai_candidate_backtests(history, is_taiwan_stock):
         pf_value = _finite_number(row.get("後30%賺賠金額比"))
         pf_text = f"{pf_value:.2f}" if pf_value is not None else "無虧損或資料不足"
         strategy_lines.append(
-            f"- {row['策略']}：前段 {int(row['前70%交易數'])} 筆；後段 {int(row['後30%交易數'])} 筆；"
+            f"- {row['策略']}｜條件：{row['進出場條件']}｜前段 {int(row['前70%交易數'])} 筆；後段 {int(row['後30%交易數'])} 筆；"
             f"後段平均每筆損益 {backtest_value(row.get('後30%平均每筆損益(%)'), '%')}；"
             f"賺賠金額比 {pf_text}；最大回撤 {backtest_value(row.get('後30%最大回撤(%)'), '%')}；"
+            f"最新資料日 {frame.index[-1]:%Y-%m-%d}：{row['最新一根是否觸發']}；"
             f"{row['樣本外檢查']}。"
         )
     results_text = "\n".join(strategy_lines)
-    return {"table": result_frame.drop(columns=["_passed"]), "best": best,
+    return {"table": result_frame.drop(columns=["_passed", "_latest_triggered"]), "best": best,
             "text": f"回測期間：{period}\n{assumptions}\n各策略樣本外結果：\n{results_text}\n整體結論：{recommendation}",
-            "period": period, "assumptions": assumptions, "recommendation": recommendation}
+            "period": period, "assumptions": assumptions, "recommendation": recommendation,
+            "advice": advice}
 
 def build_three_core_market_psychology_notes(gvi_value, momentum_pct, fcf_yield_pct, peg_value):
     """Translate three research factors into cautious, plain-language behavior cues."""
@@ -2115,7 +2282,7 @@ def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_co
 2. **市場心理觀察**：只根據提供的價格、成交量、公開法人流量、券商分點摘要、新聞與基本面證據，描述可能的樂觀、觀望、追價、恐慌或風險重新評估線索。若提供分點摘要，必須直接解讀淨買超／淨賣超分點家數、淨額與集中度，並和價格方向並列；只有日期與期間對齊時才能稱為同向或背離，日期不明就明確標示期間未對齊、只能作方向參考。每項標示「觀察到的資料」與「可能的心理解讀」；不要宣稱知道投資人真實想法，不要由分點或法人資料推定主力／散戶身分。
 3. **市場、產業與同業**：交代相關大盤、利率／匯率／政策、產業供需與題材；列 2–4 家真正可比同業。重要數據附來源和日期；區分事實與市場預期，資料不足就直說。
 4. **公司優勢與風險**：以可查證資料說明優勢、風險，以及可能推翻目前觀點的條件。
-5. **回測與風控**：說明樣本外交易數、每筆平均損益、賺賠金額比、最大回撤及通過狀態；沒有策略通過時，明確寫「目前找不到足夠證據支持正期望策略」。只把回測當歷史檢查。
+5. **技術指標回測與條件式建議**：逐項整理本系統提供的 MA、五線排列、KD、MACD、成交量、RSI、布林、BIAS、ATR、OBV、CCI、DMI／ADX、EMA12／26 回測候選，引用每項實際測試的進出場條件、樣本外交易數、成本後平均每筆損益、賺賠金額比、最大回撤、通過狀態及最新日線是否觸發。只可把「樣本外通過且最新日線觸發」的策略列為進一步研究候選；若通過但最新日線未觸發，建議等待條件，不追價；若沒有策略通過，明確寫「目前找不到足夠證據支持正期望策略」，不提供進場候選。說明通過門檻不代表勝率或未來報酬保證，並列出停損／停利風險。只把回測當歷史檢查。
 6. **結尾行動重點**：列出目前資料支持的偏多／中性／偏空觀察、最重要催化因素、最重要風險，以及下一步要查證的項目。沒有通過的策略不得包裝成推薦；不得承諾獲利或提供無來源目標價。
 
 格式要求：直接劃重點，使用短段落、清楚小標和條列；不要貼程式碼、不要列數學公式或工程符號。需要解釋計算結果時，請用日常語言說明「這個數字代表什麼、可能影響什麼、還要注意什麼」。心理解讀一律寫成可能性，不把推論寫成事實。不得虛構資料或來源；區分資料、推論與未知。"""
@@ -5382,41 +5549,153 @@ if auth_user:
                     valuation_color = "#cc0000"
 
                 fin_src_display = f"每股淨值來源：{bv_src}；ROE 來源：{roe_src}"
-
-                advice = f"📊 **目前研究分數最高的單項條件：【{best_strategy}】（研究比對分數：{best_score}分，不是勝率）**<br><br>"
-                advice += f"📌 **採用數據源**：{fin_src_display}<br>"
-                if was_missing_in_db:
-                    advice += f"📡 **備援提示**：自動啟動多層次財報遞補機制以確保診斷不中斷。<br>"
-                advice += f"🔍 **門檻比對摘要**：<br>"
                 psychology_key_by_strategy = {
                     "GVI 價值雷達": "GVI 價值面",
                     "動能突破雷達": "動能趨勢面",
                     "QARP 現金流雷達": "QARP 現金流與估值面",
                 }
-                for strat, sc in scores.items():
-                    icon = "●" if strat == best_strategy else "·"
-                    score_label = f"研究比對分數 {sc} 分" if sc is not None else "資料不足，未評分"
-                    psych_label = three_core_psychology["notes"].get(psychology_key_by_strategy.get(strat), "")
-                    advice += (
-                        f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} **{strat}**（{score_label}）：{reasons[strat]}<br>"
-                        f"&nbsp;&nbsp;&nbsp;&nbsp;🧠 **市場心理角度**：{psych_label}<br>"
+                compact_psychology = {
+                    "GVI 價值面": {
+                        True: "可能吸引價值型關注；仍要查獲利能否延續。",
+                        False: "價值條件支持較弱；不等於一定高估。",
+                        None: "資料不足，暫不解讀市場關注。",
+                    },
+                    "動能趨勢面": {
+                        True: "趨勢較受關注；留意追價與擁擠風險。",
+                        False: "趨勢支持較弱；觀察整理或轉弱。",
+                        None: "歷史價格不足，暫不判讀趨勢。",
+                    },
+                    "QARP 現金流與估值面": {
+                        True: "現金流與估值條件達標；確認能否持續。",
+                        False: "至少一項未達標；查現金創造與成長預期。",
+                        None: "資料不足，暫不解讀現金流與估值。",
+                    },
+                }
+                factor_details = [
+                    {
+                        "strategy": "GVI 價值雷達",
+                        "psych_key": "GVI 價值面",
+                        "threshold": "GVI 達 0.20 以上",
+                        "highlight": f"GVI {gvi_val:.4f}" if gvi_val is not None else "GVI 資料不足",
+                    },
+                    {
+                        "strategy": "動能突破雷達",
+                        "psych_key": "動能趨勢面",
+                        "threshold": "近一年可用最高收盤價比值達 80% 以上；至少需 50 根有效收盤資料",
+                        "highlight": f"高點比值 {momentum_score:.1f}%" if momentum_score is not None else "動能資料不足",
+                    },
+                    {
+                        "strategy": "QARP 現金流雷達",
+                        "psych_key": "QARP 現金流與估值面",
+                        "threshold": "自由現金流收益參考達 2.5% 以上，且 PEG 不高於 1.5",
+                        "highlight": (
+                            f"現金流收益 {fcf_yield_main:.2f}%｜PEG {peg_val_main:.2f}"
+                            if fcf_yield_main is not None and peg_val_main is not None
+                            else "現金流或 PEG 資料不足"
+                        ),
+                    },
+                ]
+                status_style = {
+                    True: ("達門檻", "#34D399"),
+                    False: ("未達門檻", "#FBBF24"),
+                    None: ("資料不足", "#94A3B8"),
+                }
+                available_core_checks = [
+                    three_core_psychology["checks"].get(item["psych_key"])
+                    for item in factor_details
+                ]
+                known_core_checks = [value for value in available_core_checks if value is not None]
+                if not known_core_checks:
+                    compact_overall = "三項資料不足，先補齊數據再比較。"
+                elif all(value is True for value in known_core_checks) and len(known_core_checks) == 3:
+                    compact_overall = "三項條件目前一致達標，可能提高市場研究關注；這仍未證明有績效優勢。"
+                elif all(value is False for value in known_core_checks):
+                    compact_overall = "目前可評估的條件都未達門檻，避免為了看多而放寬標準。"
+                else:
+                    compact_overall = "訊號有分歧；先查明價值、趨勢與現金流差異，避免只挑支持原看法的資料。"
+
+                compact_cards = []
+                for item in factor_details:
+                    check = three_core_psychology["checks"].get(item["psych_key"])
+                    status_label, status_color = status_style[check]
+                    score_value = scores.get(item["strategy"])
+                    score_label = f"比對 {score_value} 分" if score_value is not None else "未評分"
+                    brief = compact_psychology[item["psych_key"]][check]
+                    compact_cards.append(
+                        "<div style=\"min-width:150px;flex:1 1 150px;border:1px solid rgba(148,163,184,.28);"
+                        "border-radius:9px;padding:9px 10px;background:rgba(15,23,42,.52);\">"
+                        f"<div style=\"font-weight:700;color:#F8FAFC;\">{html.escape(item['strategy'])}</div>"
+                        f"<div style=\"margin:3px 0;color:{status_color};font-size:.88rem;\">{status_label}｜{score_label}</div>"
+                        f"<div style=\"font-size:.84rem;line-height:1.45;color:#CBD5E1;\">🧠 {html.escape(brief)}</div>"
+                        "</div>"
                     )
-                advice += (
-                    f"<br>🧭 **三核心合併解讀**：{three_core_psychology['overall']}<br>"
-                    "⚠️ **解讀方式**：以上只表示目前數值與研究門檻的相符程度。各因子尚未完成獨立樣本外比較，"
-                    "不代表長期報酬優勢，也不構成買賣或部位建議。"
+                compact_best = (
+                    f"目前比對分數最高：{best_strategy}（{best_score} 分；分數只代表門檻相符程度）"
+                    if valid_scores else "目前沒有可評分的研究條件。"
+                )
+                compact_core_html = (
+                    "<div style=\"border-left:4px solid " + valuation_color + ";padding:11px 13px;"
+                    "border-radius:8px;background:rgba(30,41,59,.58);\">"
+                    "<div style=\"font-size:1.03rem;font-weight:750;color:#F8FAFC;margin-bottom:5px;\">⚖️ 三核心研究條件比對</div>"
+                    f"<div style=\"font-size:.88rem;color:#CBD5E1;margin-bottom:9px;\">{html.escape(compact_best)}</div>"
+                    "<div style=\"display:flex;flex-wrap:wrap;gap:7px;\">"
+                    + "".join(compact_cards)
+                    + "</div>"
+                    f"<div style=\"margin-top:9px;font-size:.88rem;color:#E2E8F0;\">🧭 心理合併觀察：{html.escape(compact_overall)}</div>"
+                    "</div>"
                 )
 
                 # ======= 視覺化圖表整合 (Radar Chart) =======
                 diag_c1, diag_c2 = st.columns([1.5, 1])
                 with diag_c1:
-                    st.markdown(
-                        f"<div style='background-color:rgba(30,30,30,0.7); padding:14px 18px; border-left:6px solid {valuation_color}; border-radius:4px; margin-bottom:15px; height: 100%;'>"
-                        f"<h5 style='margin:0; color:white;'>⚖️ 三核心研究條件比對</h5>"
-                        f"<p style='margin:10px 0 0 0; font-size:14px; color:#cccccc;'>{advice}</p>"
-                        f"</div>", 
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(compact_core_html, unsafe_allow_html=True)
+                    st.caption("研究比對分數不是勝率、報酬預測或買賣建議。")
+                    with st.expander("🖍️ 查看三核心詳細條件與畫線重點", expanded=False):
+                        st.markdown(
+                            f"**目前比對分數最高：** {best_strategy}（{best_score} 分）  \n"
+                            f"**每股淨值與 ROE 資料來源：** {fin_src_display}"
+                        )
+                        if was_missing_in_db:
+                            st.info("財報快取原先沒有可用資料，系統已啟動備援來源補齊。")
+                        st.caption(
+                            "下列條件分數只表示符合目前研究門檻的程度；門檻尚未證明具有穩定的樣本外績效。"
+                        )
+                        detail_sources = {
+                            "GVI 價值雷達": f"每股淨值：{bv_src}；ROE：{roe_src}；股價：yfinance 行情資料。",
+                            "動能突破雷達": "來源：目前股票歷史收盤資料；依目前畫面可用資料計算，資料長度不足時不評分。",
+                            "QARP 現金流雷達": (
+                                "自由現金流／市值參考取自 yfinance 公司資料；若自由現金流缺漏，系統改用可取得的營運現金流與資本支出補算。"
+                                "PEG 優先取 yfinance PEG；缺漏時才以可取得的本益比與盈餘成長資料估算。"
+                            ),
+                        }
+                        for item in factor_details:
+                            strategy_name = item["strategy"]
+                            psych_key = item["psych_key"]
+                            check = three_core_psychology["checks"].get(psych_key)
+                            status_label, status_color = status_style[check]
+                            detail_text = three_core_psychology["notes"].get(psych_key, "資料不足。")
+                            score_value = scores.get(strategy_name)
+                            score_text = f"{score_value} 分" if score_value is not None else "未評分"
+                            highlight_text = html.escape(item["highlight"])
+                            st.markdown(
+                                "<div style=\"margin:9px 0;padding:11px 13px;border:1px solid rgba(148,163,184,.25);"
+                                "border-radius:9px;background:rgba(15,23,42,.42);\">"
+                                f"<div style=\"font-weight:750;color:#F8FAFC;\">{html.escape(strategy_name)} "
+                                f"<span style=\"color:{status_color};font-size:.88rem;\">{status_label}｜比對 {score_text}</span></div>"
+                                f"<div style=\"margin:7px 0;color:#F8FAFC;line-height:1.65;\">"
+                                f"<span style=\"text-decoration:underline;text-decoration-color:#FBBF24;"
+                                f"text-decoration-thickness:3px;text-underline-offset:3px;\">🖍️ 畫線重點：{highlight_text}</span></div>"
+                                f"<div style=\"font-size:.9rem;color:#CBD5E1;line-height:1.6;\"><b>門檻：</b>{html.escape(item['threshold'])}<br>"
+                                f"<b>數據比對：</b>{html.escape(reasons[strategy_name])}<br>"
+                                f"<b>市場心理：</b>{html.escape(detail_text)}<br>"
+                                f"<b>資料來源：</b>{html.escape(detail_sources[strategy_name])}</div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+                        st.markdown(
+                            "**🧭 三核心合併解讀**：" + compact_overall + "  \n"
+                            "**解讀限制**：可能的市場行為線索，不是投資人心理的直接測量；分數不代表績效優勢或部位建議。"
+                        )
                 with diag_c2:
                     categories = ['GVI 價值雷達', '動能突破雷達', 'QARP 現金流雷達']
                     radar_scores = [scores['GVI 價值雷達'], scores['動能突破雷達'], scores['QARP 現金流雷達']]
@@ -5546,7 +5825,10 @@ if auth_user:
                                         )
                                     ai_prompt = build_ai_investment_prompt(
                                         selected_stock, c_name, provider_name, quant_summary,
-                                        company_context, ai_backtest["text"],
+                                        company_context,
+                                        ai_backtest["text"]
+                                        + "\n\n系統依樣本外門檻與最新日線整理的條件式建議：\n"
+                                        + str(ai_backtest.get("advice", "回測資料不足，暫不提出策略建議。")),
                                     )
                                     if provider_name == "ChatGPT":
                                         success_report, ai_sources = generate_openai_research(
@@ -5561,6 +5843,14 @@ if auth_user:
                                             + "\n\n### 分點流向與近 20 筆價格方向｜資料補充解讀\n"
                                             + broker_branch_ai_interpretation
                                         )
+                                    success_report = (
+                                        str(success_report).rstrip()
+                                        + "\n\n### 技術指標回測｜條件式建議\n"
+                                        + str(ai_backtest.get(
+                                            "advice",
+                                            "回測資料不足，暫不依技術指標回測提出策略建議。",
+                                        ))
+                                    )
                                     report_key = f"ai_report_{selected_stock}"
                                     st.session_state[report_key] = success_report
                                     st.session_state[f"{report_key}_provider"] = provider_name
@@ -5600,7 +5890,7 @@ if auth_user:
                         saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
                         saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
                         if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
-                            with st.expander("查看系統自動回測比較", expanded=False):
+                            with st.expander("查看 AI 報告使用的全指標樣本外回測比較", expanded=False):
                                 display_backtest = saved_backtest_table.copy()
                                 for metric_column in (
                                     "前70%平均每筆損益(%)", "後30%平均每筆損益(%)",
@@ -5666,11 +5956,23 @@ if auth_user:
                                         f"【本次 AI 分析使用的分點摘要】\n{email_branch_context}\n\n"
                                         if email_branch_context else ""
                                     )
+                                    saved_email_backtest = st.session_state.get(
+                                        f"ai_report_{selected_stock}_backtest", {}
+                                    )
+                                    email_backtest_section = (
+                                        "【技術指標樣本外回測比較與條件式建議】\n"
+                                        + str(saved_email_backtest.get("text", "回測資料不足。"))
+                                        + "\n\n【依回測條件整理的建議】\n"
+                                        + str(saved_email_backtest.get("advice", "目前沒有可用的條件式建議。"))
+                                        + "\n\n"
+                                        if isinstance(saved_email_backtest, dict) else ""
+                                    )
                                     email_body = (
                                         f"個股：{selected_stock} {c_name}\n"
                                         f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
                                         f"{email_branch_section}"
                                         f"{email_branch_interpretation}"
+                                        f"{email_backtest_section}"
                                         f"【市場心理重點】\n{email_psychology_brief}\n\n"
                                         f"{report_provider} 分析結果：\n\n{ai_report}"
                                     )
