@@ -2498,12 +2498,19 @@ def build_chip_flow_summary(price_history, institutional_trade=None, issued_shar
         if len(close) >= 20 and float(close.iloc[-1]) > 0:
             average = float(close.tail(20).mean())
             change = float(close.iloc[-1] / average - 1.0) if average > 0 else None
+            recent_closes = close.tail(20)
+            period_change = (
+                float(recent_closes.iloc[-1] / recent_closes.iloc[0] - 1.0)
+                if len(recent_closes) >= 2 and float(recent_closes.iloc[0]) > 0 else None
+            )
             if change is not None:
                 tone = "偏強" if change >= 0.01 else "偏弱" if change <= -0.01 else "整理"
                 relation = "高於" if change > 0 else "低於" if change < 0 else "接近"
                 summary["trend"] = {
                     "status": f"{tone}｜現價{relation}20日平均價",
-                    "detail": f"現價較近20筆收盤平均價 {change:+.2%}。這描述近期走勢，不代表未來方向。",
+                    "detail": f"近20筆收盤價由首筆至末筆變化 {period_change:+.2%}；現價較近20筆平均價 {change:+.2%}。這描述近期走勢，不代表未來方向。",
+                    "period_change_pct": period_change,
+                    "period_bars": len(recent_closes),
                 }
         if isinstance(price_history, pd.DataFrame) and "Volume" in price_history.columns:
             volume = pd.to_numeric(price_history["Volume"], errors="coerce").dropna()
@@ -2538,6 +2545,45 @@ def build_chip_flow_summary(price_history, institutional_trade=None, issued_shar
                 "detail": f"三大法人合計買賣超佔已發行股數 {net_pct:+.4f}%；只看當日，單日變化不等於持股集中。",
             }
     return summary
+
+
+def build_broker_branch_price_breadth_reading(branch_summary, price_change_pct):
+    """Pair recent price direction with net-buy/net-sell branch breadth cautiously."""
+    if not isinstance(branch_summary, Mapping):
+        return "分點家數資料不足，暫時無法比較價格方向與買賣參與廣度。"
+    change = _finite_number(price_change_pct)
+    if change is None:
+        return "價格資料不足，暫時無法配對股價方向與分點家數。"
+
+    buyers = int(branch_summary.get("buyers", 0) or 0)
+    sellers = int(branch_summary.get("sellers", 0) or 0)
+    unit = "分點" if branch_summary.get("count_unit") == "分點" else "資料列"
+    if change > 0 and buyers > sellers:
+        reading = (
+            f"近20筆價格上漲 {change:+.2%}，淨買超{unit}數也多於淨賣超{unit}數；"
+            "兩個方向暫時一致，可作為買方參與較廣的線索。"
+        )
+    elif change > 0 and sellers > buyers:
+        reading = (
+            f"近20筆價格上漲 {change:+.2%}，但淨賣超{unit}數較多，方向出現分歧；"
+            "可能同時有賣方參與較廣與其他買盤支撐，不能只靠家數判定出貨。"
+        )
+    elif change < 0 and sellers > buyers:
+        reading = (
+            f"近20筆價格下跌 {change:+.2%}，淨賣超{unit}數也較多；"
+            "可留意賣方參與較廣的線索，但不能據此斷定恐慌或預測續跌。"
+        )
+    elif change < 0 and buyers > sellers:
+        reading = (
+            f"近20筆價格下跌 {change:+.2%}，但淨買超{unit}數較多，方向出現分歧；"
+            "可能有分點承接，也可能只是買進參與面較廣，價格仍偏弱，不能直接解讀成吸籌。"
+        )
+    else:
+        reading = (
+            f"近20筆價格變化為 {change:+.2%}，淨買超與淨賣超{unit}數相同；"
+            "目前家數沒有顯示明確的買賣參與廣度差異。"
+        )
+    return reading + " 分點家數不是投資人數，也不等於交易金額。"
 
 
 def _normalize_chip_trade_date(value):
@@ -5269,6 +5315,18 @@ if auth_user:
                                 f"該分點資料期間合計{branch_direction} {abs(net_shares):,.0f} 股。"
                                 "價格趨勢與分點資料涵蓋期間可能不同，請分開解讀；這是市場觀察參考，不代表因果或買賣訊號。"
                             )
+                            if trend_item:
+                                price_change_pct = trend_item.get("period_change_pct")
+                                period_bars = int(trend_item.get("period_bars", 20) or 20)
+                                st.markdown(
+                                    "**📈 股價方向 × 分點家數：** "
+                                    + build_broker_branch_price_breadth_reading(branch_summary, price_change_pct)
+                                )
+                                st.caption(
+                                    f"價格方向取最近 {period_bars} 筆「{selected_tf}」收盤資料；分點家數取{source_label}。"
+                                    "若 CSV 沒有資料日期，兩者無法確認為同日或同期間；這是方向搭配觀察，不是統計相關係數。"
+                                    "要判斷是否穩定同向，需累積多個日期且日期對齊的分點與股價資料。"
+                                )
                             st.markdown("##### 🧠 市場心理觀察：怎麼理解這些分點數字？")
                             buyer_count = int(branch_summary["buyers"])
                             seller_count = int(branch_summary["sellers"])
