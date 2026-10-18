@@ -808,6 +808,14 @@ def _render_screen(st, tickers: list[str], rules: dict[str, Any], label: str = "
     if errors:
         st.warning("部分代碼無法取得資料：" + "；".join(f"{x['symbol']} ({x['error']})" for x in errors[:8]))
     if output:
+        st.caption("表格中的殖利率、發放率、自由現金流、估值與品質分數皆依目前可取得資料估算；「資料不足」或資料覆蓋低時，請勿把缺值當成零或通過。上方「指標與計算欄位怎麼看？」可查各欄位白話說明。")
+        with st.expander("🔎 配息品質表格欄位說明", expanded=False):
+            st.markdown(
+                "- **現金殖利率**：近 12 個月現金股利 ÷ 現價。**近五年股利／正值年數**：檢查紀錄是否連續；不代表未來仍會配息。\n"
+                "- **EPS 年化成長**：可得年度每股盈餘的年化變化；**現金流正值年數**：營業現金流為正的年度數。\n"
+                "- **發放率**：近 12 個月股利 ÷ 最新可得 EPS；**本益比**：股價 ÷ 每股盈餘；**負債/權益**：負債相對股東權益；**利息保障倍數**：營業獲利支付利息的緩衝。\n"
+                "- **品質分數**：目前啟用條件加權的 0–100 分；**資料覆蓋**：指標可取得程度；兩者皆不是未來報酬機率。**不合格原因、資料缺漏、風險警示**分別說明未達條件、缺資料及需要留意的情形。"
+            )
         rows = []
         for item in output:
             rows.append({
@@ -892,6 +900,16 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
     cols = st.columns(4)
     labels = {"cagr": "年化報酬率 CAGR", "mdd": "最大回撤 MDD", "annualized_volatility": "年化波動率", "sharpe": "夏普比率",
               "cumulative_total_return": "累積含息總報酬", "gross_dividends": "股息收入（稅前）", "reinvested_dividends": "股息再投入金額", "ending_value": "期末資產"}
+    metric_help = {
+        "cagr": "把回測整段複利結果換算為年平均報酬，方便比較不同期間；不代表每年都會達成。",
+        "mdd": "回測期間資產由高點到後續低點的最大跌幅，用來了解曾承受的最深下跌。",
+        "annualized_volatility": "報酬起伏幅度的年化估算；不是虧損機率或未來跌幅上限。",
+        "sharpe": "平均報酬扣除無風險利率後除以報酬標準差，再年化；本回測以 0% 無風險利率估算。越高代表歷史上每單位整體波動換到較多報酬，不保證未來。",
+        "cumulative_total_return": "把股價變化和已納入計算的股息一起計算，顯示整段期間相對投入金額的變化。",
+        "gross_dividends": "回測期間收到的股息總額，尚未扣除設定的股利稅費。",
+        "reinvested_dividends": "實際用於增加持股的股息金額；若設定不再投入，這項會較低或為零。",
+        "ending_value": "期末持有資產的估算市值，依回測設定計算。",
+    }
     display_metrics = ["cagr", "mdd", "annualized_volatility", "sharpe", "cumulative_total_return", "gross_dividends", "reinvested_dividends", "ending_value"]
     for idx, key in enumerate(display_metrics):
         value = metrics.get(key)
@@ -902,9 +920,9 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
         else:
             shown = f"{value:,.0f}" if value is not None else "資料不足"
         with cols[idx % 4]:
-            st.metric(labels[key], shown)
+            st.metric(labels[key], shown, help=metric_help[key])
     st.line_chart(history[["portfolio_value"]], use_container_width=True)
-    st.caption(f"股價報酬、股息收入與含息總報酬已分開計算；價格使用拆股調整後收盤價，股息於除息日入帳。夏普比率（Sharpe）以 0 無風險利率估算。期末股數：{metrics['final_shares']}。")
+    st.caption(f"股價報酬、股息收入與含息總報酬已分開計算；價格使用拆股調整後收盤價，股息於除息日入帳。夏普比率（Sharpe）以 0% 無風險利率估算。期末股數：{metrics['final_shares']}。將游標移到數值旁的說明圖示可看單項解釋；更多欄位請展開上方指標說明。")
     if split.get("error"):
         st.warning(split["error"])
     else:
@@ -2864,6 +2882,70 @@ def _format_optional_cell(value, format_string):
         return "—"
 
 
+def _render_metric_glossary(st):
+    """Show short, plain-language definitions for calculated fields across panels."""
+    with st.expander("📘 指標與計算欄位怎麼看？", expanded=False):
+        st.caption("點開可查各面板常見數值的意思與用途；指標是分析參考，不是獲利保證或單獨的買賣訊號。")
+        sections = [
+            ("回測與風險", [
+                "**整段／累積報酬**：期末資產相對投入本金增加或減少多少；含息欄位會把股息計入。",
+                "**年化報酬 CAGR**：把整段期間的複利結果換算成一年，方便比較不同長度的期間；不代表每年都會得到這個報酬。",
+                "**最大回撤 MDD／最大跌幅**：歷史資產曲線從高點到後續低點的最深跌幅，用來了解曾承受的最差下跌。",
+                "**年化波動率**：報酬上下起伏的幅度估算；波動大不等於一定虧損，也不代表未來風險上限。",
+                "**夏普比率 Sharpe**：平均報酬扣除無風險利率後，除以報酬的整體起伏，再依期間換算成年化。配息與技術回測目前以 0% 無風險利率估算；數值越高表示歷史上每單位整體波動換到較多報酬，不保證未來。",
+                "**索提諾比率 Sortino**：類似夏普比率，但只把下跌波動當風險；數值越高通常代表承受下跌風險時的歷史報酬較好。",
+                "**卡瑪比率 Calmar**：年化報酬除以最大回撤幅度，用來對照報酬與最深下跌；歷史值不代表未來。",
+                "**勝率／賺錢交易比例**：扣除設定成本後賺錢的交易占比；高勝率仍可能被少數大虧損抵銷。",
+                "**賺賠金額比／獲利因子**：獲利交易金額總和除以虧損交易金額總和；大於 1 代表歷史獲利總額較高，不能單獨代表策略可靠。",
+                "**每筆平均損益／期望值**：每筆已完成交易平均賺或賠多少，通常以扣除回測成本後計算；筆數太少時容易受個別交易影響。",
+                "**持有時間比例／曝險**：回測中持有股票的時間占比；其餘時間通常是現金。",
+                "**持有 K 棒數**：從模擬進場到出場經過的圖表資料根數；不同圖表週期下，一根代表的時間不同。",
+                "**成本後報酬率**：單筆模擬交易扣除設定手續費、交易稅及滑價後的損益比例；成本仍是估算值。",
+                "**風險報酬比／目標停利價**：依進場價、停損距離及設定倍數推算的目標價；是模擬規則，不是獲利機率。",
+                "**回撤期間**：資產低於前次高點的連續資料根數；不同圖表週期不宜直接比較根數。",
+            ]),
+            ("價格、技術與選股指標", [
+                "**均線乖離率**：現價相對指定期間平均價高或低多少百分比；用來觀察短期偏離，不是必然反轉訊號。",
+                "**量比**：目前成交量與近期平均量相比的倍數；高於 1 代表量比平均活躍，不能判斷買賣方向。",
+                "**價量動能估算**：本程式將價格變化乘上相對成交量，再做平滑；只是一種價量趨勢代理，不是實際籌碼集中度、法人進出或持股變化。",
+                "**RSI 相對強弱指標**：依近期上漲與下跌幅度計算的 0–100 動能指標；描述近期漲跌力道，不代表單獨的買賣訊號。",
+                "**KD 隨機指標**：比較收盤價在近期高低區間的位置，K、D 線是平滑後的變化；主要描述短期動能。",
+                "**MACD**：兩條不同速度的指數移動平均線之差；柱狀圖顯示 MACD 與訊號線的差距，用來觀察趨勢動能變化。",
+                "**布林通道**：以移動平均線和近期波動範圍形成上下界；價格靠近通道邊緣表示位置偏向區間一側，不保證反轉。",
+                "**ATR 平均真實波幅**：近期價格區間的平均大小，用來估算波動幅度；不表示漲跌方向。",
+                "**黃金交叉／死亡交叉**：快均線向上穿越慢均線／向下跌破慢均線；是歷史價格訊號，可能落後且會反覆失效。",
+                "**GVI 成長價值指標**：本程式以每股淨值／股價乘上 ROE 五年複利估算；是研究用估值分數，依賴財報資料與假設，不是合理價或報酬預測。",
+                "**ROE 股東權益報酬率**：公司用股東投入的權益創造盈餘的比例；須留意產業差異、財報期間與一次性項目。",
+                "**每股淨值／PB 股價淨值比**：每股淨值是帳面資產扣負債後分攤到每股；PB 是股價除以每股淨值，用來比較市價相對帳面價值。",
+                "**動能／距近 252 根高點比例**：現價除以可取得的近 252 根收盤最高價；較接近 100% 代表價格靠近期間高點。歷史資料少於 50 根時不評分。",
+                "**自由現金流收益率**：自由現金流除以市值的百分比，粗略比較現金流相對公司規模；來源與年度可能落後股價。",
+                "**PEG 本益成長比**：以本益比除以盈餘成長率估算；成長率資料品質會直接影響結果，不宜跨來源直接比較。",
+                "**策略評分／排名**：依本次股票池和已開啟條件做相對排序，不是通過機率、預期報酬或買進建議。",
+            ]),
+            ("配息、網格與法人欄位", [
+                "**現金殖利率**：近 12 個月現金股利除以目前股價；未來股利可能變動，不能視為固定利息。",
+                "**股利發放率**：近 12 個月股利與最新可得 EPS 的比值；高於 100% 可能表示股利超過當期盈餘，需查明原因。",
+                "**配息品質分數**：依配息紀錄、盈餘、現金流、發放率、安全性與估值等目前啟用條件加權整理的 0–100 分；不是配息保證或未來報酬機率。",
+                "**利息保障倍數**：營業獲利相對利息支出的倍數；越低通常代表支付利息的緩衝較小，並受資料口徑影響。",
+                "**資料覆蓋率**：目前可取得的必要資料占比；缺漏越多，評分越不完整，不等於公司品質分數。",
+                "**網格偏離現價**：每個觸發價與目前價格的百分比差距；觸發價是規劃參考，不是券商掛單。",
+                "**定期定額累計投入**：模擬期間投入金額加總；和期末資產相比才能看投入後的損益。",
+                "**佔股本比**：法人買進、賣出或淨買賣超股數除以官方已發行普通股數；是當日交易量相對股本的比例，不等於法人持股比例。淨買賣超 = 買進股數 − 賣出股數。",
+            ]),
+            ("投資組合欄位", [
+                "**目前配置比例**：各類資產市值除以組合總市值；價格與匯率更新狀態會影響結果。",
+                "**配置偏離（百分點）**：目前比例減目標比例。例如目前 45%、目標 40%，偏離是 +5 個百分點。",
+                "**調整金額參考**：目標市值減目前市值；正數代表相對不足、負數代表相對超出，未扣交易成本或稅費。",
+                "**未實現損益估算**：目前市值減記錄成本；不含完整稅費、已領股息或所有外部資金流。",
+                "**快照估算回撤**：手動記錄的組合市值與曾記錄高點相比的變化；未調整入金／出金，只能粗略參考。",
+                "**最低保留現金**：低於設定金額時顯示提醒；系統不會因此自動買賣或更改配置建議。",
+            ]),
+        ]
+        for heading, definitions in sections:
+            st.markdown(f"**{heading}**")
+            st.markdown("\n".join(f"- {definition}" for definition in definitions))
+
+
 def _normalize_ma_cross_pairs(pairs):
     """Return unique (fast, slow) periods where the fast average is shorter."""
     normalized = []
@@ -3733,10 +3815,12 @@ if auth_user:
     dj_val, dj_chg, dj_pct = get_market_index("^DJI")
     nas_val, nas_chg, nas_pct = get_market_index("^IXIC")
 
-    with col1: st.metric(label="🇹🇼 台灣加權指數 (^TWII)", value=f"{tw_val:,.2f}" if tw_val else "更新中...", delta=f"{tw_chg:+.2f} ({tw_pct:+.2f}%)" if tw_val else "--")
-    with col2: st.metric(label="🇺🇸 標普 500 指數 (^GSPC)", value=f"{sp_val:,.2f}" if sp_val else "載入中...", delta=f"{sp_chg:+.2f} ({sp_pct:+.2f}%)" if sp_val else "--")
-    with col3: st.metric(label="🇺🇸 道瓊工業指數 (^DJI)", value=f"{dj_val:,.2f}" if dj_val else "載入中...", delta=f"{dj_chg:+.2f} ({dj_pct:+.2f}%)" if dj_val else "--")
-    with col4: st.metric(label="🇺🇸 那斯達克指數 (^IXIC)", value=f"{nas_val:,.2f}" if nas_val else "載入中...", delta=f"{nas_chg:+.2f} ({nas_pct:+.2f}%)" if nas_val else "--")
+    with col1: st.metric(label="🇹🇼 台灣加權指數 (^TWII)", value=f"{tw_val:,.2f}" if tw_val else "更新中...", delta=f"{tw_chg:+.2f} ({tw_pct:+.2f}%)" if tw_val else "--", help="顯示指數最新可取得點位；下方變化為相較前一筆資料的點數與百分比差異。")
+    with col2: st.metric(label="🇺🇸 標普 500 指數 (^GSPC)", value=f"{sp_val:,.2f}" if sp_val else "載入中...", delta=f"{sp_chg:+.2f} ({sp_pct:+.2f}%)" if sp_val else "--", help="追蹤美國大型企業整體股價表現的指數；變化為相較前一筆資料。")
+    with col3: st.metric(label="🇺🇸 道瓊工業指數 (^DJI)", value=f"{dj_val:,.2f}" if dj_val else "載入中...", delta=f"{dj_chg:+.2f} ({dj_pct:+.2f}%)" if dj_val else "--", help="由 30 家大型美國企業組成的價格加權指數；變化為相較前一筆資料。")
+    with col4: st.metric(label="🇺🇸 那斯達克指數 (^IXIC)", value=f"{nas_val:,.2f}" if nas_val else "載入中...", delta=f"{nas_chg:+.2f} ({nas_pct:+.2f}%)" if nas_val else "--", help="以那斯達克掛牌公司為主的綜合指數；變化為相較前一筆資料。")
+
+    _render_metric_glossary(st)
 
     st.markdown("---")
 
@@ -3846,10 +3930,10 @@ if auth_user:
             current_trend = 0.85 * current_trend + signal
             sim_net[i] = np.clip(current_trend, -6.0, 6.0)
             
-        df['籌碼集中度'] = sim_net
-        df['5日差值'] = df['籌碼集中度'].diff(1)
-        diff_values = df['5日差值'].dropna().to_numpy().flatten()
-        latest_val = float(df['籌碼集中度'].to_numpy().flatten()[-1])
+        df['價量動能估算'] = sim_net
+        df['價量動能變化'] = df['價量動能估算'].diff(1)
+        diff_values = df['價量動能變化'].dropna().to_numpy().flatten()
+        latest_val = float(df['價量動能估算'].to_numpy().flatten()[-1])
         
         count = 0
         if len(diff_values) > 0:
@@ -3857,8 +3941,8 @@ if auth_user:
             for val in reversed(diff_values):
                 if (val > 0) == is_positive and val != 0: count += 1
                 else: break
-            status = f"🔥 連續 {count} 日上升" if is_positive else f"📉 連續 {count} 日下降"
-        else: status = "🔄 區間震盪洗盤"
+            status = f"🔥 連續 {count} 根上升" if is_positive else f"📉 連續 {count} 根下降"
+        else: status = "🔄 區間震盪"
         
         return df, f"{latest_val:+.2f}% ({status})", latest_val
 
@@ -3960,22 +4044,22 @@ if auth_user:
 
                 if "價值" in panel_mode:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}"); st.caption(f"📢 即時報價 ({cache_time_str})")
+                    with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="資料來源最近更新的價格；可能不是即時成交價，請留意下方資料時間。"); st.caption(f"📢 即時報價 ({cache_time_str})")
                     
                     if bv_val is not None:
-                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str); st.caption("📢 最新重算")
-                        with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str); st.caption(f"📢 {roe_src}")
-                        with gc4: st.metric(label="📖 每股淨值", value=bv_str); st.caption(f"📢 {bv_src}")
-                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str); st.caption("📢 溢價程度")
+                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="本程式以每股淨值／股價乘上 ROE 五年複利估算的研究指標；不是合理價或未來報酬預測。"); st.caption("📢 最新重算")
+                        with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str, help="公司以股東權益創造盈餘的比率；需搭配產業特性及財報期間判讀。"); st.caption(f"📢 {roe_src}")
+                        with gc4: st.metric(label="📖 每股淨值", value=bv_str, help="公司帳面資產扣除負債後，平均分配到每一股的金額；不等於股票的市場價格。"); st.caption(f"📢 {bv_src}")
+                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="股價除以每股淨值；表示市場價格相對帳面價值的倍數，跨產業比較要小心。"); st.caption("📢 溢價程度")
                     else:
                         with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
                 else:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)")
-                    with gc2: st.metric(label="🌊 今日成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off")
-                    with gc3: st.metric(label="🎯 5日均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off")
-                    with gc4: st.metric(label="🔺 今日最高價", value=f"{high_today:,.2f}")
-                    with gc5: st.metric(label="🔻 今日最低價", value=f"{low_today:,.2f}")
+                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)", help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
+                    with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比為最近一根 K 棒成交量除以近 5 根平均量；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
+                    with gc3: st.metric(label="🎯 5根均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off", help="最新收盤價相對近 5 根收盤均價的百分比差距；用來觀察短期偏離，不是反轉訊號。")
+                    with gc4: st.metric(label="🔺 最近一根 K 棒最高價", value=f"{high_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最高價。")
+                    with gc5: st.metric(label="🔻 最近一根 K 棒最低價", value=f"{low_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最低價。")
 
                 # ======= 升級：計算三大策略所需數值與交叉分析 =======
                 L = len(df_chart)
@@ -4123,7 +4207,7 @@ if auth_user:
                     )
                     st.plotly_chart(fig_radar, use_container_width=True)
                 
-                st.info(f"🔮 【{c_name}】{selected_tf} 即時籌碼動能判定：{chip_status_text}")
+                st.info(f"🔮 【{c_name}】{selected_tf} 價量動能估算：{chip_status_text}")
 
                 with st.expander(f"🧠 AI 雙核心個股研究報告與 Email 傳送【{c_name}】", expanded=(f"ai_report_{selected_stock}" in st.session_state)):
                     ai_provider = st.radio(
@@ -4576,6 +4660,7 @@ if auth_user:
                     })
 
                 st.dataframe(pd.DataFrame(grid_details), use_container_width=True, height=280)
+                st.caption("「網格層級」是價格分段；「目標觸發價」是策略參考價；「偏離現價」顯示距離；「預計動作」與資金管理方式是依上方假設試算，並非實際掛單或保證成交。")
 
                 st.warning(
                     "⚠️ **操盤手複利與風險特別提示：**\n"
@@ -4595,7 +4680,7 @@ if auth_user:
                 
                 gc_col1, gc_col2, gc_col3 = st.columns(3)
                 with gc_col1:
-                    sim_capital = st.number_input("💵 模擬初始投入本金 (元/\\$)", value=100000, step=10000, key="sim_cap_input")
+                    sim_capital = st.number_input("💵 模擬初始投入本金 (元/\\$)", min_value=1.0, value=100000.0, step=10000.0, key="sim_cap_input")
                 with gc_col2:
                     fee_rate = st.number_input("💸 單邊交易手續費率 (%)", value=0.1425, step=0.01, format="%.4f", key="sim_fee_input") / 100.0
                 with gc_col3:
@@ -4642,7 +4727,7 @@ if auth_user:
                     bh_shares = (sim_capital * (1.0 - fee_rate)) / initial_p
                     bh_asset_curve = bh_shares * closes_arr
                     bh_final_val = float(bh_asset_curve[-1])
-                    bh_total_ret = ((bh_final_val - sim_capital) / sim_capital) * 100.0
+                    bh_total_ret = ((bh_final_val - sim_capital) / sim_capital) * 100.0 if sim_capital > 0 else None
 
                     stock_val = sim_capital * 0.5 * (1.0 - fee_rate)
                     cash_val = sim_capital * 0.5
@@ -4700,13 +4785,22 @@ if auth_user:
                         grid_asset_curve.append(grid_shares * p + cash_val)
 
                     grid_final_val = float(grid_asset_curve[-1])
-                    grid_total_ret = ((grid_final_val - sim_capital) / sim_capital) * 100.0
-
-                    total_bars = len(closes_arr)
-                    years_est = max(0.1, total_bars / 252.0) if "1日" in selected_tf else max(0.1, total_bars / 52.0)
-                    
-                    bh_cagr = ((bh_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if bh_final_val > 0 else -100.0
-                    grid_cagr = ((grid_final_val / sim_capital) ** (1.0 / years_est) - 1.0) * 100.0 if grid_final_val > 0 else -100.0
+                    grid_total_ret = ((grid_final_val - sim_capital) / sim_capital) * 100.0 if sim_capital > 0 else None
+                    grid_span_years = max(
+                        (pd.Timestamp(df_chart.index[-1]) - pd.Timestamp(df_chart.index[0])).total_seconds()
+                        / (365.25 * 24 * 60 * 60),
+                        0.0,
+                    )
+                    # Use actual timestamp span for every chart interval; fixed bars/year assumptions
+                    # badly distorted intraday, weekly, monthly and long-interval CAGR values.
+                    bh_cagr = (
+                        ((bh_final_val / float(sim_capital)) ** (1.0 / grid_span_years) - 1.0) * 100.0
+                        if grid_span_years >= 0.5 and bh_final_val > 0 and float(sim_capital) > 0 else None
+                    )
+                    grid_cagr = (
+                        ((grid_final_val / float(sim_capital)) ** (1.0 / grid_span_years) - 1.0) * 100.0
+                        if grid_span_years >= 0.5 and grid_final_val > 0 and float(sim_capital) > 0 else None
+                    )
 
                     dca_result = None
                     try:
@@ -4723,17 +4817,12 @@ if auth_user:
 
                     bh_mdd = calc_mdd(bh_asset_curve)
                     grid_mdd = calc_mdd(grid_asset_curve)
-                    grid_span_years = max(
-                        (pd.Timestamp(df_chart.index[-1]) - pd.Timestamp(df_chart.index[0])).total_seconds()
-                        / (365.25 * 24 * 60 * 60),
-                        0.0,
-                    )
                     grid_advice_cagr = (
                         (grid_final_val / float(sim_capital)) ** (1.0 / grid_span_years) - 1.0
                         if grid_span_years >= 0.5 and grid_final_val > 0 and float(sim_capital) > 0 else None
                     )
                     grid_advice_metrics = {
-                        "cumulative_return": grid_total_ret / 100.0,
+                        "cumulative_return": grid_total_ret / 100.0 if grid_total_ret is not None else None,
                         "cagr": grid_advice_cagr,
                         "mdd": grid_mdd / 100.0,
                         "strategy": grid_sim_strategy,
@@ -4744,12 +4833,16 @@ if auth_user:
 
                     st.markdown("#### 三種方式結果摘要")
                     summary_cols = st.columns(4)
-                    summary_cols[0].metric("買進持有期末資產", f"{bh_final_val:,.0f} 元", delta=f"損益 {bh_final_val - sim_capital:+,.0f} 元")
-                    summary_cols[1].metric("網格策略期末資產", f"{grid_final_val:,.0f} 元", delta=f"損益 {grid_final_val - sim_capital:+,.0f} 元")
+                    summary_cols[0].metric("買進持有期末資產", f"{bh_final_val:,.0f} 元", delta=f"損益 {bh_final_val - sim_capital:+,.0f} 元",
+                                           help="以期初本金扣除買進手續費後持有至最後一筆價格的市值；損益為期末資產減期初本金。")
+                    summary_cols[1].metric("網格策略期末資產", f"{grid_final_val:,.0f} 元", delta=f"損益 {grid_final_val - sim_capital:+,.0f} 元",
+                                           help="依網格觸發規則及設定交易成本模擬的期末股票與現金合計；不代表實際成交。")
                     if dca_result is not None:
                         dca_metrics = dca_result["metrics"]
-                        summary_cols[2].metric("定期定額期末資產", f"{dca_metrics['ending_value']:,.0f} 元", delta=f"損益 {dca_metrics['profit_loss']:+,.0f} 元")
-                        summary_cols[3].metric("定期定額累計投入", f"{dca_metrics['total_contributed']:,.0f} 元", delta=f"{dca_metrics['contribution_count']} 次投入")
+                        summary_cols[2].metric("定期定額期末資產", f"{dca_metrics['ending_value']:,.0f} 元", delta=f"損益 {dca_metrics['profit_loss']:+,.0f} 元",
+                                               help="每次投入買進後，所有持倉在期末的估算市值；損益已相對累計投入計算。")
+                        summary_cols[3].metric("定期定額累計投入", f"{dca_metrics['total_contributed']:,.0f} 元", delta=f"{dca_metrics['contribution_count']} 次投入",
+                                               help="回測期間所有月投入金額的加總；比較期末資產時，請同時考慮累計投入及投入時點。")
 
                     comparison_rows = [
                         {"投入方式": "一開始買進並持有", "累計投入(元)": float(sim_capital), "期末資產(元)": bh_final_val,
@@ -4773,7 +4866,7 @@ if auth_user:
                         "累計投入(元)": "{:,.0f}", "期末資產(元)": "{:,.0f}", "總損益(元)": "{:+,.0f}",
                         "年化報酬(%)": "{:+.2f}%", "最大跌幅(%)": "{:.2f}%",
                     }, na_rep="—"), use_container_width=True, hide_index=True)
-                    st.caption("定期定額年化報酬依每次投入日期計算；最大跌幅先扣除新增投入的影響。其他兩種方式從期初投入全部預算。三者均未另計股息；買進持有與定期定額以持倉市值估值，未假設期末賣出。")
+                    st.caption("累計投入是投入金額加總；期末資產是回測末端估值；總損益為兩者差額。CAGR 以實際資料起訖日期計算，期間不足半年時不顯示年化值。定期定額年化報酬依每次投入日期計算；最大跌幅先扣除新增投入的影響。其他兩種方式從期初投入全部預算。三者均未另計股息；買進持有與定期定額以持倉市值估值，未假設期末賣出。")
 
                     strat_display_name = grid_sim_strategy.split(" ")[1]
 
@@ -5123,11 +5216,11 @@ if auth_user:
                                               help="把整段期間的資金變化換算成平均每年增減幅度，方便比較不同長度的回測；不是每一年都會有這個報酬。")
                         metric_row1[2].metric("從高點算起最大跌幅", show_pct(strategy_metrics["mdd"]),
                                               help="回測期間曾經從資產高點跌到多低。數字越接近零，代表歷史上最深的跌幅越小。")
-                        metric_row1[3].metric("整體起伏下的報酬表現", show_number(strategy_metrics["sharpe"]),
-                                              help="把報酬和整體上下起伏一起比較；同樣起伏下，數值越高通常代表報酬較好。本頁以利率 0% 作為比較基準。")
+                        metric_row1[3].metric("夏普比率 Sharpe", show_number(strategy_metrics["sharpe"]),
+                                              help="平均每根 K 棒報酬除以報酬標準差，再依目前圖表週期的每年 K 棒數換算成年化；本頁以 0% 無風險利率估算。衡量每單位整體波動換到多少歷史報酬，不保證未來。")
                         metric_row2 = st.columns(4)
-                        metric_row2[0].metric("下跌時的報酬表現", show_number(strategy_metrics["sortino"]),
-                                              help="只把下跌幅度當作風險來比較，不會把上漲的起伏當成壞事；數值越高通常代表下跌風險下的報酬較好。")
+                        metric_row2[0].metric("索提諾比率 Sortino", show_number(strategy_metrics["sortino"]),
+                                              help="平均報酬相對於下跌波動的比值並年化；只把低於 0 的報酬視為下行風險，並非虧損機率。")
                         metric_row2[1].metric("賺錢交易比例", show_pct(strategy_metrics["win_rate"]),
                                               help="所有交易中，扣除費用後仍賺錢的比例。比例高不一定代表總收益高，還要一起看每次賺多少、賠多少。")
                         metric_row2[2].metric("賺賠金額比", show_number(strategy_metrics["profit_factor"]),
@@ -5141,12 +5234,12 @@ if auth_user:
                              "平均每年報酬(%)": strategy_metrics["cagr"] * 100 if strategy_metrics["cagr"] is not None else None,
                              "從高點算起最大跌幅(%)": strategy_metrics["mdd"] * 100,
                              "資金起伏幅度(年化 %)": strategy_metrics["annualized_volatility"] * 100 if strategy_metrics["annualized_volatility"] is not None else None,
-                             "起伏下的報酬參考值": strategy_metrics["sharpe"], "結束時資產(元)": strategy_metrics["ending_value"]},
+                             "夏普比率（0%利率）": strategy_metrics["sharpe"], "結束時資產(元)": strategy_metrics["ending_value"]},
                             {"做法": "一開始買進並持有", "整段期間損益(%)": benchmark_metrics["cumulative_return"] * 100,
                              "平均每年報酬(%)": benchmark_metrics["cagr"] * 100 if benchmark_metrics["cagr"] is not None else None,
                              "從高點算起最大跌幅(%)": benchmark_metrics["mdd"] * 100,
                              "資金起伏幅度(年化 %)": benchmark_metrics["annualized_volatility"] * 100 if benchmark_metrics["annualized_volatility"] is not None else None,
-                             "起伏下的報酬參考值": benchmark_metrics["sharpe"], "結束時資產(元)": benchmark_metrics["ending_value"]},
+                             "夏普比率（0%利率）": benchmark_metrics["sharpe"], "結束時資產(元)": benchmark_metrics["ending_value"]},
                         ]
                         if backtest_dca_result is not None:
                             dca_metrics = backtest_dca_result["metrics"]
@@ -5157,7 +5250,7 @@ if auth_user:
                                 "平均每年報酬(%)": dca_metrics["money_weighted_return"] * 100 if dca_metrics["money_weighted_return"] is not None else None,
                                 "從高點算起最大跌幅(%)": dca_metrics["mdd"] * 100,
                                 "資金起伏幅度(年化 %)": None,
-                                "起伏下的報酬參考值": None,
+                                 "夏普比率（0%利率）": None,
                                 "結束時資產(元)": dca_metrics["ending_value"],
                             })
                         if grid_advice_metrics is not None:
@@ -5167,7 +5260,7 @@ if auth_user:
                                 "平均每年報酬(%)": grid_advice_metrics["cagr"] * 100 if grid_advice_metrics.get("cagr") is not None else None,
                                 "從高點算起最大跌幅(%)": grid_advice_metrics["mdd"] * 100,
                                 "資金起伏幅度(年化 %)": None,
-                                "起伏下的報酬參考值": None,
+                                 "夏普比率（0%利率）": None,
                                 "結束時資產(元)": float(bt_initial_capital) * (1.0 + grid_advice_metrics["cumulative_return"]),
                             })
                         comparison = pd.DataFrame(comparison_rows)
@@ -5176,7 +5269,7 @@ if auth_user:
                             "平均每年報酬(%)": "{:+.2f}%",
                             "從高點算起最大跌幅(%)": "{:.2f}%",
                             "資金起伏幅度(年化 %)": "{:.2f}%",
-                            "起伏下的報酬參考值": "{:.2f}",
+                            "夏普比率（0%利率）": "{:.2f}",
                             "結束時資產(元)": "{:,.0f}",
                         }
                         comparison_formatters = {
@@ -5185,7 +5278,7 @@ if auth_user:
                         }
                         st.dataframe(comparison.style.format(comparison_formatters, na_rep="—"),
                                      use_container_width=True, hide_index=True)
-                        st.caption("策略與買進持有使用相同本金、期間和回測成本。定期定額把相同總預算分次投入，並將期末賣出成本計入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。網格報酬與最大跌幅沿用網格比較頁設定，期末資產按回測本金等比例換算；請確認期間與成本相同再比較。股息未計入。")
+                        st.caption("表中年化波動率是報酬起伏幅度，夏普比率是每單位起伏對應的年化報酬參考，CAGR 是整段複利換算成年報酬。策略與買進持有使用相同本金、期間和回測成本。定期定額把相同總預算分次投入，並將期末賣出成本計入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。網格報酬與最大跌幅沿用網格比較頁設定，期末資產按回測本金等比例換算；請確認期間與成本相同再比較。股息未計入。")
                         if selected_tf in ("1分鐘", "5分鐘", "30分鐘", "60分鐘"):
                             st.info("目前資料是短線週期，涵蓋時間不足以代表長期月扣款；定期定額只在資料涵蓋月份的第一筆價格投入。")
                         elif selected_tf in ("1季", "半年", "1年"):
@@ -5511,6 +5604,7 @@ if auth_user:
             if result_view.empty:
                 st.info("本次無符合標的。已完整套用目前勾選的條件，沒有放寬條件或回退顯示未通過的股票。")
                 return
+            st.caption("GVI、動能、自由現金流收益率與 PEG 是研究用估算；策略評分是本次股票池內相對排名，不是預期報酬。『價量動能估算』由近期價格與成交量推算，並非實際籌碼或法人資料。")
             st.caption("點選明細表中的股票列，再選擇個股即時診斷或加入操盤手自訂觀察代碼。")
             table_event = st.dataframe(
                 result_view,
@@ -5630,7 +5724,7 @@ if auth_user:
                         '動能分數': momentum_value, 
                         '自由現金流收益': fcf_yield, 
                         '本益成長比(PEG)': peg_val, 
-                        '⚡ 即時籌碼動能': chip_status_text, 
+                        '⚡ 價量動能估算': chip_status_text, 
                         'gvi_raw': gvi_live, 
                         'mo_raw': momentum_value, 
                         'fcf_raw': fcf_yield
@@ -5680,7 +5774,7 @@ if auth_user:
                 if strat_qarp: cols.extend(['自由現金流收益率', '本益成長比(PEG)'])
                 if not strat_gvi and not strat_momentum and not strat_qarp:
                     cols.extend(['GVI價值指標', '動能(創高距離)', '自由現金流收益率', '本益成長比(PEG)'])
-                cols.append('⚡ 即時籌碼動能')
+                cols.append('⚡ 價量動能估算')
             
                 df_final_view = df_res[cols]
                 st.session_state["stock_screen_result"] = {
@@ -5713,7 +5807,7 @@ if auth_user:
     if selected_module == "🏦 台股三大法人獨立選股策略":
         st.markdown("---")
         st.markdown("### 🏦 台股三大法人獨立選股策略")
-        st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比。")
+        st.caption("只掃描自訂觀察名單中的台股普通股。各法人買進、賣出與淨買賣超股數分別除以官方已發行普通股數，顯示為股本百分比；淨買賣超為買進減賣出，正數偏買超、負數偏賣超，這不代表持股比例。")
         inst_col1, inst_col2 = st.columns([1, 2])
         with inst_col1:
             inst_investor = st.selectbox("篩選法人", ['外資', '投信', '自營商'], key='inst_screen_investor')
@@ -5744,7 +5838,7 @@ if auth_user:
 
     if selected_module == "📊 當日全市場三大法人佔股本比 Top 10":
         st.markdown("#### 當日全市場三大法人佔股本比 Top 10")
-        st.caption("依買賣超佔股本比由高至低及低至高排序；另列買進與賣出佔股本比最高的前 10 檔。上市與上櫃分別採各自官方最新資料日。點選任一表格中的股票列，即可選擇即時診斷或加入自訂觀察代碼。")
+        st.caption("佔股本比 = 當日法人買進、賣出或淨買賣超股數 ÷ 官方已發行普通股數；淨買賣超 = 買進 − 賣出。正數為買超、負數為賣超，比例不是法人持股比例。榜單依淨買賣超佔股本比由高至低及低至高排序，另列買進與賣出比率最高前 10 檔。上市與上櫃分別採各自官方最新資料日。點選任一表格中的股票列，可選擇即時診斷或加入自訂觀察代碼。")
         if st.button("📊 載入全市場法人 Top 10", key='load_inst_top10') or st.session_state.get('inst_top10_loaded', False):
             st.session_state['inst_top10_loaded'] = True
             with st.spinner("讀取上市、上櫃法人資料及官方已發行股數…"):
@@ -5840,7 +5934,8 @@ if auth_user:
                 target_cash = st.number_input("現金目標配置 (%)", min_value=0.0, max_value=100.0, value=float(settings.get("target_cash_pct", 10)), step=1.0)
             with cfg2:
                 rebalance_threshold = st.number_input("再平衡偏離門檻（百分點）", min_value=1.0, max_value=30.0, value=float(settings.get("rebalance_threshold_pct", 5)), step=1.0)
-                minimum_cash = st.number_input("最低保留現金（新台幣）", min_value=0.0, value=float(settings.get("minimum_cash_twd", 0)), step=1000.0)
+                minimum_cash = st.number_input("最低保留現金（新台幣）", min_value=0.0, value=float(settings.get("minimum_cash_twd", 0)), step=1000.0,
+                                               help="只在計算後檢查現金市值是否低於此金額並提醒；不會自動改變持倉或再平衡金額。")
             with cfg3:
                 dd_warn = st.number_input("回撤警示 (%)", min_value=1.0, max_value=30.0, value=float(settings.get("drawdown_warning_pct", 8)), step=1.0)
                 dd_review = st.number_input("回撤檢查 (%)", min_value=1.0, max_value=40.0, value=float(settings.get("drawdown_review_pct", 12)), step=1.0)
@@ -5912,11 +6007,14 @@ if auth_user:
                 "bond": float(settings.get("target_bond_pct", 50)),
                 "cash": float(settings.get("target_cash_pct", 10)),
             }
+            minimum_cash_floor = max(0.0, float(settings.get("minimum_cash_twd", 0)))
+            if minimum_cash_floor > 0 and type_values["cash"] < minimum_cash_floor:
+                st.warning(f"目前現金市值 NT${type_values['cash']:,.0f}，低於設定的最低保留現金 NT${minimum_cash_floor:,.0f}。此為提醒，不會自動執行交易。")
             metrics = st.columns(4)
-            with metrics[0]: st.metric("組合總市值（TWD）", f"NT${total_value:,.0f}")
-            with metrics[1]: st.metric("股票市值", f"NT${type_values['stock']:,.0f}", f"{type_values['stock']/total_value*100:.1f}%" if total_value > 0 else "0.0%")
-            with metrics[2]: st.metric("債券市值", f"NT${type_values['bond']:,.0f}", f"{type_values['bond']/total_value*100:.1f}%" if total_value > 0 else "0.0%")
-            with metrics[3]: st.metric("現金市值", f"NT${type_values['cash']:,.0f}", f"{type_values['cash']/total_value*100:.1f}%" if total_value > 0 else "0.0%")
+            with metrics[0]: st.metric("組合總市值（TWD）", f"NT${total_value:,.0f}", help="各筆持倉數量 × 最新價格 × 換算台幣匯率後加總；價格與匯率需由使用者維護。")
+            with metrics[1]: st.metric("股票市值", f"NT${type_values['stock']:,.0f}", f"{type_values['stock']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="股票類持倉的台幣市值；下方百分比是股票市值占組合總市值的比例。")
+            with metrics[2]: st.metric("債券市值", f"NT${type_values['bond']:,.0f}", f"{type_values['bond']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="債券類持倉的台幣市值；下方百分比是債券市值占組合總市值的比例。")
+            with metrics[3]: st.metric("現金市值", f"NT${type_values['cash']:,.0f}", f"{type_values['cash']/total_value*100:.1f}%" if total_value > 0 else "0.0%", help="現金類持倉的台幣市值；下方百分比是現金占組合總市值的比例。")
 
             allocation_rows = []
             for kind, label in [("stock", "股票"), ("bond", "債券"), ("cash", "現金")]:
@@ -5938,7 +6036,7 @@ if auth_user:
                 "目標比例(%)": "{:.2f}%", "偏離(百分點)": "{:+.2f}",
                 "目標市值(TWD)": "NT${:,.0f}", "調整金額參考(TWD)": "NT${:+,.0f}"
             }), use_container_width=True, hide_index=True)
-            st.caption("調整金額參考 = 目標市值 − 目前市值；正數代表相對目標不足、負數代表相對目標超出。尚未納入交易成本、稅費、價差、流動性與稅務差異。")
+            st.caption("持倉明細中的台幣市值 = 數量 × 最新價格 × 換算匯率；未實現損益估算 = 台幣市值 − 已填台幣成本。目前比例 = 目前市值 ÷ 組合總市值；偏離 = 目前比例 − 目標比例（以百分點表示）；目標市值 = 組合總市值 × 目標比例。調整金額參考 = 目標市值 − 目前市值，正數代表相對目標不足、負數代表相對目標超出。此數值不是下單指示，尚未納入交易成本、稅費、價差、流動性與稅務差異。")
             st.caption("點選下方持倉股票列，可選擇使用個股即時診斷或加入操盤手自訂觀察代碼。")
             holdings_view = calc[["代碼", "名稱", "資產類型", "幣別", "數量", "最新價格", "換算台幣匯率", "台幣市值", "台幣成本", "未實現損益估算", "更新時間"]]
             holdings_display = holdings_view.copy()
@@ -6021,7 +6119,7 @@ if auth_user:
                 peak = float(snapshots["組合市值"].cummax().max())
                 latest_snapshot = float(snapshots["組合市值"].iloc[-1])
                 rough_dd = (latest_snapshot / peak - 1) * 100 if peak > 0 else 0.0
-                st.metric("快照最高值以來的估算回撤", f"{rough_dd:.2f}%")
+                st.metric("快照最高值以來的估算回撤", f"{rough_dd:.2f}%", help="最近一筆手動快照相對歷史快照最高值的跌幅；沒有調整入金或出金，僅供粗略觀察。")
                 if rough_dd <= -float(settings.get("drawdown_limit_pct", 15)):
                     st.error("估算回撤已達風險審查門檻：請檢查資產配置、價格／匯率資料與風險來源。")
                 elif rough_dd <= -float(settings.get("drawdown_review_pct", 12)):
