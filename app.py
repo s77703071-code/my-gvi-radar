@@ -1,7 +1,7 @@
 # ==============================================================================
 # 【機構級三核心策略雷達 3.12 網格複利對比(CAGR/MDD/稅費)與專業畫線全能版】 - app.py
 # ==============================================================================
-import sys, os, re, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
+import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl
 import streamlit.components.v1 as components
 from email.message import EmailMessage
 try:
@@ -2846,16 +2846,33 @@ def fetch_finmind_broker_branch(stock_code, trade_date, api_token, account_scope
         return pd.DataFrame(), "自動取得分點資料失敗；請稍後重試，或使用 CSV 匯入。"
 
 
+def _broker_branch_csv_column_kind(column):
+    """Identify required branch CSV columns across common Chinese and API headers."""
+    name = str(column).replace("\ufeff", "").strip().strip("\"'")
+    compact = re.sub(r"\s+", "", name).lower()
+    if compact in {"stock_id", "data_id", "stock_code", "ticker", "symbol", "股票代碼", "證券代號"}:
+        return "code"
+    if "代號" in compact or "代碼" in compact:
+        if "證券" in compact or "股票" in compact:
+            return "code"
+    if compact in {"buy", "buy_volume", "buy_shares"}:
+        return "buy"
+    if "買進" in compact and any(unit in compact for unit in ("股數", "數量", "股")):
+        return "buy"
+    if compact in {"sell", "sell_volume", "sell_shares"}:
+        return "sell"
+    if "賣出" in compact and any(unit in compact for unit in ("股數", "數量", "股")):
+        return "sell"
+    return None
+
+
 def summarize_broker_branch_frame(frame, stock_code):
     """Aggregate price-level branch rows into one buy/sell total per broker branch."""
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {"error": "沒有可分析的分點資料。"}
-    code_col = next((c for c in frame.columns if str(c).lower() in ("stock_id", "data_id")
-                     or ('代號' in str(c) and ('證券' in str(c) or '股票' in str(c)))), None)
-    buy_col = next((c for c in frame.columns if str(c).lower() in ("buy", "buy_volume")
-                    or ('買進' in str(c) and ('股數' in str(c) or '數量' in str(c)))), None)
-    sell_col = next((c for c in frame.columns if str(c).lower() in ("sell", "sell_volume")
-                     or ('賣出' in str(c) and ('股數' in str(c) or '數量' in str(c)))), None)
+    code_col = next((c for c in frame.columns if _broker_branch_csv_column_kind(c) == "code"), None)
+    buy_col = next((c for c in frame.columns if _broker_branch_csv_column_kind(c) == "buy"), None)
+    sell_col = next((c for c in frame.columns if _broker_branch_csv_column_kind(c) == "sell"), None)
     if not all((code_col, buy_col, sell_col)):
         return {"error": "資料需包含股票代號、買進股數、賣出股數欄位。"}
     selected = frame[frame[code_col].astype(str).str.strip().str.upper() == str(stock_code).strip().upper()].copy()
@@ -2901,15 +2918,70 @@ def summarize_broker_branch_frame(frame, stock_code):
 
 
 def summarize_broker_branch_csv(uploaded_file, stock_code):
-    """Read a user CSV and share the same branch-level aggregation as the API source."""
+    """Read common broker CSV encodings/delimiters and locate the actual header row."""
     if uploaded_file is None:
         return None
     try:
-        frame = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-    except Exception:
-        uploaded_file.seek(0)
-        frame = pd.read_csv(uploaded_file, encoding='big5', encoding_errors='replace')
-    return summarize_broker_branch_frame(frame, stock_code)
+        raw_content = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+        if isinstance(raw_content, str):
+            raw_content = raw_content.encode("utf-8")
+    except Exception as exc:
+        return {"error": f"無法讀取上傳檔案：{exc}"}
+    if not raw_content:
+        return {"error": "上傳的 CSV 是空檔案。"}
+
+    delimiters = (",", "\t", ";", "|")
+    encodings = ("utf-8-sig", "utf-8", "cp950", "big5", "utf-16")
+    last_parse_error = None
+    for encoding in encodings:
+        try:
+            text = raw_content.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+        for delimiter in delimiters:
+            header_line = None
+            try:
+                reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+                for row in reader:
+                    if reader.line_num > 100:
+                        break
+                    kinds = {_broker_branch_csv_column_kind(cell) for cell in row}
+                    if {"code", "buy", "sell"}.issubset(kinds):
+                        # csv.reader.line_num is one-based; pandas skiprows is zero-based.
+                        header_line = reader.line_num - 1
+                        break
+            except csv.Error as exc:
+                last_parse_error = str(exc)
+                continue
+            if header_line is None:
+                continue
+
+            try:
+                frame = pd.read_csv(
+                    io.StringIO(text),
+                    sep=delimiter,
+                    skiprows=header_line,
+                    header=0,
+                    engine="python",
+                    dtype=str,
+                    skip_blank_lines=True,
+                    on_bad_lines="error",
+                )
+            except Exception as exc:
+                last_parse_error = str(exc)
+                continue
+            return summarize_broker_branch_frame(frame, stock_code)
+
+    if last_parse_error:
+        return {
+            "error": "CSV 欄位格式不一致，無法安全匯入。請確認資料列沒有未加引號的多餘分隔符，"
+                     f"或重新另存為 UTF-8／Big5 CSV。（{last_parse_error}）"
+        }
+    return {
+        "error": "找不到可辨識的 CSV 標題列。請確認檔案包含股票代號、買進股數與賣出股數欄位；"
+                 "系統會自動搜尋前 100 列的標題，也支援逗號、Tab、分號或直線分隔。"
+    }
 
 def build_institutional_rankings(trades, shares_by_code, limit=10):
     rows = []
