@@ -1392,6 +1392,22 @@ def init_db():
                  (ticker TEXT PRIMARY KEY, date TEXT, open REAL, high REAL, low REAL, close REAL, volume INTEGER, 
                   gvi REAL, roe REAL, mcap REAL, shares REAL, book_value REAL, 
                   roe_source TEXT, bv_source TEXT, updated_at INTEGER)''')
+    # Public daily institutional observations are shared market data, not account-specific portfolio data.
+    c.execute('''CREATE TABLE IF NOT EXISTS chip_flow_observations (
+        symbol TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        market TEXT NOT NULL DEFAULT '',
+        foreign_net REAL,
+        trust_net REAL,
+        dealer_net REAL,
+        issued_shares REAL,
+        volume_shares REAL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(symbol, trade_date)
+    )''')
+    chip_cols = [row[1] for row in c.execute("PRAGMA table_info(chip_flow_observations)").fetchall()]
+    if "volume_shares" not in chip_cols:
+        c.execute("ALTER TABLE chip_flow_observations ADD COLUMN volume_shares REAL")
     
     existing_cols = [row[1] for row in c.execute("PRAGMA table_info(market_data)").fetchall()]
     cols_to_add = {
@@ -2345,7 +2361,7 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
     }
 
 
-def build_chip_flow_summary(price_history, institutional_trade=None, issued_shares=None):
+def build_chip_flow_summary(price_history, institutional_trade=None, issued_shares=None, timeframe_name=None):
     """Summarize accessible trend, volume activity, and official institutional flow in plain language."""
     summary = {}
     if isinstance(price_history, pd.DataFrame) and "Close" in price_history.columns:
@@ -2373,6 +2389,14 @@ def build_chip_flow_summary(price_history, institutional_trade=None, issued_shar
                         "status": tone,
                         "detail": f"近5筆平均成交量是前段參考平均的 {ratio:.2f} 倍；只代表成交活躍度。",
                     }
+        if timeframe_name == "1日" and len(close) >= 120 and float(close.iloc[-1]) > 0:
+            high_close_120 = float(close.tail(120).max())
+            distance = float(close.iloc[-1] / high_close_120 - 1.0) if high_close_120 > 0 else None
+            if distance is not None:
+                summary["high_120"] = {
+                    "status": f"距120日日線最高收盤 {distance:.2%}",
+                    "detail": f"現價相對近120日日線最高收盤價變化 {distance:+.2%}；這是價格位置描述，不是突破或買賣訊號。",
+                }
 
     net_keys = ["外資買賣超股數", "投信買賣超股數", "自營商買賣超股數"]
     if institutional_trade and issued_shares and issued_shares > 0:
@@ -2385,6 +2409,74 @@ def build_chip_flow_summary(price_history, institutional_trade=None, issued_shar
                 "detail": f"三大法人合計買賣超佔已發行股數 {net_pct:+.4f}%；只看當日，單日變化不等於持股集中。",
             }
     return summary
+
+
+def _normalize_chip_trade_date(value):
+    """Normalize TWSE Gregorian or TPEx ROC trade dates without guessing unknown labels."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r'\d{8}', text):
+        return f'{text[:4]}-{text[4:6]}-{text[6:8]}'
+    roc_match = re.fullmatch(r'(\d{2,3})[./年-](\d{1,2})[./月-](\d{1,2})日?', text)
+    if roc_match:
+        year, month, day = map(int, roc_match.groups())
+        if year < 1911:
+            year += 1911
+        try:
+            return pd.Timestamp(year=year, month=month, day=day).strftime('%Y-%m-%d')
+        except ValueError:
+            return None
+    parsed = pd.to_datetime(text, errors='coerce')
+    return parsed.strftime('%Y-%m-%d') if not pd.isna(parsed) else None
+
+
+def save_chip_flow_observation(symbol, institutional_trade, issued_shares, volume_shares=None):
+    """Persist one observed official daily row; missing investor values remain NULL, never zero."""
+    if not institutional_trade:
+        return False
+    trade_date = _normalize_chip_trade_date(institutional_trade.get('日期'))
+    if not trade_date:
+        return False
+    investor_values = (
+        _finite_number(institutional_trade.get('外資買賣超股數')),
+        _finite_number(institutional_trade.get('投信買賣超股數')),
+        _finite_number(institutional_trade.get('自營商買賣超股數')),
+    )
+    if all(value is None for value in investor_values):
+        return False
+    try:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            conn.execute('''INSERT INTO chip_flow_observations
+                (symbol, trade_date, market, foreign_net, trust_net, dealer_net, issued_shares, volume_shares, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, trade_date) DO UPDATE SET
+                    market=excluded.market,
+                    foreign_net=excluded.foreign_net,
+                    trust_net=excluded.trust_net,
+                    dealer_net=excluded.dealer_net,
+                    issued_shares=excluded.issued_shares,
+                    volume_shares=COALESCE(excluded.volume_shares, chip_flow_observations.volume_shares),
+                    updated_at=excluded.updated_at''',
+                (str(symbol), trade_date, str(institutional_trade.get('市場') or ''),
+                 *investor_values, _finite_number(issued_shares), _finite_number(volume_shares),
+                 pd.Timestamp.now(tz='Asia/Taipei').isoformat()))
+        return True
+    except Exception:
+        return False
+
+
+def load_chip_flow_observations(symbol, limit=20):
+    """Load only dates actually captured from official sources, newest first."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            return pd.read_sql_query(
+                '''SELECT trade_date, market, foreign_net, trust_net, dealer_net, issued_shares, volume_shares
+                   FROM chip_flow_observations WHERE symbol=?
+                   ORDER BY trade_date DESC LIMIT ?''',
+                conn, params=(str(symbol), int(limit)))
+    except Exception:
+        return pd.DataFrame()
 
 
 def describe_backtest_conditions(entry_conds, exit_conds, risk_reward_ratio=None):
@@ -4502,25 +4594,37 @@ if auth_user:
             
             if selected_module == "📦 籌碼流向參考":
                 st.markdown("### 📦 市場走勢與資金流向參考")
-                st.caption("改用較容易取得、一般人容易理解的價格趨勢、成交熱度與法人當日動向。資料暫缺時會直接標示，不把缺漏當成零。")
+                st.caption("觀察價格趨勢、成交熱度、三大法人當日動向，以及集保持股級距的週變化。沒有資料時會明確標示，不把缺漏當成零。")
                 price_history = df_chart[[column for column in ("Close", "Volume") if column in df_chart.columns]].copy()
                 institutional_trade = None
                 issued_shares = None
                 inst_errors = []
+                stock_code = selected_stock.replace('.TWO', '').replace('.TW', '')
+                is_taiwan_stock = selected_stock.endswith(('.TW', '.TWO'))
                 if selected_stock.endswith(('.TW', '.TWO')):
                     with st.spinner('讀取官方法人交易與已發行股數資料…'):
                         inst_trades, inst_shares, inst_errors = fetch_institutional_market_data()
-                    stock_code = selected_stock.replace('.TWO','').replace('.TW','')
                     institutional_trade = inst_trades.get(stock_code)
                     issued_shares = inst_shares.get(stock_code)
+                daily_volume = None
+                trade_date = _normalize_chip_trade_date(institutional_trade.get('日期')) if institutional_trade else None
+                if selected_tf == "1日" and trade_date and "Volume" in price_history.columns:
+                    for index_value, volume_value in pd.to_numeric(price_history["Volume"], errors="coerce").dropna().items():
+                        if _normalize_chip_trade_date(index_value) == trade_date:
+                            daily_volume = _finite_number(volume_value)
+                            break
+                if is_taiwan_stock:
+                    save_chip_flow_observation(stock_code, institutional_trade, issued_shares, daily_volume)
 
-                flow_summary = build_chip_flow_summary(price_history, institutional_trade, issued_shares)
+                flow_summary = build_chip_flow_summary(price_history, institutional_trade, issued_shares, selected_tf)
                 flow_cards = [
                     ("trend", "最近價格走勢"),
                     ("volume", "最近成交熱度"),
                     ("institutions", "法人當日方向"),
                 ]
-                flow_cols = st.columns(3)
+                if selected_tf == "1日":
+                    flow_cards.append(("high_120", "近120日日線位置"))
+                flow_cols = st.columns(len(flow_cards))
                 available_statuses = []
                 for col, (key, label) in zip(flow_cols, flow_cards):
                     item = flow_summary.get(key)
@@ -4534,7 +4638,149 @@ if auth_user:
                     st.info("簡單看：" + "；".join(available_statuses) + "。這些是近期市場狀況描述，不是單獨的買進或賣出訊號。")
                 if selected_stock.endswith(('.TW', '.TWO')) and inst_errors:
                     st.caption("法人來源目前未完整回傳；上方只顯示實際取得的資料。")
-                st.caption("價格趨勢使用近 20 筆收盤價；成交熱度比較近 5 筆與前段平均成交量；法人方向使用當日三大法人資料。各項期間不同，請分開解讀。")
+                st.caption("價格趨勢使用近 20 筆收盤價；成交熱度比較近 5 筆與前段平均成交量；法人方向使用官方當日三大法人資料。各項期間不同，請分開解讀。")
+
+                if institutional_trade:
+                    investor_rows = []
+                    for investor_name in ("外資", "投信", "自營商"):
+                        net_shares = _finite_number(institutional_trade.get(f"{investor_name}買賣超股數"))
+                        net_pct = (net_shares / issued_shares * 100.0
+                                   if net_shares is not None and issued_shares and issued_shares > 0 else None)
+                        investor_rows.append({
+                            "法人類別": investor_name,
+                            "當日買賣超（股）": net_shares,
+                            "占已發行股數（%）": net_pct,
+                        })
+                    st.markdown("#### 🏦 三大法人當日明細")
+                    st.caption(f"資料日期：{institutional_trade.get('日期', '未提供')}；不同法人分開列示，缺漏資料保留空白。")
+                    st.dataframe(pd.DataFrame(investor_rows), hide_index=True, use_container_width=True)
+
+                st.markdown("#### 📚 法人累積觀察（本系統開始記錄後）")
+                history = load_chip_flow_observations(stock_code) if is_taiwan_stock else pd.DataFrame()
+                if not history.empty:
+                    complete_history = history.dropna(subset=["foreign_net", "trust_net", "dealer_net"])
+                    st.caption(
+                        f"目前記錄 {len(history)} 個交易日，其中 {len(complete_history)} 筆含完整三大法人資料。"
+                        "只保存本頁曾成功取得的官方資料；未造補缺漏日期，也不代表連續交易日。"
+                    )
+                    history_cols = st.columns(2)
+                    for col, window in zip(history_cols, (5, 20)):
+                        label = f"最近 {window} 筆完整觀察合計"
+                        with col:
+                            if len(complete_history) >= window:
+                                sample = complete_history.head(window)
+                                total_net = float(sample[["foreign_net", "trust_net", "dealer_net"]].to_numpy().sum())
+                                share_values = pd.to_numeric(sample["issued_shares"], errors="coerce").dropna()
+                                share_pct = total_net / float(share_values.iloc[0]) * 100.0 if not share_values.empty and share_values.iloc[0] > 0 else None
+                                st.metric(label, f"{total_net:+,.0f} 股", delta_color="off")
+                                pct_text = f"（約 {share_pct:+.4f}% 已發行股數）" if share_pct is not None else ""
+                                st.caption(
+                                    f"觀察區間：{sample.iloc[-1]['trade_date']} 至 {sample.iloc[0]['trade_date']}{pct_text}。"
+                                    "這是法人買賣超加總，不等於法人持股增減。"
+                                )
+                            else:
+                                st.metric(label, f"累積中 {len(complete_history)}/{window} 筆", delta_color="off")
+                                st.caption("尚未累積足夠的完整官方資料，不顯示期間合計。")
+                    investor_period_rows = []
+                    for window in (5, 20):
+                        for column, investor_name in (
+                            ("foreign_net", "外資"),
+                            ("trust_net", "投信"),
+                            ("dealer_net", "自營商"),
+                        ):
+                            available = history.dropna(subset=[column]).head(window)
+                            row = {"觀察期間": f"最近 {window} 筆", "法人類別": investor_name}
+                            if len(available) >= window:
+                                net_total = float(available[column].sum())
+                                share_values = pd.to_numeric(available["issued_shares"], errors="coerce").dropna()
+                                net_pct = (net_total / float(share_values.iloc[0]) * 100.0
+                                           if not share_values.empty and share_values.iloc[0] > 0 else None)
+                                row["累計買賣超（股）"] = f"{net_total:+,.0f}"
+                                row["約占已發行股數（%）"] = f"{net_pct:+.4f}%" if net_pct is not None else "資料暫缺"
+                                volume_sample = history.dropna(subset=[column, "volume_shares"]).head(window)
+                                if (len(volume_sample) >= window
+                                        and set(volume_sample["trade_date"]) == set(available["trade_date"])):
+                                    total_volume = float(pd.to_numeric(volume_sample["volume_shares"], errors="coerce").sum())
+                                    row["占同期成交量（%）"] = f"{net_total / total_volume * 100.0:+.2f}%" if total_volume > 0 else "資料暫缺"
+                                else:
+                                    row["占同期成交量（%）"] = "日線成交量資料不足"
+                                row["狀態"] = "已累積"
+                            else:
+                                row["累計買賣超（股）"] = "—"
+                                row["約占已發行股數（%）"] = "—"
+                                row["占同期成交量（%）"] = "—"
+                                row["狀態"] = f"累積中 {len(available)}/{window} 筆"
+                            investor_period_rows.append(row)
+                    st.dataframe(pd.DataFrame(investor_period_rows), hide_index=True, use_container_width=True)
+                    st.caption("上表按法人分開計算；成交量占比只在資料庫有同日線成交量時顯示。買賣超是交易流量，不能直接解讀為持股增加或未來漲跌。")
+                elif is_taiwan_stock:
+                    st.info("資料累積中：成功取得每日官方資料後會依股票與交易日保存，足夠筆數前不顯示 5／20 筆合計。")
+                else:
+                    st.info("法人累積觀察僅適用台股。")
+
+                st.markdown("#### 👥 集保持股級距變化（週資料）")
+                st.caption("以持股級距觀察小額與大額持有比例變化。這是持有分布，不代表買賣方向，也無法直接判定持有人是散戶或主力。")
+                if is_taiwan_stock:
+                    tdcc_data = None
+                    try:
+                        with st.spinner('讀取集保中心持股級距資料…'):
+                            tdcc_data = fetch_tdcc_concentration(selected_stock)
+                    except Exception:
+                        tdcc_data = None
+                    if tdcc_data:
+                        retail_delta = tdcc_data.get('retail_change_pp')
+                        big_delta = tdcc_data.get('big_change_pp')
+                        tdcc_cols = st.columns(2)
+                        with tdcc_cols[0]:
+                            st.metric(
+                                "小額持股級距（≤5,000 股）",
+                                f"{tdcc_data['retail_pct']:.2f}%",
+                                delta=f"{retail_delta:+.2f} 個百分點" if retail_delta is not None else None,
+                                delta_color="off",
+                            )
+                        with tdcc_cols[1]:
+                            st.metric(
+                                "大額持股級距（≥400,001 股）",
+                                f"{tdcc_data['big_pct']:.2f}%",
+                                delta=f"{big_delta:+.2f} 個百分點" if big_delta is not None else None,
+                                delta_color="off",
+                            )
+                        comparison = (
+                            f"比較日期：{tdcc_data['previous_date']} → {tdcc_data['date']}。"
+                            if tdcc_data.get('previous_date') else f"資料日期：{tdcc_data['date']}；目前只有一個可比較週期。"
+                        )
+                        st.caption(comparison + "變化以集保庫存占比計算；百分點增加不等同該級距淨買超。")
+                    else:
+                        st.info("目前無法取得這檔股票的集保持股級距資料；不以零或推估值代替。")
+                else:
+                    st.info("集保持股級距資料目前僅適用台股。")
+
+                with st.expander("🔎 選用：券商分點買賣明細", expanded=False):
+                    st.caption("可匯入含「證券代號、買進股數、賣出股數」欄位的 CSV。分點資料只反映券商帳戶交易彙整，無法辨認最終投資人身分，也不等於主力或散戶流向。")
+                    if not is_taiwan_stock:
+                        st.info("券商分點 CSV 分析目前僅適用台股。")
+                    else:
+                        branch_file = st.file_uploader(
+                            "選擇券商分點 CSV 檔",
+                            type=["csv"],
+                            key=f"chip_branch_upload_{selected_stock}",
+                        )
+                        if branch_file is not None:
+                            branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
+                            if branch_summary and branch_summary.get('error'):
+                                st.warning(branch_summary['error'])
+                            elif branch_summary:
+                                branch_cols = st.columns(3)
+                                with branch_cols[0]:
+                                    st.metric("分點合計淨買賣超", f"{branch_summary['net_shares']:+,.0f} 股", delta_color="off")
+                                with branch_cols[1]:
+                                    st.metric("淨買超分點數", f"{branch_summary['buyers']:,} 家", delta_color="off")
+                                with branch_cols[2]:
+                                    st.metric("淨賣超分點數", f"{branch_summary['sellers']:,} 家", delta_color="off")
+                                st.caption(
+                                    f"淨買超前 15 分點合計 {branch_summary['top_net_buy']:+,.0f} 股；"
+                                    f"淨賣超前 15 分點合計 {branch_summary['top_net_sell']:+,.0f} 股。"
+                                )
             
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
