@@ -2091,7 +2091,7 @@ def build_ai_investment_prompt(symbol, name, provider, quant_summary, company_co
 
 請先用「【先看重點】」列出最多 4 點，再依序提供：
 1. **三核心條件比對與市場心理角度**：分別說明價值、價格趨勢、現金流與估值條件是否符合本次研究門檻；每項用白話說明可能吸引或削弱哪一類市場關注，以及相伴風險。資料不足就明確寫不足。三核心分數是條件比對結果，不是勝率、預期報酬或推薦排名。
-2. **市場心理觀察**：只根據提供的價格、成交量、公開法人流量、新聞與基本面證據，描述可能的樂觀、觀望、追價、恐慌或風險重新評估線索。每項標示「觀察到的資料」與「可能的心理解讀」；不要宣稱知道投資人真實想法，不要由分點或法人資料推定主力／散戶身分。
+2. **市場心理觀察**：只根據提供的價格、成交量、公開法人流量、券商分點摘要、新聞與基本面證據，描述可能的樂觀、觀望、追價、恐慌或風險重新評估線索。若提供分點摘要，必須直接解讀淨買超／淨賣超分點家數、淨額與集中度，並和價格方向並列；只有日期與期間對齊時才能稱為同向或背離，日期不明就明確標示期間未對齊、只能作方向參考。每項標示「觀察到的資料」與「可能的心理解讀」；不要宣稱知道投資人真實想法，不要由分點或法人資料推定主力／散戶身分。
 3. **市場、產業與同業**：交代相關大盤、利率／匯率／政策、產業供需與題材；列 2–4 家真正可比同業。重要數據附來源和日期；區分事實與市場預期，資料不足就直說。
 4. **公司優勢與風險**：以可查證資料說明優勢、風險，以及可能推翻目前觀點的條件。
 5. **回測與風控**：說明樣本外交易數、每筆平均損益、賺賠金額比、最大回撤及通過狀態；沒有策略通過時，明確寫「目前找不到足夠證據支持正期望策略」。只把回測當歷史檢查。
@@ -3202,6 +3202,127 @@ def summarize_broker_branch_frame(frame, stock_code):
     }
 
 
+def _broker_branch_ai_state_key(user_id, stock_code):
+    normalized_code = _normalize_broker_stock_code(stock_code)
+    return f"broker_branch_ai_{str(user_id)}_{normalized_code}"
+
+
+def save_broker_branch_ai_summary(session_state, user_id, stock_code, branch_summary, source_label):
+    """Keep only a compact, account-scoped branch summary for this session's AI report."""
+    key = _broker_branch_ai_state_key(user_id, stock_code)
+    if not isinstance(branch_summary, Mapping) or branch_summary.get("error"):
+        session_state.pop(key, None)
+        return None
+    snapshot = {
+        "stock_code": _normalize_broker_stock_code(stock_code),
+        "source_label": str(source_label or "使用者提供的分點資料"),
+        "net_shares": _finite_number(branch_summary.get("net_shares")),
+        "buyers": int(branch_summary.get("buyers", 0) or 0),
+        "sellers": int(branch_summary.get("sellers", 0) or 0),
+        "count_unit": str(branch_summary.get("count_unit", "分點")),
+        "top_net_buy": _finite_number(branch_summary.get("top_net_buy")),
+        "top_net_sell": _finite_number(branch_summary.get("top_net_sell")),
+        "top_net_buy_share_pct": _finite_number(branch_summary.get("top_net_buy_share_pct")),
+        "top_net_sell_share_pct": _finite_number(branch_summary.get("top_net_sell_share_pct")),
+        "saved_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+    }
+    session_state[key] = snapshot
+    return snapshot
+
+
+def format_broker_branch_ai_context(snapshot, stock_code):
+    """Prepare a short, cautious branch-flow context for an AI report/email."""
+    if not isinstance(snapshot, Mapping):
+        return ""
+    target_code = _normalize_broker_stock_code(stock_code)
+    if snapshot.get("stock_code") != target_code:
+        return ""
+    unit = "分點" if snapshot.get("count_unit") == "分點" else "資料列"
+    net_shares = snapshot.get("net_shares")
+    net_text = f"{net_shares:+,.0f} 股" if net_shares is not None else "資料不足"
+    buy_share = snapshot.get("top_net_buy_share_pct")
+    sell_share = snapshot.get("top_net_sell_share_pct")
+    buy_share_text = f"前15個淨買超{unit}占全部淨買超約 {buy_share:.1f}%" if buy_share is not None else "淨買超集中度資料不足"
+    sell_share_text = f"前15個淨賣超{unit}占全部淨賣超約 {sell_share:.1f}%" if sell_share is not None else "淨賣超集中度資料不足"
+    saved_at = str(snapshot.get("saved_at") or "")
+    return "\n".join([
+        f"【分點資料摘要｜{target_code}】",
+        f"資料來源：{snapshot.get('source_label', '使用者提供的分點資料')}；載入時間：{saved_at or '未提供'}。",
+        f"分點淨額合計：{net_text}；淨買超{unit}：{int(snapshot.get('buyers', 0) or 0)}；淨賣超{unit}：{int(snapshot.get('sellers', 0) or 0)}。",
+        f"淨流向集中度：{buy_share_text}；{sell_share_text}。",
+        "資料限制：CSV 若未標示交易日期，不能假設分點統計與目前股價是同日或同期間；淨額合計接近零通常是買賣相抵，不是方向訊號。",
+        "解讀原則：分點家數表示交易渠道的參與廣度，不代表投資人數或散戶／主力身分；請將家數、淨額、集中度和日期對齊後的價格變化分開觀察，不據此宣稱吸籌、出貨或預測漲跌。",
+    ])
+
+
+def build_broker_branch_ai_interpretation(snapshot, price_history, timeframe_name):
+    """Build a deterministic, user-facing branch-flow and recent-price interpretation."""
+    if not isinstance(snapshot, Mapping):
+        return ""
+    close = pd.to_numeric(pd.Series(price_history), errors="coerce").dropna().tail(20)
+    buyers = int(snapshot.get("buyers", 0) or 0)
+    sellers = int(snapshot.get("sellers", 0) or 0)
+    unit = "分點" if snapshot.get("count_unit") == "分點" else "資料列"
+    net_shares = _finite_number(snapshot.get("net_shares"))
+    buy_share = _finite_number(snapshot.get("top_net_buy_share_pct"))
+    sell_share = _finite_number(snapshot.get("top_net_sell_share_pct"))
+
+    lines = [
+        f"觀察到的分點資料：淨買超{unit} {buyers:,} 個、淨賣超{unit} {sellers:,} 個；"
+        f"這份資料的分點淨額合計 {net_shares:+,.0f} 股。" if net_shares is not None
+        else f"觀察到的分點資料：淨買超{unit} {buyers:,} 個、淨賣超{unit} {sellers:,} 個；淨額資料不足。"
+    ]
+
+    concentration_parts = []
+    if buy_share is not None:
+        top_buy = _finite_number(snapshot.get("top_net_buy"))
+        amount_text = f"（合計 {top_buy:+,.0f} 股）" if top_buy is not None else ""
+        concentration_parts.append(f"前 15 個淨買超{unit}{amount_text}約占全部淨買超 {buy_share:.1f}%")
+    if sell_share is not None:
+        top_sell = _finite_number(snapshot.get("top_net_sell"))
+        amount_text = f"（合計 {top_sell:+,.0f} 股）" if top_sell is not None else ""
+        concentration_parts.append(f"前 15 個淨賣超{unit}{amount_text}約占全部淨賣超 {sell_share:.1f}%")
+    if concentration_parts:
+        lines.append("流向集中度：" + "；".join(concentration_parts) + "。比例越高，代表該方向的淨額越集中在排名前面的分點；不代表持股集中度。")
+    else:
+        lines.append("流向集中度：目前無法計算前 15 個淨買超／淨賣超分點占比。")
+
+    if len(close) >= 2 and float(close.iloc[0]) > 0:
+        price_change_pct = float(close.iloc[-1] / close.iloc[0] - 1.0)
+        price_direction = "上漲" if price_change_pct > 0 else "下跌" if price_change_pct < 0 else "持平"
+        date_range = ""
+        try:
+            start_date = pd.Timestamp(close.index[0]).strftime("%Y-%m-%d")
+            end_date = pd.Timestamp(close.index[-1]).strftime("%Y-%m-%d")
+            date_range = f"（{start_date} 至 {end_date}）"
+        except Exception:
+            pass
+        lines.append(
+            f"價格觀察：近 {len(close)} 筆「{timeframe_name or '目前圖表'}」收盤由 {float(close.iloc[0]):,.2f} 元"
+            f"變為 {float(close.iloc[-1]):,.2f} 元，期間{price_direction} {price_change_pct:+.2%}{date_range}。"
+        )
+        lines.append("家數與價格搭配：" + build_broker_branch_price_breadth_reading(snapshot, price_change_pct))
+    else:
+        lines.append("價格觀察：可用收盤資料少於 2 筆，無法計算近 20 筆價格方向。")
+
+    if buyers > sellers:
+        breadth_note = f"淨買超{unit}比淨賣超多 {buyers - sellers:,} 個，表示淨買方參與面較廣。"
+    elif sellers > buyers:
+        breadth_note = f"淨賣超{unit}比淨買超多 {sellers - buyers:,} 個，表示淨賣方參與面較廣。"
+    else:
+        breadth_note = f"淨買超與淨賣超{unit}數相同，家數沒有顯示哪一方參與面較廣。"
+    lines.append("可能的市場心理解讀：" + breadth_note + "若價格方向與買賣參與廣度一致，可視為當下行為線索；若不一致，代表訊號分歧，宜觀察後續資料，不宜直接貼上吸籌或出貨標籤。")
+
+    source_label = str(snapshot.get("source_label") or "使用者提供的分點資料")
+    source_date_match = re.search(r"(20\d{2}-\d{2}-\d{2})", source_label)
+    if source_date_match:
+        date_note = f"分點資料標示日期為 {source_date_match.group(1)}；近 20 筆價格涵蓋的期間較長，不能把兩者當成完全相同期間。"
+    else:
+        date_note = "這份分點資料沒有可確認的交易日期；無法確認它與近 20 筆價格期間對齊，因此只能作方向參考。"
+    lines.append("資料限制：" + date_note + "分點家數不是投資人數，資料也無法辨認主力或散戶身分；淨額接近零可能只是買賣相抵，不代表沒有資金流動。")
+    return "\n".join(f"- {line}" for line in lines)
+
+
 def summarize_broker_branch_csv(uploaded_file, stock_code):
     """Read common broker CSV encodings/delimiters and locate the actual header row."""
     if uploaded_file is None:
@@ -4069,7 +4190,7 @@ def _logout_account():
         if key == "auth_user" or key.startswith((
             "port_", "portfolio_", "login_", "register_", "recovery_",
             "password_reset_", "reset_", "finmind_user_token_",
-            "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_",
+            "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_", "broker_branch_ai_",
         )) or key == "pending_recovery_email":
             st.session_state.pop(key, None)
 
@@ -4784,6 +4905,25 @@ if auth_user:
                 st.info(f"🔮 【{c_name}】{selected_tf} 價量動能估算：{chip_status_text}")
 
                 with st.expander(f"🧠 AI 雙核心個股研究報告與 Email 傳送【{c_name}】", expanded=(f"ai_report_{selected_stock}" in st.session_state)):
+                    branch_ai_snapshot_key = _broker_branch_ai_state_key(auth_user.get("id", "guest"), selected_stock)
+                    current_branch_ai_context = format_broker_branch_ai_context(
+                        st.session_state.get(branch_ai_snapshot_key), selected_stock
+                    )
+                    current_branch_snapshot = st.session_state.get(branch_ai_snapshot_key)
+                    current_branch_ai_interpretation = ""
+                    if current_branch_ai_context:
+                        current_branch_ai_interpretation = build_broker_branch_ai_interpretation(
+                            current_branch_snapshot,
+                            pd.to_numeric(df_chart["Close"], errors="coerce").dropna().tail(20),
+                            selected_tf,
+                        )
+                    if current_branch_ai_context:
+                        st.info(
+                            "目前登入工作階段已有這檔股票的分點摘要。重新產生 AI 報告時會將家數、淨額與集中度摘要傳送給你選擇的 AI 服務；"
+                            "不會傳送完整分點明細。若目前已經有舊報告，請重新分析才會納入這份分點資料。"
+                        )
+                    else:
+                        st.caption("若先在「籌碼流向參考」匯入這檔股票的分點資料，重新產生報告時會一併分析。")
                     ai_provider = st.radio(
                         "AI 分析來源",
                         ["Gemini", "ChatGPT（含網路搜尋）"],
@@ -4821,6 +4961,16 @@ if auth_user:
                                     company_context = collect_stock_research_context(
                                         stock_obj_main, info_obj_main, market_snapshot
                                     )
+                                    branch_snapshot = st.session_state.get(branch_ai_snapshot_key)
+                                    broker_branch_ai_context = format_broker_branch_ai_context(
+                                        branch_snapshot, selected_stock
+                                    )
+                                    broker_branch_ai_interpretation = ""
+                                    if broker_branch_ai_context:
+                                        ai_close_window = pd.to_numeric(df_chart["Close"], errors="coerce").dropna().tail(20)
+                                        broker_branch_ai_interpretation = build_broker_branch_ai_interpretation(
+                                            branch_snapshot, ai_close_window, selected_tf
+                                        )
                                     ai_psychology = build_three_core_market_psychology_notes(
                                         gvi_val, momentum_score, fcf_yield_main, peg_val_main
                                     )
@@ -4833,6 +4983,12 @@ if auth_user:
                                         f"• 價格與成交量：{build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf)}",
                                         "• 解讀限制：以上是市場行為線索，不是對投資人身分或真實情緒的判定，也不是買賣訊號。",
                                     ])
+                                    if broker_branch_ai_interpretation:
+                                        ai_psychology_lines.insert(
+                                            -1,
+                                            "• 分點家數、淨額、流向集中度與近 20 筆價格：\n"
+                                            + broker_branch_ai_interpretation,
+                                        )
                                     market_psychology_brief = "\n".join(ai_psychology_lines)
                                     quant_summary = (
                                         f"成長價值研究分數={gvi_str}；股東權益報酬率={roe_str}；股價淨值比={pb_str}；"
@@ -4840,6 +4996,13 @@ if auth_user:
                                         f"價量動能估算={chip_status_text}；目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%\n"
                                         f"三核心白話心理解讀：\n{market_psychology_brief}"
                                     )
+                                    if broker_branch_ai_context:
+                                        quant_summary += (
+                                            f"\n\n{broker_branch_ai_context}\n\n"
+                                            "以下是本次分析必須逐項解讀的分點與價格資料；請在市場心理觀察中引用具體數字，"
+                                            "不得略過家數、淨額、集中度或近 20 筆價格方向：\n"
+                                            f"{broker_branch_ai_interpretation}"
+                                        )
                                     ai_prompt = build_ai_investment_prompt(
                                         selected_stock, c_name, provider_name, quant_summary,
                                         company_context, ai_backtest["text"],
@@ -4851,22 +5014,46 @@ if auth_user:
                                     else:
                                         success_report = generate_content_with_retry(ai_prompt, api_key_input)
                                         ai_sources = []
+                                    if broker_branch_ai_interpretation:
+                                        success_report = (
+                                            str(success_report).rstrip()
+                                            + "\n\n### 分點流向與近 20 筆價格方向｜資料補充解讀\n"
+                                            + broker_branch_ai_interpretation
+                                        )
                                     report_key = f"ai_report_{selected_stock}"
                                     st.session_state[report_key] = success_report
                                     st.session_state[f"{report_key}_provider"] = provider_name
                                     st.session_state[f"{report_key}_backtest"] = ai_backtest
                                     st.session_state[f"{report_key}_sources"] = ai_sources
                                     st.session_state[f"{report_key}_psychology"] = market_psychology_brief
+                                    st.session_state[f"{report_key}_branch_context"] = broker_branch_ai_context
                                 except Exception as ai_e:
                                     st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
                     
                     if f"ai_report_{selected_stock}" in st.session_state:
                         report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
                         st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
+                        saved_report_branch_context = st.session_state.get(
+                            f"ai_report_{selected_stock}_branch_context", ""
+                        )
+                        saved_report_text = str(st.session_state.get(f"ai_report_{selected_stock}", ""))
+                        branch_report_heading = "### 分點流向與近 20 筆價格方向｜資料補充解讀"
+                        report_has_branch_interpretation = branch_report_heading in saved_report_text
+                        if current_branch_ai_interpretation and (
+                            saved_report_branch_context != current_branch_ai_context
+                            or not report_has_branch_interpretation
+                        ):
+                            st.warning("目前這份 AI 報告尚未納入目前工作階段的分點資料。請重新產生報告；以下先列出本次分點與價格的資料補充解讀。")
+                            st.markdown("##### 分點流向與近 20 筆價格方向｜資料補充解讀")
+                            st.markdown(current_branch_ai_interpretation)
                         saved_psychology_brief = st.session_state.get(f"ai_report_{selected_stock}_psychology")
                         if saved_psychology_brief:
                             st.markdown("#### 🧠 市場心理重點")
                             st.markdown(saved_psychology_brief)
+                        saved_branch_context = st.session_state.get(f"ai_report_{selected_stock}_branch_context", "")
+                        if saved_branch_context:
+                            with st.expander("查看本次 AI 分析使用的分點摘要", expanded=False):
+                                st.markdown(saved_branch_context)
                         ai_report = st.session_state[f"ai_report_{selected_stock}"]
                         st.markdown(ai_report)
                         saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
@@ -4918,9 +5105,31 @@ if auth_user:
                                         f"ai_report_{selected_stock}_psychology",
                                         "此報告產生於市場心理摘要功能加入前；目前報告內可能已有心理面分析。",
                                     )
+                                    saved_email_branch_context = st.session_state.get(
+                                        f"ai_report_{selected_stock}_branch_context", ""
+                                    )
+                                    email_branch_context = current_branch_ai_context or saved_email_branch_context
+                                    email_branch_interpretation = ""
+                                    email_branch_is_current = bool(
+                                        current_branch_ai_interpretation
+                                        and saved_email_branch_context == current_branch_ai_context
+                                        and branch_report_heading in str(ai_report)
+                                    )
+                                    if current_branch_ai_interpretation and not email_branch_is_current:
+                                        email_branch_interpretation = (
+                                            "【目前分點資料補充解讀｜AI 報告尚未重新產生】\n"
+                                            + current_branch_ai_interpretation
+                                            + "\n\n"
+                                        )
+                                    email_branch_section = (
+                                        f"【本次 AI 分析使用的分點摘要】\n{email_branch_context}\n\n"
+                                        if email_branch_context else ""
+                                    )
                                     email_body = (
                                         f"個股：{selected_stock} {c_name}\n"
                                         f"寄送時間：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                                        f"{email_branch_section}"
+                                        f"{email_branch_interpretation}"
                                         f"【市場心理重點】\n{email_psychology_brief}\n\n"
                                         f"{report_provider} 分析結果：\n\n{ai_report}"
                                     )
@@ -5293,6 +5502,40 @@ if auth_user:
                                 f"{branch_summary['top_net_buy']:+,.0f} 股{buy_share_text}；淨賣超前 15 個"
                                 f"{branch_summary['count_unit']}合計 {branch_summary['top_net_sell']:+,.0f} 股{sell_share_text}。"
                             )
+                            if buy_share is not None and sell_share is not None:
+                                if buy_share > sell_share:
+                                    concentration_label = "買方分點相對集中"
+                                    concentration_delta = f"買方高 {buy_share - sell_share:.1f} 個百分點"
+                                elif sell_share > buy_share:
+                                    concentration_label = "賣方分點相對集中"
+                                    concentration_delta = f"賣方高 {sell_share - buy_share:.1f} 個百分點"
+                                else:
+                                    concentration_label = "買賣兩側相同"
+                                    concentration_delta = "前 15 個分點占比相同"
+                                concentration_value = f"買 {buy_share:.1f}%｜賣 {sell_share:.1f}%"
+                            elif buy_share is not None:
+                                concentration_label = "賣方集中度資料不足"
+                                concentration_delta = "僅有淨買超占比"
+                                concentration_value = f"買 {buy_share:.1f}%｜賣—"
+                            elif sell_share is not None:
+                                concentration_label = "買方集中度資料不足"
+                                concentration_delta = "僅有淨賣超占比"
+                                concentration_value = f"買—｜賣 {sell_share:.1f}%"
+                            else:
+                                concentration_label = "資料不足"
+                                concentration_delta = None
+                                concentration_value = "—"
+                            st.metric(
+                                "分點淨流向集中度（前 15 個）",
+                                concentration_value,
+                                delta=concentration_label if concentration_delta is None else concentration_delta,
+                                delta_color="off",
+                                help="比較淨買超與淨賣超各自前 15 個分點，占該方向全部淨額的比例。這只表示券商交易渠道的相對集中程度，不能判定背後是主力或散戶。",
+                            )
+                            st.caption(
+                                f"集中度比較：{concentration_label}。這表示淨買／賣超金額在少數分點的分布差異，"
+                                "不是持股集中度，也無法由券商分點辨認主力或散戶身分。"
+                            )
                             st.caption(
                                 "讀法：買超／賣超家數只表示各分點淨額為正或負的數量，不代表散戶／大戶人數。"
                                 "在資料涵蓋完整且口徑一致時，分點淨額合計接近 0 常是買賣相抵的核對結果，並非方向訊號；"
@@ -5458,6 +5701,11 @@ if auth_user:
                             )
                             if branch_file is not None:
                                 branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
+                                saved_branch_context = save_broker_branch_ai_summary(
+                                    st.session_state, account_id, stock_code, branch_summary, "使用者上傳 CSV"
+                                )
+                                if saved_branch_context:
+                                    st.caption("已把這檔股票的分點摘要暫存於目前登入工作階段；啟動 AI 報告時會一併使用摘要，不傳送完整分點明細。")
                                 _render_branch_summary(branch_summary, "依上傳檔案所含資料期間彙總")
                         elif active_finmind_token and active_finmind_ack:
                             from datetime import datetime as _datetime
@@ -5474,9 +5722,19 @@ if auth_user:
                                     stock_code, branch_date_text, active_finmind_token, account_scope=account_id
                                 )
                             if branch_error:
+                                save_broker_branch_ai_summary(
+                                    st.session_state, account_id, stock_code,
+                                    {"error": branch_error}, f"{source_label}｜{branch_date_text}",
+                                )
                                 st.info(f"FinMind：{branch_error}")
                             else:
                                 auto_summary = summarize_broker_branch_frame(branch_frame, stock_code)
+                                saved_branch_context = save_broker_branch_ai_summary(
+                                    st.session_state, account_id, stock_code, auto_summary,
+                                    f"{source_label}｜{branch_date_text}",
+                                )
+                                if saved_branch_context:
+                                    st.caption("已把此日期的分點摘要暫存於目前登入工作階段；啟動 AI 報告時會一併使用摘要，不傳送完整分點明細。")
                                 _render_branch_summary(auto_summary, f"{source_label}｜{branch_date_text}")
                         elif branch_source != "手動上傳 CSV" and active_finmind_token and not active_finmind_ack:
                             st.info("請先完成上方確認，才會使用所選 Token 發出查詢。")
