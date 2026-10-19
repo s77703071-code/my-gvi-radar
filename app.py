@@ -1692,32 +1692,64 @@ def _register_account(username, password, email):
     defaults = PORTFOLIO_DEFAULT_SETTINGS
     if _supabase_enabled():
         username_key = str(username).strip().casefold()
-        if _supabase_select(
-            "app_users", select="id", filters={"username_key": f"eq.{username_key}"}, limit=1
-        ):
-            raise sqlite3.IntegrityError("這個帳號名稱已有人使用。")
-        created_at = pd.Timestamp.now().isoformat(timespec="seconds")
-        created = _supabase_request(
-            "POST", "app_users",
-            payload=[{
-                "username": str(username).strip(), "username_key": username_key,
-                "email": str(email).strip().lower(), "password_salt": salt,
-                "password_hash": digest, "created_at": created_at,
-            }],
-            prefer="return=representation",
-        )
-        if not isinstance(created, list) or not created:
-            raise RuntimeError("Supabase 未回傳新帳號資料。")
-        user_id = int(created[0]["id"])
-        try:
-            _supabase_upsert(
-                "portfolio_user_settings",
-                [{"user_id": user_id, "setting_key": key, "setting_value": value}
-                 for key, value in defaults.items()],
-                "user_id,setting_key",
+        def recover_existing_account():
+            existing_rows = _supabase_select(
+                "app_users", select="id,username,password_salt,password_hash",
+                filters={"username_key": f"eq.{username_key}"}, limit=1,
             )
+            if not existing_rows:
+                return None
+            existing = existing_rows[0]
+            candidate = _password_digest(password, existing["password_salt"])
+            if not hmac.compare_digest(candidate, existing["password_hash"]):
+                raise sqlite3.IntegrityError("這個帳號名稱已有人使用。")
+            return int(existing["id"])
+
+        existing_user_id = recover_existing_account()
+        if existing_user_id is not None:
+            _ensure_supabase_portfolio_defaults(existing_user_id)
+            return existing_user_id, False
+
+        created_at = pd.Timestamp.now().isoformat(timespec="seconds")
+        try:
+            created = _supabase_request(
+                "POST", "app_users",
+                payload=[{
+                    "username": str(username).strip(), "username_key": username_key,
+                    "email": str(email).strip().lower(), "password_salt": salt,
+                    "password_hash": digest, "created_at": created_at,
+                }],
+                prefer="return=representation",
+            )
+        except sqlite3.IntegrityError:
+            # A simultaneous registration may win after our initial lookup.
+            existing_user_id = recover_existing_account()
+            if existing_user_id is None:
+                raise
+            _ensure_supabase_portfolio_defaults(existing_user_id)
+            return existing_user_id, False
+
+        created_row = created[0] if isinstance(created, list) and created else (
+            created if isinstance(created, dict) else None
+        )
+        user_id = int(created_row["id"]) if created_row and created_row.get("id") is not None else None
+        if user_id is None:
+            # Some API/proxy configurations acknowledge the insert without returning
+            # representation. Read the row back before declaring registration failed.
+            created_rows = _supabase_select(
+                "app_users", select="id", filters={"username_key": f"eq.{username_key}"}, limit=1
+            )
+            user_id = int(created_rows[0]["id"]) if created_rows else None
+        if user_id is None:
+            raise RuntimeError(
+                "Supabase 已接受註冊請求，但讀不到新帳號 ID。請確認 app_users 的 API 權限、"
+                "RLS 與 Secret Key 設定；若帳號已建立，可用相同帳密從「登入」頁登入。"
+            )
+        try:
+            _ensure_supabase_portfolio_defaults(user_id)
         except Exception:
-            _supabase_request("DELETE", "app_users", params={"id": f"eq.{user_id}"})
+            # Keep the account itself; it can still log in, and settings can be
+            # initialized on the next successful registration/login attempt.
             raise
         # Legacy shared rows are imported explicitly; never attach another account's
         # old portfolio to the first cloud user during ordinary registration.
@@ -1749,6 +1781,22 @@ def _register_account(username, password, email):
             )
         conn.commit()
     return user_id, account_count == 0
+
+
+def _ensure_supabase_portfolio_defaults(user_id):
+    """Insert only missing default settings, preserving any user-customized values."""
+    user_id = int(user_id)
+    existing = _supabase_select(
+        "portfolio_user_settings", select="setting_key",
+        filters={"user_id": f"eq.{user_id}"},
+    )
+    existing_keys = {str(row.get("setting_key")) for row in existing}
+    missing = [
+        {"user_id": user_id, "setting_key": key, "setting_value": value}
+        for key, value in PORTFOLIO_DEFAULT_SETTINGS.items()
+        if key not in existing_keys
+    ]
+    _supabase_upsert("portfolio_user_settings", missing, "user_id,setting_key")
 
 
 def _verify_account(username, password):
@@ -5421,12 +5469,15 @@ else:
                 login_password = st.text_input("密碼", type="password", key="login_password_main")
                 login_submit = st.form_submit_button("登入", use_container_width=True)
             if login_submit:
-                account = _verify_account(login_name, login_password)
-                if account:
-                    st.session_state["auth_user"] = account
-                    st.session_state.pop("account_login_view", None)
-                    st.rerun()
-                st.error("帳號或密碼不正確。")
+                try:
+                    account = _verify_account(login_name, login_password)
+                    if account:
+                        st.session_state["auth_user"] = account
+                        st.session_state.pop("account_login_view", None)
+                        st.rerun()
+                    st.error("帳號或密碼不正確。")
+                except Exception as login_error:
+                    st.error(f"目前無法連線驗證帳號：{login_error}")
         with register_tab:
             if _supabase_enabled():
                 st.caption("新帳號與個人投資組合將儲存在 Supabase，並依帳號分開保存。")
@@ -5457,6 +5508,8 @@ else:
                         st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("這個帳號名稱已有人使用。")
+                    except Exception as register_error:
+                        st.error(f"註冊目前無法完成：{register_error}")
         with reset_tab:
             st.caption("驗證碼會寄到帳號的備援 Email；寄件服務需先設定 Gmail Secrets。")
             with st.form("password_reset_request_form_main"):
