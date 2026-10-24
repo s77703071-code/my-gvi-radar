@@ -1121,38 +1121,44 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 安全修正版：將右下角所有動態社群徽章/皇冠標籤徹底長寬歸零，且不觸發白畫面
-hide_streamlit_style = """
+# 🟢 自訂隱形網頁遮罩：從程式碼內部產生一個乾淨無痕的最外層畫布，徹底隔絕外層皇冠
+st.components.v1.html("""
     <style>
-    /* 1. 隱藏右上角三個點選單與頁首黑條 */
-    #MainMenu {visibility: hidden !important; display: none !important;}
-    header {visibility: hidden !important; display: none !important;}
-    
-    /* 2. 隱藏右下角管理工具列 (Manage app) 與頁尾 */
-    footer {visibility: hidden !important; display: none !important;}
-    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
-    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
-    
-    /* 3. 安全防線：直接針對官方社群與皇冠徽章 (Community Badge) 進行長寬極小化與完全透明 */
-    .stCommunityBadge, 
-    div[class*="stCommunityBadge"], 
-    iframe[class*="stCommunityBadge"],
-    [id*="stCommunityBadge"],
-    a[href*="streamlit.io"],
-    button[class*="community"] {
-        visibility: hidden !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-        position: absolute !important;
-        transform: scale(0) !important;
-        width: 0px !important;
-        height: 0px !important;
-        margin: 0px !important;
-        padding: 0px !important;
+    /* 強制將我們內部的分析畫面擴展到滿版，並蓋過所有外面不想要的元件 */
+    iframe {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        border: none !important;
+        z-index: 999999 !important;
     }
     </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+    <script>
+    (function() {
+        try {
+            // 直接取得目前這台手機點開的網址（排除參數）
+            var cleanUrl = window.location.origin + window.location.pathname + '?embed=true';
+            
+            // 如果最外層還沒有被我們的乾淨畫布覆蓋，就直接強制產生一個無痕主畫布
+            if (window.self === window.top) {
+                var container = window.document.createElement('div');
+                container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:#0A0E17;z-index:999999;overflow:hidden;';
+                
+                var cleanIframe = window.document.createElement('iframe');
+                cleanIframe.src = cleanUrl;
+                cleanIframe.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border:none;';
+                
+                container.appendChild(cleanIframe);
+                window.document.body.appendChild(container);
+            }
+        } catch(e) {
+            // 安全備援防護，若瀏覽器嚴格限制則不執行，確保不卡住原本畫面
+        }
+    })();
+    </script>
+""", height=0, width=0)
 
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
