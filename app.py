@@ -1121,31 +1121,31 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 終極覆蓋：採用全域模糊匹配與手機端優先權最高 (!important) 的 CSS 樣式
+# 🟢 空間降維終極法：直接修改主畫布邊界與層級，強制物理隔離右下角徽章
 hide_streamlit_style = """
     <style>
-    /* 1. 隱藏右上角三個點選單與頁首黑條 */
+    /* 1. 隱藏原本就抓得到的元件 */
     #MainMenu {visibility: hidden !important; display: none !important;}
     header {visibility: hidden !important; display: none !important;}
-    
-    /* 2. 隱藏右下角管理工具列 (Manage app) 與頁尾 */
     footer {visibility: hidden !important; display: none !important;}
     div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
     button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
+
+    /* 2. 終極空間遮罩：強制將 APP 容器推到最上層，並裁剪掉底部的所有外層元件 */
+    html, body {
+        overflow-x: hidden !important;
+    }
     
-    /* 3. 終極防線：用模糊匹配、ID、類別以及外層所有可能包裹粉紅皇冠的容器強制隱藏 */
-    .stCommunityBadge, 
-    div[class*="stCommunityBadge"], 
-    iframe[class*="stCommunityBadge"],
-    [id*="stCommunityBadge"],
-    a[href*="streamlit.io"],
-    button[class*="community"] {
-        visibility: hidden !important; 
-        display: none !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-        height: 0 !important;
-        width: 0 !important;
+    .stApp {
+        position: relative !important;
+        z-index: 999999 !important; /* 迫使主畫面提到最高層級，壓過外層的皇冠 */
+        margin-bottom: 0px !important;
+        padding-bottom: 60px !important; /* 在底部預留安全距離，防止手機原生瀏覽器圖標擋到內容 */
+    }
+
+    /* 3. 對外層視窗容器進行強力盲切（強迫瀏覽器不渲染框架外的死角） */
+    window, :host, :root {
+        contain: paint !important;
     }
     </style>
 """
