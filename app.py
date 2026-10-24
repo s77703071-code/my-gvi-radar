@@ -1121,22 +1121,6 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 恢復最穩定的安全防線：僅隱藏內部工具列與選單，100% 確保背景與左側選單完全正常
-hide_streamlit_style = """
-    <style>
-    /* 隱藏右上角三個點選單與頁首 */
-    #MainMenu {visibility: hidden !important; display: none !important;}
-    header {visibility: hidden !important; display: none !important;}
-    
-    /* 隱藏右下角開發者管理工具列 (Manage app) 與頁尾 */
-    footer {visibility: hidden !important; display: none !important;}
-    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
-    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
-    </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-
-
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
     <style>
