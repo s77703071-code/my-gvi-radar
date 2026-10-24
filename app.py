@@ -1120,23 +1120,44 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
         st.info(f"比較模式以相同投入額比較配息組合與 {benchmark_symbol}（{benchmark_scope}）。舊系統未保存逐日歷史成分，故無法重建舊策略的歷史績效。")
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
-# 🟢 強制隱藏右上方選單、右下角工具列以及官方社群/皇冠徽章
-hide_streamlit_style = """
-    <style>
-    /* 隱藏右上角三個點選單與部署按鈕 */
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* 隱藏右下角的 Streamlit 頁尾與管理工具列 (Manage app) */
-    footer {visibility: hidden;}
-    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
-    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
-    
-    /* 隱藏右下角新版官方社群與皇冠徽章 (Community Badge) */
-    .stCommunityBadge, div[class*="stCommunityBadge"] {visibility: hidden !important; display: none !important;}
-    </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# 🟢 替換成萬能 JavaScript 版本：直接穿透底層將右下方所有免費標籤與官方徽章「物理移除」
+st.components.v1.html("""
+    <script>
+    function removeStreamlitBadges() {
+        // 1. 先把傳統 CSS 能蓋掉的元件隱藏起來
+        const style = document.createElement('style');
+        style.innerHTML = `
+            #MainMenu {visibility: hidden !important; display: none !important;}
+            header {visibility: hidden !important; display: none !important;}
+            footer {visibility: hidden !important; display: none !important;}
+            div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+            .stCommunityBadge {visibility: hidden !important; display: none !important;}
+        `;
+        window.parent.document.head.appendChild(style);
+
+        // 2. 跳出內嵌框架，直接去最外層網頁把那顆粉紅色小皇冠標籤直接 remove 刪除
+        const hostDoc = window.parent.document;
+        
+        // 物理拔除新版動態社群徽章元件
+        const badges = hostDoc.querySelectorAll('.stCommunityBadge, [class*="stCommunityBadge"], [id*="stCommunityBadge"]');
+        badges.forEach(el => el.remove());
+
+        // 穿透免費託管平台特定的角落 Banner
+        const lightningButtons = hostDoc.querySelectorAll('button[title*="Lightning"], a[href*="streamlit.io"]');
+        lightningButtons.forEach(btn => {
+            const container = btn.closest('div');
+            if (container) container.remove();
+        });
+    }
+
+    // 在網頁載入的不同時間點重複執行（防範非同步延遲載入）
+    window.addEventListener('load', removeStreamlitBadges);
+    setTimeout(removeStreamlitBadges, 300);
+    setTimeout(removeStreamlitBadges, 1000);
+    setTimeout(removeStreamlitBadges, 3000);
+    </script>
+""", height=0, width=0)
 
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
