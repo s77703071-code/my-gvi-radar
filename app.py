@@ -1121,43 +1121,35 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 替換成萬能 JavaScript 版本：直接穿透底層將右下方所有免費標籤與官方徽章「物理移除」
-st.components.v1.html("""
-    <script>
-    function removeStreamlitBadges() {
-        // 1. 先把傳統 CSS 能蓋掉的元件隱藏起來
-        const style = document.createElement('style');
-        style.innerHTML = `
-            #MainMenu {visibility: hidden !important; display: none !important;}
-            header {visibility: hidden !important; display: none !important;}
-            footer {visibility: hidden !important; display: none !important;}
-            div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
-            .stCommunityBadge {visibility: hidden !important; display: none !important;}
-        `;
-        window.parent.document.head.appendChild(style);
-
-        // 2. 跳出內嵌框架，直接去最外層網頁把那顆粉紅色小皇冠標籤直接 remove 刪除
-        const hostDoc = window.parent.document;
-        
-        // 物理拔除新版動態社群徽章元件
-        const badges = hostDoc.querySelectorAll('.stCommunityBadge, [class*="stCommunityBadge"], [id*="stCommunityBadge"]');
-        badges.forEach(el => el.remove());
-
-        // 穿透免費託管平台特定的角落 Banner
-        const lightningButtons = hostDoc.querySelectorAll('button[title*="Lightning"], a[href*="streamlit.io"]');
-        lightningButtons.forEach(btn => {
-            const container = btn.closest('div');
-            if (container) container.remove();
-        });
+# 🟢 終極覆蓋：採用全域模糊匹配與手機端優先權最高 (!important) 的 CSS 樣式
+hide_streamlit_style = """
+    <style>
+    /* 1. 隱藏右上角三個點選單與頁首黑條 */
+    #MainMenu {visibility: hidden !important; display: none !important;}
+    header {visibility: hidden !important; display: none !important;}
+    
+    /* 2. 隱藏右下角管理工具列 (Manage app) 與頁尾 */
+    footer {visibility: hidden !important; display: none !important;}
+    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
+    
+    /* 3. 終極防線：用模糊匹配、ID、類別以及外層所有可能包裹粉紅皇冠的容器強制隱藏 */
+    .stCommunityBadge, 
+    div[class*="stCommunityBadge"], 
+    iframe[class*="stCommunityBadge"],
+    [id*="stCommunityBadge"],
+    a[href*="streamlit.io"],
+    button[class*="community"] {
+        visibility: hidden !important; 
+        display: none !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        height: 0 !important;
+        width: 0 !important;
     }
-
-    // 在網頁載入的不同時間點重複執行（防範非同步延遲載入）
-    window.addEventListener('load', removeStreamlitBadges);
-    setTimeout(removeStreamlitBadges, 300);
-    setTimeout(removeStreamlitBadges, 1000);
-    setTimeout(removeStreamlitBadges, 3000);
-    </script>
-""", height=0, width=0)
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
