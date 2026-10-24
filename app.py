@@ -2962,6 +2962,198 @@ def recommend_dynamic_grid(price, history):
     return lower, upper, grid_count, reason
 
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _dual_grid_fetch_history(ticker, period="2y"):
+    """Cached daily OHLCV for the dual-pool screener and illustrative backtest."""
+    try:
+        frame = yf.download(ticker, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = frame.columns.get_level_values(0)
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        needed = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in frame.columns]
+        frame = frame[needed].copy()
+        for col in needed:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        return frame.dropna(subset=["Close"])
+    except Exception:
+        return pd.DataFrame()
+
+
+def _dual_grid_analyze(ticker, history):
+    """Rule-based technical classification. Growth pool is a price/quality proxy, not fundamental advice."""
+    if not isinstance(history, pd.DataFrame) or history.empty or "Close" not in history:
+        return None
+    close = history["Close"].dropna().astype(float)
+    if len(close) < 80 or close.iloc[-1] <= 0:
+        return None
+    last = float(close.iloc[-1])
+    high = history["High"].astype(float) if "High" in history else close
+    low = history["Low"].astype(float) if "Low" in history else close
+    prev = close.shift(1)
+    tr = pd.concat([(high - low).abs(), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    atr = float(tr.rolling(14).mean().iloc[-1]) if tr.rolling(14).mean().notna().any() else last * .03
+    atr_pct = (atr / last * 100) if last else 0.0
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma50 = float(close.rolling(50).mean().iloc[-1])
+    ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(close.rolling(min(100, len(close))).mean().iloc[-1])
+    ret20 = float((last / close.iloc[-21] - 1) * 100) if len(close) > 21 else 0.0
+    ret60 = float((last / close.iloc[-61] - 1) * 100) if len(close) > 61 else ret20
+    ret120 = float((last / close.iloc[-121] - 1) * 100) if len(close) > 121 else ret60
+    high60 = float(high.tail(60).max())
+    low60 = float(low.tail(60).min())
+    range_pct = ((high60 - low60) / last * 100) if last else 0.0
+    range_position = ((last - low60) / (high60 - low60)) if high60 > low60 else .5
+    peak = float(close.tail(252).max())
+    drawdown_from_peak = (last / peak - 1) * 100 if peak else 0.0
+    volume_dollar = None
+    if "Volume" in history:
+        volume_dollar = float((history["Volume"].tail(20) * close.tail(20)).median())
+    # Lightweight ADX proxy: smoothed directional movement divided by smoothed true range.
+    if "High" in history and "Low" in history:
+        up = history["High"].astype(float).diff()
+        down = -history["Low"].astype(float).diff()
+        plus_dm = up.where((up > down) & (up > 0), 0.0)
+        minus_dm = down.where((down > up) & (down > 0), 0.0)
+        atr14 = tr.rolling(14).mean().replace(0, np.nan)
+        plus_di = 100 * plus_dm.rolling(14).mean() / atr14
+        minus_di = 100 * minus_dm.rolling(14).mean() / atr14
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        adx = float(dx.rolling(14).mean().iloc[-1]) if dx.rolling(14).mean().notna().any() else 25.0
+    else:
+        adx = 25.0
+    adx = adx if np.isfinite(adx) else 25.0
+
+    # Range-bound pool: modest trend, usable volatility, and sufficient recent price movement.
+    range_score = 0
+    range_score += 25 if 1.0 <= atr_pct <= 5.0 else (12 if 0.5 <= atr_pct <= 7.0 else 0)
+    range_score += 25 if adx < 22 else (12 if adx < 30 else 0)
+    range_score += 20 if -12 <= ret60 <= 12 else (8 if -20 <= ret60 <= 20 else 0)
+    range_score += 15 if 8 <= range_pct <= 35 else (8 if 5 <= range_pct <= 45 else 0)
+    range_score += 15 if volume_dollar is None or volume_dollar > 1_000_000 else 0
+
+    # Growth pool: technical trend/momentum proxy only. Fundamentals are not guaranteed by this score.
+    growth_score = 0
+    growth_score += 25 if last > ma200 else 0
+    growth_score += 20 if ma50 > ma200 else 0
+    growth_score += 20 if ret120 > 8 else (10 if ret120 > 0 else 0)
+    growth_score += 15 if ret60 > 0 else 0
+    growth_score += 10 if drawdown_from_peak > -25 else (5 if drawdown_from_peak > -40 else 0)
+    growth_score += 10 if volume_dollar is None or volume_dollar > 1_000_000 else 0
+
+    # Assign a single primary pool to avoid duplicated capital/stock allocations.
+    if max(range_score, growth_score) < 35:
+        pool = "暫不納入"
+    elif growth_score > range_score:
+        pool = "成長型網格"
+    else:
+        pool = "震盪型網格"
+    lower = max(0.01, float(close.tail(60).quantile(.10)))
+    upper = float(close.tail(60).quantile(.90))
+    if upper <= lower:
+        lower, upper = max(0.01, last * .9), last * 1.1
+    return {
+        "股票代碼": ticker, "現價": last, "主要策略池": pool,
+        "震盪分數": int(range_score), "成長分數": int(growth_score),
+        "ATR波動率%": atr_pct, "ADX參考值": adx, "近60日報酬%": ret60,
+        "近120日報酬%": ret120, "距近一年高點%": drawdown_from_peak,
+        "60日區間位置": range_position, "參考下界": lower, "參考上界": upper,
+        "20日成交金額中位數": volume_dollar,
+    }
+
+
+def _dual_grid_backtest(close_series, capital, fee_rate, sell_tax_rate, slippage_rate, grid_levels=7):
+    """Illustrative close-only grid simulation; all comparisons use the same initial budget."""
+    prices = pd.Series(close_series).dropna().astype(float)
+    if len(prices) < 60 or capital <= 0 or prices.iloc[0] <= 0:
+        return None
+    prices = prices.iloc[-min(len(prices), 504):]
+    initial_price = float(prices.iloc[0])
+    # Establish levels from the first 60 sessions, then freeze them to avoid look-ahead bias.
+    calibration = prices.iloc[:60]
+    lower = float(calibration.quantile(.10))
+    upper = float(calibration.quantile(.90))
+    if upper <= lower * 1.02:
+        lower, upper = initial_price * .85, initial_price * 1.15
+    levels = np.linspace(lower, upper, int(max(3, grid_levels)))
+    start_price = float(prices.iloc[0])
+    cost_rate = max(0.0, float(fee_rate)) + max(0.0, float(slippage_rate))
+    sell_cost_rate = cost_rate + max(0.0, float(sell_tax_rate))
+    cash = float(capital) * .5
+    shares = (float(capital) * .5) / (start_price * (1 + cost_rate))
+    # Start with a half-cash/half-stock mix; buys/sells are fixed notional slices.
+    trade_budget = float(capital) / max(2 * (len(levels) - 1), 2)
+    equity_curve = []
+    trades = 0
+    prev_price = float(prices.iloc[0])
+    for idx, p0 in enumerate(prices):
+        p = float(p0)
+        if idx > 0:
+            crossed_down = [lv for lv in levels if prev_price > lv >= p]
+            crossed_up = [lv for lv in levels if prev_price < lv <= p]
+            for _lv in crossed_down:
+                unit_price = p * (1 + cost_rate)
+                qty = min(cash / unit_price, trade_budget / unit_price)
+                if qty > 0:
+                    cash -= qty * unit_price
+                    shares += qty
+                    trades += 1
+            for _lv in crossed_up:
+                unit_price = p * (1 + sell_cost_rate)
+                qty = min(shares, trade_budget / p)
+                if qty > 0:
+                    cash += qty * p * (1 - sell_cost_rate)
+                    shares -= qty
+                    trades += 1
+        equity_curve.append(cash + shares * p)
+        prev_price = p
+    grid_end = float(equity_curve[-1])
+    grid_returns = pd.Series(equity_curve, index=prices.index).pct_change().fillna(0)
+    grid_dd = float((pd.Series(equity_curve) / pd.Series(equity_curve).cummax() - 1).min() * 100)
+
+    # Buy-and-hold: buy as many shares as possible at start, value remaining cash too.
+    hold_shares = capital / (start_price * (1 + cost_rate))
+    hold_cash = capital - hold_shares * start_price * (1 + cost_rate)
+    hold_curve = hold_cash + hold_shares * prices * (1 - sell_cost_rate)
+    hold_end = float(hold_curve.iloc[-1])
+    hold_dd = float((hold_curve / hold_curve.cummax() - 1).min() * 100)
+
+    # Monthly DCA with the same total budget, plus marked-to-market ending value net of sell cost.
+    month_groups = pd.Series(np.arange(len(prices)), index=prices.index).groupby(prices.index.to_period("M")).first().values
+    dca_contribution = capital / max(len(month_groups), 1)
+    dca_shares = 0.0
+    dca_cash_flows = []
+    dca_curve = []
+    contribution_map = set(int(x) for x in month_groups)
+    for i, p0 in enumerate(prices):
+        p = float(p0)
+        if i in contribution_map:
+            qty = dca_contribution / (p * (1 + cost_rate))
+            dca_shares += qty
+            dca_cash_flows.append(-dca_contribution)
+        dca_curve.append(dca_shares * p + max(0.0, capital - dca_contribution * sum(1 for x in contribution_map if x <= i)))
+    dca_end = float(dca_shares * float(prices.iloc[-1]) * (1 - sell_cost_rate))
+    # Drawdown uses marked equity including cash not yet contributed/invested.
+    dca_path = pd.Series(dca_curve, index=prices.index)
+    dca_dd = float((dca_path / dca_path.cummax() - 1).min() * 100) if len(dca_path) else 0.0
+
+    days = max((prices.index[-1] - prices.index[0]).days, 1)
+    years = days / 365.25
+    def cagr(end):
+        return ((end / capital) ** (1 / years) - 1) * 100 if end > 0 and years > 0 else np.nan
+    dca_flows = [(prices.index[int(i)], -float(dca_contribution)) for i in month_groups]
+    dca_flows.append((prices.index[-1], dca_end))
+    dca_irr = calculate_money_weighted_return(dca_flows) if "calculate_money_weighted_return" in globals() else None
+    dca_annualized = dca_irr * 100 if dca_irr is not None else np.nan
+    metrics = pd.DataFrame([
+        {"策略": "雙邊動態網格（示意）", "期末資產": grid_end, "總報酬%": (grid_end / capital - 1) * 100, "年化報酬CAGR%": cagr(grid_end), "最大回撤%": grid_dd, "成交次數": trades},
+        {"策略": "買進持有", "期末資產": hold_end, "總報酬%": (hold_end / capital - 1) * 100, "年化報酬CAGR%": cagr(hold_end), "最大回撤%": hold_dd, "成交次數": 1},
+        {"策略": "每月定期定額（示意）", "期末資產": dca_end, "總報酬%": (dca_end / capital - 1) * 100, "年化報酬CAGR%": dca_annualized, "最大回撤%": dca_dd, "成交次數": len(month_groups)},
+    ])
+    chart = pd.DataFrame({"日期": prices.index, "雙邊動態網格（示意）": equity_curve, "買進持有": hold_curve.values, "每月定期定額（示意）": dca_curve})
+    return metrics, chart, {"lower": lower, "upper": upper, "trades": trades, "years": years}
+
 def calculate_money_weighted_return(cash_flows):
     """Solve annualized return for dated cash flows; return None if no valid root exists."""
     dated = {}
@@ -5472,6 +5664,7 @@ if auth_user:
         "🏦 台股三大法人獨立選股策略",
         "📊 當日全市場三大法人佔股本比 Top 10",
         "🧭 投資組合理財",
+        "🧠 智慧型雙策略網格系統",
     ]
     # Keep the original option values stable for existing session state and
     # module dispatch conditions; show a category prefix only in the menu.
@@ -5486,6 +5679,7 @@ if auth_user:
         "🏦 台股三大法人獨立選股策略": "🏦 選股與市場掃描",
         "📊 當日全市場三大法人佔股本比 Top 10": "🏦 選股與市場掃描",
         "🧭 投資組合理財": "🧭 投資組合",
+        "🧠 智慧型雙策略網格系統": "⚖️ 策略與回測",
     }
     selected_module = st.sidebar.selectbox(
         "選擇要檢視的分析面板：",
@@ -6458,7 +6652,7 @@ if auth_user:
         _render_market_psychology_guide(st, selected_module, explanation_style)
 
         if df_chart is None or df_chart.empty:
-            if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略"]:
+            if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
                 st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
             
@@ -7343,6 +7537,128 @@ if auth_user:
             # ==============================================================================
             # 【Tab 3: 3.12 智慧型動態網格策略與資金自動規劃器 (含三大機制解析與複利警示)】
             # ==============================================================================
+            if selected_module == "🧠 智慧型雙策略網格系統":
+                st.markdown("### 🧠 智慧型動態網格：雙策略池與共用資金風控")
+                st.caption("試用版：技術面候選排序＋資金配置草案＋單一標的示意回測。這不是自動下單，也不保證獲利或最大回撤。")
+                st.warning("成長型池目前以價格趨勢／動能作為代理指標，並非完整財報品質分析；資料來源為 Yahoo Finance，台股代碼通常使用 .TW 或 .TWO。")
+
+                with st.expander("使用方式與策略規則", expanded=False):
+                    st.markdown("""
+                    - **震盪型網格**：偏好 ADX 較低、近期波動適中、價格未明顯單邊趨勢的標的。
+                    - **成長型網格**：偏好長期均線趨勢向上、近 60／120 日動能為正的標的；核心持有與網格交易資金分開看待。
+                    - **避免重複配置**：每檔股票只分配到一個主要策略池；分數不足時標記為「暫不納入」。
+                    - **風控**：各池預算、單檔上限、保留現金與每檔預算均由使用者設定；這些是配置上限，不是停損保證。
+                    - **回測限制**：示意網格以日收盤價判斷跨格，無法重建盤中成交順序；結果可能受跳空、流動性、滑價及樣本期間影響。
+                    """)
+
+                col_a, col_b = st.columns([1.2, 1])
+                with col_a:
+                    tickers_raw = st.text_area(
+                        "候選股票代碼（逗號或換行分隔）",
+                        value="2330.TW, 0050.TW, 2317.TW, AAPL, MSFT, NVDA",
+                        height=95,
+                        key="dual_grid_ticker_universe",
+                        help="請先輸入你要篩選的股票池；這個試用版不會自動掃描全市場。",
+                    )
+                    scan_period = st.selectbox("篩選資料期間", ["1y", "2y", "5y"], index=1, key="dual_grid_scan_period")
+                    scan_btn = st.button("🔎 分析候選股票", type="primary", key="dual_grid_scan_button")
+                with col_b:
+                    total_capital = st.number_input("系統總資金（元）", min_value=10000.0, value=1000000.0, step=50000.0, key="dual_grid_total_capital")
+                    reserve_pct = st.slider("保留現金比例（%）", min_value=10, max_value=80, value=50, step=5, key="dual_grid_reserve_pct")
+                    range_pool_pct = st.slider("可投資資金中分配給震盪池（%）", min_value=0, max_value=100, value=40, step=5, key="dual_grid_range_pool_pct")
+                    per_stock_pct = st.slider("單檔最高占總資金（%）", min_value=5, max_value=40, value=15, step=5, key="dual_grid_per_stock_pct")
+
+                if scan_btn:
+                    tickers = []
+                    for item in re.split(r"[,，;；\s]+", tickers_raw.upper()):
+                        item = item.strip()
+                        if item and item not in tickers:
+                            tickers.append(item)
+                    if not tickers:
+                        st.error("請至少輸入一個有效的股票代碼。")
+                    elif len(tickers) > 40:
+                        st.error("一次最多分析 40 檔，避免資料查詢過久。")
+                    else:
+                        analyses = []
+                        progress = st.progress(0)
+                        for idx, ticker in enumerate(tickers):
+                            with st.spinner(f"分析 {ticker}（{idx + 1}/{len(tickers)}）"):
+                                hist = _dual_grid_fetch_history(ticker, scan_period)
+                                item = _dual_grid_analyze(ticker, hist)
+                                if item:
+                                    analyses.append(item)
+                            progress.progress((idx + 1) / len(tickers))
+                        st.session_state["dual_grid_analysis_results"] = analyses
+                        st.session_state["dual_grid_analysis_tickers"] = tickers
+                        if analyses:
+                            st.success(f"完成 {len(analyses)} 檔候選股票分析。")
+                        else:
+                            st.warning("沒有足夠的日線資料。請檢查代碼、網路連線或更換期間。")
+
+                analyses = st.session_state.get("dual_grid_analysis_results", [])
+                if analyses:
+                    result_df = pd.DataFrame(analyses)
+                    result_df = result_df.sort_values(["主要策略池", "震盪分數", "成長分數"], ascending=[True, False, False])
+                    st.markdown("#### 候選股與策略池分配")
+                    st.dataframe(result_df.round(2), use_container_width=True, hide_index=True)
+                    pool_counts = result_df["主要策略池"].value_counts()
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("震盪型候選", int(pool_counts.get("震盪型網格", 0)))
+                    m2.metric("成長型候選", int(pool_counts.get("成長型網格", 0)))
+                    m3.metric("暫不納入", int(pool_counts.get("暫不納入", 0)))
+
+                    investable = total_capital * (1 - reserve_pct / 100)
+                    range_budget = investable * range_pool_pct / 100
+                    growth_budget = investable - range_budget
+                    st.markdown("#### 共用資金配置草案")
+                    allocation = pd.DataFrame([
+                        {"資金用途": "保留現金", "預算": total_capital * reserve_pct / 100, "占總資金%": reserve_pct},
+                        {"資金用途": "震盪型網格池", "預算": range_budget, "占總資金%": range_budget / total_capital * 100},
+                        {"資金用途": "成長型網格池（含核心持有預算）", "預算": growth_budget, "占總資金%": growth_budget / total_capital * 100},
+                    ])
+                    st.dataframe(allocation.round(2), use_container_width=True, hide_index=True)
+                    st.caption(f"單檔最高配置上限約 {total_capital * per_stock_pct / 100:,.0f} 元。此上限套用在總資金上；同一股票只允許分配到一個主要策略池。實際下單前仍需考量整股／零股規則、手續費最低收費、稅費與匯率。")
+
+                    st.markdown("#### 單一標的示意回測：網格 vs 買進持有 vs 定期定額")
+                    eligible = result_df[result_df["主要策略池"] != "暫不納入"]["股票代碼"].tolist()
+                    if eligible:
+                        bt_ticker = st.selectbox("回測標的", eligible, key="dual_grid_bt_ticker")
+                        bt_capital = st.number_input("回測本金（元）", min_value=10000.0, value=200000.0, step=10000.0, key="dual_grid_bt_capital")
+                        fee_pct = st.number_input("單邊手續費率（%）", min_value=0.0, max_value=1.0, value=0.1425, step=0.01, format="%.4f", key="dual_grid_bt_fee_pct")
+                        tax_pct = st.number_input("賣出交易稅率（%）", min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.3f", key="dual_grid_bt_tax_pct", help="台股普通股票賣出稅率常見值；ETF、不同商品及市場可能不同，請自行調整。")
+                        slippage_pct = st.number_input("單邊滑價假設（%）", min_value=0.0, max_value=2.0, value=0.05, step=0.01, format="%.3f", key="dual_grid_bt_slippage_pct")
+                        levels_count = st.slider("網格價位數", min_value=3, max_value=15, value=7, step=2, key="dual_grid_bt_levels")
+                        if st.button("▶️ 執行示意回測", key="dual_grid_run_backtest"):
+                            bt_history = _dual_grid_fetch_history(bt_ticker, scan_period)
+                            if bt_history.empty:
+                                st.error("無法取得回測歷史資料。")
+                            else:
+                                bt_result = _dual_grid_backtest(
+                                    bt_history["Close"], bt_capital,
+                                    fee_pct / 100, tax_pct / 100, slippage_pct / 100, levels_count,
+                                )
+                                if bt_result is None:
+                                    st.warning("資料不足以回測，至少需要約 60 個交易日。")
+                                else:
+                                    metrics, chart, params = bt_result
+                                    st.session_state["dual_grid_backtest_metrics"] = metrics
+                                    st.session_state["dual_grid_backtest_chart"] = chart
+                                    st.session_state["dual_grid_backtest_params"] = params
+                                    st.session_state["dual_grid_backtest_ticker"] = bt_ticker
+                        if st.session_state.get("dual_grid_backtest_ticker") == bt_ticker and "dual_grid_backtest_metrics" in st.session_state:
+                            metrics = st.session_state["dual_grid_backtest_metrics"]
+                            chart = st.session_state["dual_grid_backtest_chart"]
+                            params = st.session_state["dual_grid_backtest_params"]
+                            st.dataframe(metrics.round(2), use_container_width=True, hide_index=True)
+                            st.line_chart(chart.set_index("日期"), use_container_width=True)
+                            st.caption(f"網格回測固定參考區間：{params['lower']:.2f}–{params['upper']:.2f}；估算成交 {params['trades']} 次。期間約 {params['years']:.2f} 年。")
+                            st.warning("這是試用級示意模型：使用收盤價跨越價位模擬，不含盤中撮合、最低手續費、股數整數限制、股息、借券、停牌、跳空的真實成交順序或匯率。DCA 路徑與網格路徑採簡化估值，請勿直接視為可執行交易績效。")
+                    else:
+                        st.info("目前沒有分數達標的策略候選；依規則可以選擇暫不交易。")
+
+                st.markdown("#### 風控檢查清單")
+                st.markdown("- [ ] 確認單檔配置不超過設定上限，且同一股票沒有跨策略重複占用資金。\n- [ ] 檢查總投入、各池預算與保留現金是否相符。\n- [ ] 震盪型標的若出現明顯趨勢／區間失效，重新評估或暫停網格。\n- [ ] 成長型標的若基本面惡化，不能只因價格下跌就持續加碼。\n- [ ] 最大回撤 15% 僅為風險目標，不能保證達成；須用多市場、多期間和樣本外資料驗證。")
+
             if selected_module == "🤖 網格自動生成器":
                 st.markdown("### 🎛️ 智慧型動態網格策略與資金自動規劃器 (3.12 操盤手教學版)")
                 
