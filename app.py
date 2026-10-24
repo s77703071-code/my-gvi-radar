@@ -1121,32 +1121,17 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 安全精準版：修正選單消失問題，只對官方選單與右下角皇冠進行單點打壓
+# 🟢 恢復最穩定的安全防線：僅隱藏內部工具列與選單，100% 確保背景與左側選單完全正常
 hide_streamlit_style = """
     <style>
-    /* 1. 隱藏右上角三個點選單與頁首黑條 */
+    /* 隱藏右上角三個點選單與頁首 */
     #MainMenu {visibility: hidden !important; display: none !important;}
     header {visibility: hidden !important; display: none !important;}
     
-    /* 2. 隱藏右下角管理工具列 (Manage app) 與頁尾 */
+    /* 隱藏右下角開發者管理工具列 (Manage app) 與頁尾 */
     footer {visibility: hidden !important; display: none !important;}
     div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
     button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
-    
-    /* 3. 精準打壓：修正 button[class*="community"] 引起的側邊欄消失問題 */
-    .stCommunityBadge, 
-    div[class*="stCommunityBadge"], 
-    iframe[class*="stCommunityBadge"],
-    [id*="stCommunityBadge"],
-    a[href*="streamlit.io"],
-    div[data-testid="stDecoration"] {
-        visibility: hidden !important; 
-        display: none !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-        height: 0 !important;
-        width: 0 !important;
-    }
     </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
