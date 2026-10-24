@@ -1120,7 +1120,20 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
         st.info(f"比較模式以相同投入額比較配息組合與 {benchmark_symbol}（{benchmark_scope}）。舊系統未保存逐日歷史成分，故無法重建舊策略的歷史績效。")
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
-
+# 🟢 在這裡加入：強制隱藏右上方選單（三個點）與右下角管理元件 (Manage app)
+hide_streamlit_style = """
+    <style>
+    /* 隱藏右上角三個點選單與部署按鈕 */
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* 隱藏右下角的 Streamlit 頁尾與工具列 (Manage app) */
+    footer {visibility: hidden;}
+    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
     <style>
