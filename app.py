@@ -1121,61 +1121,31 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 修正版：100% 恢復主畫面完整結構不切邊，並改用全域混合選擇器強力打壓微小元件
+# 🟢 終極覆蓋：採用全域模糊匹配與手機端優先權最高 (!important) 的 CSS 樣式
 hide_streamlit_style = """
     <style>
-    /* 1. 徹底恢復原本網頁的完整坐標與排版，解決左邊畫面被切掉的問題 */
-    html, body {
-        overflow-x: hidden !important;
-        overflow-y: auto !important;
-        width: 100% !important;
-        height: 100% !important;
-    }
+    /* 1. 隱藏右上角三個點選單與頁首黑條 */
+    #MainMenu {visibility: hidden !important; display: none !important;}
+    header {visibility: hidden !important; display: none !important;}
     
-    .stApp {
-        position: relative !important;
-        top: 0 !important;
-        right: 0 !important;
-        bottom: 0 !important;
-        left: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        padding: 0px !important;
-        margin: 0px !important;
-    }
-
-    /* 2. 移除右上角選單、開發者 Header、部署控制元件與頁尾頁底 */
-    #MainMenu, header, footer, 
-    div[data-testid="stToolbar"], 
-    button[title="View Lightning app"] {
-        visibility: hidden !important;
-        display: none !important;
-        opacity: 0 !important;
-        height: 0px !important;
-        width: 0px !important;
-    }
-
-    /* 3. 多重模糊匹配與動態節點混合打壓：直接讓右下角所有粉紅皇冠與社群徽章在渲染層長寬歸零並透明化 */
-    .stCommunityBadge,
-    div[class*="stCommunityBadge"],
+    /* 2. 隱藏右下角管理工具列 (Manage app) 與頁尾 */
+    footer {visibility: hidden !important; display: none !important;}
+    div[data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+    button[title="View Lightning app"] {visibility: hidden !important; display: none !important;}
+    
+    /* 3. 終極防線：用模糊匹配、ID、類別以及外層所有可能包裹粉紅皇冠的容器強制隱藏 */
+    .stCommunityBadge, 
+    div[class*="stCommunityBadge"], 
     iframe[class*="stCommunityBadge"],
-    a[class*="stCommunityBadge"],
-    [class*="CommunityBadge"],
     [id*="stCommunityBadge"],
     a[href*="streamlit.io"],
     button[class*="community"] {
-        visibility: hidden !important;
+        visibility: hidden !important; 
         display: none !important;
         opacity: 0 !important;
         pointer-events: none !important;
-        position: absolute !important;
-        transform: scale(0) !important;
-        width: 0px !important;
-        height: 0px !important;
-        max-width: 0px !important;
-        max-height: 0px !important;
-        margin: 0px !important;
-        padding: 0px !important;
+        height: 0 !important;
+        width: 0 !important;
     }
     </style>
 """
