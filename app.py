@@ -1455,6 +1455,92 @@ else:
 DB_FILE = os.path.join(BASE_DIR, "market_cache.db")
 CACHE_TTL = 86400  # 快取有效期限：24 小時 (86400 秒)
 
+
+def _supabase_config():
+    """Read server-only Supabase credentials from Streamlit Secrets or environment."""
+    try:
+        section = st.secrets.get("supabase", {})
+    except Exception:
+        section = {}
+    if not isinstance(section, Mapping):
+        section = {}
+    url = str(os.getenv("SUPABASE_URL") or section.get("url") or "").strip().rstrip("/")
+    api_key = str(
+        os.getenv("SUPABASE_SECRET_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or section.get("secret_key")
+        or section.get("service_role_key")
+        or ""
+    ).strip()
+    return url, api_key
+
+
+def _supabase_enabled():
+    url, api_key = _supabase_config()
+    return bool(url and api_key)
+
+
+def _supabase_request(method, table, *, params=None, payload=None, prefer=None, rpc=False):
+    """Call Supabase PostgREST with a server-side key; callers must scope user rows."""
+    url, api_key = _supabase_config()
+    if not url or not api_key:
+        raise RuntimeError("尚未設定 Supabase URL 與伺服器端 Secret Key。")
+    path = f"/rest/v1/rpc/{table}" if rpc else f"/rest/v1/{table}"
+    headers = {"apikey": api_key, "Content-Type": "application/json"}
+    # Legacy service_role keys are JWTs. New sb_secret_* keys are sent only as apikey.
+    if api_key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    if prefer:
+        headers["Prefer"] = prefer
+    try:
+        response = requests.request(
+            method.upper(), url + path, headers=headers, params=params, json=payload,
+            timeout=(5, 25),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase 連線失敗：{exc}") from exc
+    if response.status_code >= 400:
+        if response.status_code == 409:
+            raise sqlite3.IntegrityError("Supabase 唯一欄位發生重複。")
+        detail = response.text[:500]
+        raise RuntimeError(f"Supabase {table} 操作失敗（HTTP {response.status_code}）：{detail}")
+    if not response.content:
+        return []
+    try:
+        return response.json()
+    except ValueError:
+        return []
+
+
+def _supabase_select(table, *, select="*", filters=None, order=None, limit=None):
+    params = {"select": select}
+    params.update(filters or {})
+    if order:
+        params["order"] = order
+    if limit is not None:
+        params["limit"] = str(int(limit))
+    rows = _supabase_request("GET", table, params=params)
+    return rows if isinstance(rows, list) else []
+
+
+def _supabase_upsert(table, rows, on_conflict):
+    if not rows:
+        return []
+    params = {"on_conflict": on_conflict}
+    result = _supabase_request(
+        "POST", table, params=params, payload=rows,
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+    return result if isinstance(result, list) else []
+
+
+PORTFOLIO_DEFAULT_SETTINGS = {
+    "target_stock_pct": 40.0, "target_bond_pct": 50.0,
+    "target_cash_pct": 10.0, "rebalance_threshold_pct": 5.0,
+    "drawdown_warning_pct": 8.0, "drawdown_review_pct": 12.0,
+    "drawdown_limit_pct": 15.0, "minimum_cash_twd": 0.0,
+}
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -1595,209 +1681,213 @@ def init_db():
 init_db()
 
 def _password_digest(password, salt_hex):
-    # Retained for the legacy in-app email-binding challenge flow only.
-    # Account passwords are verified exclusively by Supabase Auth.
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000
     ).hex()
 
 
-def _supabase_auth_config():
-    """Read Supabase Auth credentials from Streamlit Secrets or environment."""
-    try:
-        url = str(st.secrets.get("SUPABASE_URL", "") or "").strip().rstrip("/")
-        key = str(st.secrets.get("SUPABASE_ANON_KEY", "") or "").strip()
-    except Exception:
-        url, key = "", ""
-    url = url or os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    key = key or os.environ.get("SUPABASE_ANON_KEY", "").strip()
-    if not url or not key:
-        raise RuntimeError(
-            "尚未設定 Supabase。請在 Streamlit Cloud → Settings → Secrets 設定 "
-            "SUPABASE_URL 與 SUPABASE_ANON_KEY。"
-        )
-    if not re.match(r"^https://[A-Za-z0-9.-]+$", url):
-        raise RuntimeError("SUPABASE_URL 格式不正確，請確認是 Supabase 專案 URL。")
-    return url, key
-
-
-def _supabase_auth_request(path, payload=None, access_token=None, method="POST"):
-    url, anon_key = _supabase_auth_config()
-    headers = {"apikey": anon_key, "Content-Type": "application/json"}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-    else:
-        headers["Authorization"] = f"Bearer {anon_key}"
-    response = requests.request(
-        method.upper(),
-        f"{url}/auth/v1/{path.lstrip('/')}",
-        headers=headers,
-        json=payload,
-        timeout=20,
-    )
-    try:
-        body = response.json()
-    except Exception:
-        body = {}
-    if response.status_code >= 400:
-        message = body.get("msg") or body.get("message") or body.get("error_description") or body.get("error")
-        if response.status_code in (400, 401, 422):
-            raise ValueError(str(message or "帳號或密碼不正確。"))
-        raise RuntimeError(str(message or f"Supabase Auth 連線失敗（HTTP {response.status_code}）。"))
-    return body
-
-
-def _stable_local_user_id(auth_user_id):
-    """Stable positive integer for legacy SQLite user_id columns; derived from Supabase UUID."""
-    digest = hashlib.sha256(str(auth_user_id).encode("utf-8")).hexdigest()
-    return int(digest[:15], 16)
-
-
-def _ensure_local_account(auth_user):
-    """Create a local compatibility row; credentials remain exclusively in Supabase Auth."""
-    auth_id = str(auth_user.get("id") or "").strip()
-    if not auth_id:
-        raise RuntimeError("Supabase 沒有回傳有效的使用者 ID。")
-    metadata = auth_user.get("user_metadata") or auth_user.get("user", {}).get("user_metadata") or {}
-    email = str(auth_user.get("email") or auth_user.get("user", {}).get("email") or "").strip().lower()
-    username = str(metadata.get("username") or email.split("@")[0] or "user").strip()
-    user_id = _stable_local_user_id(auth_id)
-    defaults = {
-        "target_stock_pct": 40.0, "target_bond_pct": 50.0,
-        "target_cash_pct": 10.0, "rebalance_threshold_pct": 5.0,
-        "drawdown_warning_pct": 8.0, "drawdown_review_pct": 12.0,
-        "drawdown_limit_pct": 15.0, "minimum_cash_twd": 0.0,
-    }
+def _register_account(username, password, email):
     salt = os.urandom(16).hex()
-    # This random digest is never used for authentication. Supabase Auth verifies passwords.
-    placeholder_hash = _password_digest(secrets.token_urlsafe(32), salt)
+    digest = _password_digest(password, salt)
+    defaults = PORTFOLIO_DEFAULT_SETTINGS
+    if _supabase_enabled():
+        username_key = str(username).strip().casefold()
+        def recover_existing_account():
+            existing_rows = _supabase_select(
+                "app_users", select="id,username,password_salt,password_hash",
+                filters={"username_key": f"eq.{username_key}"}, limit=1,
+            )
+            if not existing_rows:
+                return None
+            existing = existing_rows[0]
+            candidate = _password_digest(password, existing["password_salt"])
+            if not hmac.compare_digest(candidate, existing["password_hash"]):
+                raise sqlite3.IntegrityError("這個帳號名稱已有人使用。")
+            return int(existing["id"])
+
+        existing_user_id = recover_existing_account()
+        if existing_user_id is not None:
+            _ensure_supabase_portfolio_defaults(existing_user_id)
+            return existing_user_id, False
+
+        created_at = pd.Timestamp.now().isoformat(timespec="seconds")
+        try:
+            created = _supabase_request(
+                "POST", "app_users",
+                payload=[{
+                    "username": str(username).strip(), "username_key": username_key,
+                    "email": str(email).strip().lower(), "password_salt": salt,
+                    "password_hash": digest, "created_at": created_at,
+                }],
+                prefer="return=representation",
+            )
+        except sqlite3.IntegrityError:
+            # A simultaneous registration may win after our initial lookup.
+            existing_user_id = recover_existing_account()
+            if existing_user_id is None:
+                raise
+            _ensure_supabase_portfolio_defaults(existing_user_id)
+            return existing_user_id, False
+
+        created_row = created[0] if isinstance(created, list) and created else (
+            created if isinstance(created, dict) else None
+        )
+        user_id = int(created_row["id"]) if created_row and created_row.get("id") is not None else None
+        if user_id is None:
+            # Some API/proxy configurations acknowledge the insert without returning
+            # representation. Read the row back before declaring registration failed.
+            created_rows = _supabase_select(
+                "app_users", select="id", filters={"username_key": f"eq.{username_key}"}, limit=1
+            )
+            user_id = int(created_rows[0]["id"]) if created_rows else None
+        if user_id is None:
+            raise RuntimeError(
+                "Supabase 已接受註冊請求，但讀不到新帳號 ID。請確認 app_users 的 API 權限、"
+                "RLS 與 Secret Key 設定；若帳號已建立，可用相同帳密從「登入」頁登入。"
+            )
+        try:
+            _ensure_supabase_portfolio_defaults(user_id)
+        except Exception:
+            # Keep the account itself; it can still log in, and settings can be
+            # initialized on the next successful registration/login attempt.
+            raise
+        # Legacy shared rows are imported explicitly; never attach another account's
+        # old portfolio to the first cloud user during ordinary registration.
+        return user_id, False
+
     with sqlite3.connect(DB_FILE, timeout=30) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT id FROM app_users WHERE id=?", (user_id,)).fetchone()
         account_count = conn.execute("SELECT COUNT(*) FROM app_users").fetchone()[0]
-        if not existing:
-            local_name = username[:32]
-            conflict = conn.execute(
-                "SELECT 1 FROM app_users WHERE username=? COLLATE NOCASE", (local_name,)
-            ).fetchone()
-            if conflict:
-                local_name = f"{username[:22]}_{str(user_id)[-8:]}"
-            conn.execute(
-                "INSERT INTO app_users(id,username,email,password_salt,password_hash,created_at) "
-                "VALUES(?,?,?,?,?,?)",
-                (user_id, local_name, email, salt, placeholder_hash,
-                 pd.Timestamp.now().isoformat(timespec="seconds")),
-            )
-            if account_count == 0:
+        cur = conn.execute(
+            "INSERT INTO app_users(username,email,password_salt,password_hash,created_at) VALUES(?,?,?,?,?)",
+            (username, email, salt, digest, pd.Timestamp.now().isoformat(timespec="seconds")),
+        )
+        user_id = int(cur.lastrowid)
+        if account_count == 0:
+            # Preserve the existing shared portfolio under the first account.
+            conn.execute("UPDATE portfolio_positions SET user_id=? WHERE user_id IS NULL", (user_id,))
+            conn.execute("UPDATE portfolio_snapshots SET user_id=? WHERE user_id IS NULL", (user_id,))
+            for key, value in conn.execute(
+                "SELECT setting_key,setting_value FROM portfolio_settings"
+            ).fetchall():
                 conn.execute(
-                    "UPDATE portfolio_positions SET user_id=? WHERE user_id IS NULL", (user_id,)
+                    "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES(?,?,?)",
+                    (user_id, key, value),
                 )
-                conn.execute(
-                    "UPDATE portfolio_snapshots SET user_id=? WHERE user_id IS NULL", (user_id,)
-                )
-                for key, value in conn.execute(
-                    "SELECT setting_key,setting_value FROM portfolio_settings"
-                ).fetchall():
-                    conn.execute(
-                        "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) "
-                        "VALUES(?,?,?)", (user_id, key, value)
-                    )
         for key, value in defaults.items():
             conn.execute(
-                "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) "
-                "VALUES(?,?,?)", (user_id, key, value)
+                "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES(?,?,?)",
+                (user_id, key, value),
             )
         conn.commit()
-    return user_id, account_count == 0, username, email
+    return user_id, account_count == 0
 
 
-def _register_account(username, password, email):
-    """Register through Supabase Auth; never store a reusable password hash locally."""
-    result = _supabase_auth_request(
-        "signup",
-        {"email": email, "password": password, "data": {"username": username}},
+def _ensure_supabase_portfolio_defaults(user_id):
+    """Insert only missing default settings, preserving any user-customized values."""
+    user_id = int(user_id)
+    existing = _supabase_select(
+        "portfolio_user_settings", select="setting_key",
+        filters={"user_id": f"eq.{user_id}"},
     )
-    auth_user = result.get("user") or {}
-    session = result.get("session")
-    # Supabase may require email confirmation before creating a session.
-    if not session or not auth_user.get("id"):
-        return None, False
-    user_id, is_first_account, _, _ = _ensure_local_account(auth_user)
-    return user_id, is_first_account
+    existing_keys = {str(row.get("setting_key")) for row in existing}
+    missing = [
+        {"user_id": user_id, "setting_key": key, "setting_value": value}
+        for key, value in PORTFOLIO_DEFAULT_SETTINGS.items()
+        if key not in existing_keys
+    ]
+    _supabase_upsert("portfolio_user_settings", missing, "user_id,setting_key")
 
 
-def _verify_account(email, password):
-    """Authenticate with Supabase; login identifier is the registered email address."""
-    try:
-        result = _supabase_auth_request(
-            "token?grant_type=password", {"email": email, "password": password}
+def _verify_account(username, password):
+    if _supabase_enabled():
+        rows = _supabase_select(
+            "app_users", select="id,username,password_salt,password_hash",
+            filters={"username_key": f"eq.{str(username).strip().casefold()}"}, limit=1,
         )
-    except (ValueError, RuntimeError):
+        row = rows[0] if rows else None
+        if not row:
+            return None
+        candidate = _password_digest(password, row["password_salt"])
+        if hmac.compare_digest(candidate, row["password_hash"]):
+            return {"id": int(row["id"]), "username": row["username"]}
         return None
-    auth_user = result.get("user") or {}
-    if not auth_user.get("id"):
-        return None
-    try:
-        user_id, _, username, user_email = _ensure_local_account(auth_user)
-    except Exception:
-        return None
-    return {
-        "id": user_id,
-        "username": username,
-        "email": user_email,
-        "supabase_user_id": str(auth_user["id"]),
-        "access_token": result.get("access_token", ""),
-    }
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT id,username,password_salt,password_hash FROM app_users WHERE username=? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
+    if row and hmac.compare_digest(_password_digest(password, row[2]), row[3]):
+        return {"id": int(row[0]), "username": row[1]}
+    return None
 
 
-def _request_supabase_password_reset(email):
-    """Ask Supabase Auth to send its recovery email."""
-    _supabase_auth_request("recover", {"email": email})
-
-
-def _complete_supabase_password_reset(email, token, new_password):
-    """Verify Supabase recovery OTP, then set a new password using its short-lived token."""
-    verified = _supabase_auth_request(
-        "verify", {"type": "recovery", "email": email, "token": token}
-    )
-    access_token = str(verified.get("access_token") or "")
-    if not access_token:
-        raise ValueError("驗證碼無效或已逾時，請重新寄送密碼重設信。")
-    _supabase_auth_request(
-        "user", {"password": new_password}, access_token=access_token, method="PUT"
-    )
+def _find_user_id_by_username(username):
+    if _supabase_enabled():
+        rows = _supabase_select(
+            "app_users", select="id",
+            filters={"username_key": f"eq.{str(username).strip().casefold()}"}, limit=1,
+        )
+        return int(rows[0]["id"]) if rows else None
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (username,)
+        ).fetchone()
+    return int(row[0]) if row else None
 
 
 def _request_account_code(user_id, purpose, email=None):
     """Send a short-lived one-time code for password reset or email binding."""
     user_id = int(user_id)
     now = time.time()
-    with sqlite3.connect(DB_FILE, timeout=30) as conn:
-        row = conn.execute("SELECT email FROM app_users WHERE id=?", (user_id,)).fetchone()
-        if not row:
+    if _supabase_enabled():
+        users = _supabase_select("app_users", select="email", filters={"id": f"eq.{user_id}"}, limit=1)
+        if not users:
             return False
-        target_email = str(email or row[0] or "").strip().lower()
+        target_email = str(email or users[0].get("email") or "").strip().lower()
         if not target_email:
             return False
-        previous = conn.execute(
-            "SELECT sent_at FROM account_email_challenges WHERE user_id=? AND purpose=?",
-            (user_id, purpose),
-        ).fetchone()
-        if previous and now - float(previous[0]) < 60:
+        previous = _supabase_select(
+            "account_email_challenges", select="sent_at",
+            filters={"user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"}, limit=1,
+        )
+        if previous and now - float(previous[0]["sent_at"]) < 60:
             return False
+    else:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            row = conn.execute("SELECT email FROM app_users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                return False
+            target_email = str(email or row[0] or "").strip().lower()
+            if not target_email:
+                return False
+            previous = conn.execute(
+                "SELECT sent_at FROM account_email_challenges WHERE user_id=? AND purpose=?",
+                (user_id, purpose),
+            ).fetchone()
+            if previous and now - float(previous[0]) < 60:
+                return False
     code = f"{secrets.randbelow(1_000_000):06d}"
     salt = os.urandom(16).hex()
     digest = _password_digest(code, salt)
-    with sqlite3.connect(DB_FILE, timeout=30) as conn:
-        conn.execute(
-            "INSERT INTO account_email_challenges(user_id,purpose,pending_email,code_salt,code_hash,expires_at,sent_at,attempts) "
-            "VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(user_id,purpose) DO UPDATE SET "
-            "pending_email=excluded.pending_email,code_salt=excluded.code_salt,code_hash=excluded.code_hash,"
-            "expires_at=excluded.expires_at,sent_at=excluded.sent_at,attempts=0",
-            (user_id, purpose, target_email if purpose == "bind_email" else None,
-             salt, digest, now + 600, now),
-        )
-        conn.commit()
+    challenge = {
+        "user_id": user_id, "purpose": purpose,
+        "pending_email": target_email if purpose == "bind_email" else None,
+        "code_salt": salt, "code_hash": digest,
+        "expires_at": now + 600, "sent_at": now, "attempts": 0,
+    }
+    if _supabase_enabled():
+        _supabase_upsert("account_email_challenges", [challenge], "user_id,purpose")
+    else:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            conn.execute(
+                "INSERT INTO account_email_challenges(user_id,purpose,pending_email,code_salt,code_hash,expires_at,sent_at,attempts) "
+                "VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(user_id,purpose) DO UPDATE SET "
+                "pending_email=excluded.pending_email,code_salt=excluded.code_salt,code_hash=excluded.code_hash,"
+                "expires_at=excluded.expires_at,sent_at=excluded.sent_at,attempts=0",
+                (user_id, purpose, challenge["pending_email"], salt, digest, now + 600, now),
+            )
+            conn.commit()
     try:
         sender, app_password = get_gmail_secret_values(st.secrets)
         if not sender or not app_password:
@@ -1809,51 +1899,86 @@ def _request_account_code(user_id, purpose, email=None):
             sender, app_password,
         )
     except Exception:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (user_id, purpose))
-            conn.commit()
+        if _supabase_enabled():
+            _supabase_request("DELETE", "account_email_challenges", params={
+                "user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"
+            })
+        else:
+            with sqlite3.connect(DB_FILE) as conn:
+                conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (user_id, purpose))
+                conn.commit()
         raise
     return True
 
 
 def _check_email_code(user_id, purpose, code):
     now = time.time()
+    user_id = int(user_id)
+    if _supabase_enabled():
+        rows = _supabase_select(
+            "account_email_challenges", select="pending_email,code_salt,code_hash,expires_at,attempts",
+            filters={"user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"}, limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        pending_email, salt, expected = row.get("pending_email"), row["code_salt"], row["code_hash"]
+        expires_at, attempts = float(row["expires_at"]), int(row.get("attempts", 0))
+        if expires_at < now or attempts >= 5:
+            _supabase_request("DELETE", "account_email_challenges", params={
+                "user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"
+            })
+            return None
+        if not hmac.compare_digest(_password_digest(str(code).strip(), salt), expected):
+            _supabase_request("PATCH", "account_email_challenges", params={
+                "user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"
+            }, payload={"attempts": attempts + 1})
+            return None
+        _supabase_request("DELETE", "account_email_challenges", params={
+            "user_id": f"eq.{user_id}", "purpose": f"eq.{purpose}"
+        })
+        return pending_email if purpose == "bind_email" else True
+
     with sqlite3.connect(DB_FILE, timeout=30) as conn:
         row = conn.execute(
             "SELECT pending_email,code_salt,code_hash,expires_at,attempts FROM account_email_challenges "
-            "WHERE user_id=? AND purpose=?", (int(user_id), purpose),
+            "WHERE user_id=? AND purpose=?", (user_id, purpose),
         ).fetchone()
         if not row:
             return None
         pending_email, salt, expected, expires_at, attempts = row
         if float(expires_at) < now or int(attempts) >= 5:
-            conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (int(user_id), purpose))
+            conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (user_id, purpose))
             conn.commit()
             return None
         if not hmac.compare_digest(_password_digest(str(code).strip(), salt), expected):
             conn.execute(
                 "UPDATE account_email_challenges SET attempts=attempts+1 WHERE user_id=? AND purpose=?",
-                (int(user_id), purpose),
+                (user_id, purpose),
             )
             conn.commit()
             return None
-        conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (int(user_id), purpose))
+        conn.execute("DELETE FROM account_email_challenges WHERE user_id=? AND purpose=?", (user_id, purpose))
         conn.commit()
     return pending_email if purpose == "bind_email" else True
 
 
 def _reset_account_password(username, code, new_password):
-    with sqlite3.connect(DB_FILE, timeout=30) as conn:
-        row = conn.execute("SELECT id FROM app_users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
-    if not row or not _check_email_code(row[0], "password_reset", code):
+    user_id = _find_user_id_by_username(username)
+    if user_id is None or not _check_email_code(user_id, "password_reset", code):
         return False
     salt = os.urandom(16).hex()
-    with sqlite3.connect(DB_FILE, timeout=30) as conn:
-        conn.execute(
-            "UPDATE app_users SET password_salt=?,password_hash=? WHERE id=?",
-            (salt, _password_digest(new_password, salt), int(row[0])),
-        )
-        conn.commit()
+    if _supabase_enabled():
+        _supabase_request("PATCH", "app_users", params={"id": f"eq.{user_id}"}, payload={
+            "password_salt": salt, "password_hash": _password_digest(new_password, salt),
+        })
+    else:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            conn.execute(
+                "UPDATE app_users SET password_salt=?,password_hash=? WHERE id=?",
+                (salt, _password_digest(new_password, salt), int(user_id)),
+            )
+            conn.commit()
     return True
 
 
@@ -1861,9 +1986,12 @@ def _confirm_recovery_email(user_id, code):
     email = _check_email_code(user_id, "bind_email", code)
     if not email:
         return False
-    with sqlite3.connect(DB_FILE, timeout=30) as conn:
-        conn.execute("UPDATE app_users SET email=? WHERE id=?", (email, int(user_id)))
-        conn.commit()
+    if _supabase_enabled():
+        _supabase_request("PATCH", "app_users", params={"id": f"eq.{int(user_id)}"}, payload={"email": email})
+    else:
+        with sqlite3.connect(DB_FILE, timeout=30) as conn:
+            conn.execute("UPDATE app_users SET email=? WHERE id=?", (email, int(user_id)))
+            conn.commit()
     return True
 
 def parse_roe(raw_roe):
@@ -5285,6 +5413,12 @@ def _clear_finmind_session_token(token_key, acknowledgement_key):
 
 st.sidebar.markdown("### 🔒 操盤手帳號")
 auth_user = st.session_state.get("auth_user")
+if _supabase_enabled():
+    st.sidebar.caption("☁️ 帳號與投資組合資料庫：Supabase 雲端")
+else:
+    st.sidebar.warning(
+        "⚠️ 尚未設定 Supabase；目前帳號與投資組合仍存於本機 SQLite，部署環境重建時可能遺失。"
+    )
 if auth_user:
     st.sidebar.success(f"已登入：{auth_user['username']}")
     st.sidebar.button("登出", key="account_logout", on_click=_logout_account)
@@ -5331,29 +5465,35 @@ else:
         login_tab, register_tab, reset_tab = st.tabs(["登入", "建立帳號", "忘記密碼"])
         with login_tab:
             with st.form("account_login_form_main"):
-                login_name = st.text_input("註冊 Email", key="login_username_main").strip().lower()
+                login_name = st.text_input("帳號", key="login_username_main").strip()
                 login_password = st.text_input("密碼", type="password", key="login_password_main")
                 login_submit = st.form_submit_button("登入", use_container_width=True)
             if login_submit:
-                account = _verify_account(login_name, login_password)
-                if account:
-                    st.session_state["auth_user"] = account
-                    st.session_state.pop("account_login_view", None)
-                    st.rerun()
-                st.error("登入失敗。請確認 Email、密碼，或先完成 Supabase 寄出的信箱驗證。")
+                try:
+                    account = _verify_account(login_name, login_password)
+                    if account:
+                        st.session_state["auth_user"] = account
+                        st.session_state.pop("account_login_view", None)
+                        st.rerun()
+                    st.error("帳號或密碼不正確。")
+                except Exception as login_error:
+                    st.error(f"目前無法連線驗證帳號：{login_error}")
         with register_tab:
-            st.caption("帳號驗證由 Supabase Auth 管理；登入時請使用註冊 Email。")
+            if _supabase_enabled():
+                st.caption("新帳號與個人投資組合將儲存在 Supabase，並依帳號分開保存。")
+            else:
+                st.caption("尚未設定 Supabase；目前新帳號會存於本機資料庫，部署環境重建時可能遺失。")
             with st.form("account_register_form_main"):
-                register_name = st.text_input("顯示帳號（3–32 位英數或底線）", key="register_username_main").strip()
-                register_email = st.text_input("Email（登入與密碼重設使用）", key="register_email_main").strip().lower()
+                register_name = st.text_input("建立帳號（3–32 位英數或底線）", key="register_username_main").strip()
+                register_email = st.text_input("備援 Email（用於忘記密碼）", key="register_email_main").strip().lower()
                 register_password = st.text_input("建立密碼（至少 8 位）", type="password", key="register_password_main")
                 register_confirm = st.text_input("再次輸入密碼", type="password", key="register_password_confirm_main")
-                register_submit = st.form_submit_button("建立帳號", use_container_width=True)
+                register_submit = st.form_submit_button("註冊並登入", use_container_width=True)
             if register_submit:
                 if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", register_name):
-                    st.error("顯示帳號需為 3–32 位英數字或底線。")
+                    st.error("帳號需為 3–32 位英數字或底線。")
                 elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", register_email):
-                    st.error("請輸入有效的 Email。")
+                    st.error("請輸入有效的 Email，作為忘記密碼時的驗證信箱。")
                 elif len(register_password) < 8:
                     st.error("密碼至少需要 8 位。")
                 elif register_password != register_confirm:
@@ -5361,59 +5501,47 @@ else:
                 else:
                     try:
                         user_id, is_first_account = _register_account(register_name, register_password, register_email)
-                        if user_id is None:
-                            st.success("註冊申請已送出。請先查看 Email 並完成 Supabase 信箱驗證，再使用 Email 與密碼登入。")
-                        else:
-                            st.session_state["auth_user"] = {
-                                "id": user_id, "username": register_name, "email": register_email
-                            }
-                            if is_first_account:
-                                st.session_state["account_notice"] = "已建立第一個帳號；本次執行環境中可辨識的既有共用投資組合資料已歸入此帳號。"
-                            st.session_state.pop("account_login_view", None)
-                            st.rerun()
-                    except ValueError as exc:
-                        st.error(f"註冊未完成：{exc}")
-                    except Exception as exc:
-                        st.error(f"註冊未完成：{exc}")
+                        st.session_state["auth_user"] = {"id": user_id, "username": register_name}
+                        st.session_state.pop("account_login_view", None)
+                        if is_first_account:
+                            st.session_state["account_notice"] = "已建立第一個帳號；原有共用投資組合資料已保留並歸入此帳號。"
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("這個帳號名稱已有人使用。")
+                    except Exception as register_error:
+                        st.error(f"註冊目前無法完成：{register_error}")
         with reset_tab:
-            st.caption("Supabase 將寄送一次性驗證碼；請在信件範本中使用 {{ .Token }}，再於此輸入驗證碼。")
+            st.caption("驗證碼會寄到帳號的備援 Email；寄件服務需先設定 Gmail Secrets。")
             with st.form("password_reset_request_form_main"):
-                reset_email = st.text_input("註冊 Email", key="reset_request_email_main").strip().lower()
-                request_reset = st.form_submit_button("寄送密碼重設驗證碼", use_container_width=True)
+                reset_name_input = st.text_input("帳號", key="reset_request_username_main").strip()
+                request_reset = st.form_submit_button("寄送重設驗證碼", use_container_width=True)
             if request_reset:
-                if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", reset_email):
-                    st.error("請輸入有效的 Email。")
-                else:
+                st.session_state["password_reset_username"] = reset_name_input
+                reset_user_id = _find_user_id_by_username(reset_name_input)
+                if reset_user_id is not None:
                     try:
-                        _request_supabase_password_reset(reset_email)
-                        st.session_state["supabase_reset_email"] = reset_email
-                        st.success("若此 Email 已註冊，Supabase 將寄送驗證碼。請查看收件匣及垃圾郵件匣。")
-                    except Exception as exc:
-                        st.error(f"目前無法寄送重設信：{exc}")
-            pending_reset_email = st.session_state.get("supabase_reset_email", "")
-            if pending_reset_email:
+                        _request_account_code(reset_user_id, "password_reset")
+                    except Exception:
+                        st.error("目前無法寄送驗證信，請稍後再試或聯絡系統管理者。")
+                st.info("若帳號已設定備援信箱，驗證碼會寄到該信箱；請檢查垃圾郵件匣。")
+            reset_name = st.session_state.get("password_reset_username", "")
+            if reset_name:
                 with st.form("password_reset_complete_form_main"):
-                    st.caption(f"重設帳號：{pending_reset_email}")
-                    reset_token = st.text_input("Email 中的驗證碼", max_chars=12, key="supabase_reset_token_main").strip()
-                    reset_new_password = st.text_input("新密碼（至少 8 位）", type="password", key="supabase_reset_new_password_main")
-                    reset_confirm = st.text_input("再次輸入新密碼", type="password", key="supabase_reset_confirm_password_main")
-                    complete_reset = st.form_submit_button("確認重設密碼", use_container_width=True)
+                    st.caption(f"重設帳號：{reset_name}")
+                    reset_code = st.text_input("六位數驗證碼", max_chars=6, key="password_reset_code_main")
+                    reset_new_password = st.text_input("新密碼（至少 8 位）", type="password", key="password_reset_new_password_main")
+                    reset_confirm = st.text_input("再次輸入新密碼", type="password", key="password_reset_confirm_main")
+                    complete_reset = st.form_submit_button("重設密碼", use_container_width=True)
                 if complete_reset:
                     if len(reset_new_password) < 8:
                         st.error("新密碼至少需要 8 位。")
                     elif reset_new_password != reset_confirm:
                         st.error("兩次輸入的新密碼不一致。")
-                    elif not reset_token:
-                        st.error("請輸入 Email 中的驗證碼。")
+                    elif _reset_account_password(reset_name, reset_code, reset_new_password):
+                        st.session_state.pop("password_reset_username", None)
+                        st.success("密碼已重設，請使用新密碼登入。")
                     else:
-                        try:
-                            _complete_supabase_password_reset(
-                                pending_reset_email, reset_token, reset_new_password
-                            )
-                            st.session_state.pop("supabase_reset_email", None)
-                            st.success("密碼已重設，請使用新密碼登入。")
-                        except Exception as exc:
-                            st.error(f"密碼重設失敗：{exc}")
+                        st.error("驗證碼無效、已逾時或錯誤次數過多。")
     back_cols = st.columns([1, 1.5, 1])
     with back_cols[1]:
         if st.button("返回首頁", key="account_login_back", use_container_width=True):
@@ -8968,14 +9096,29 @@ if auth_user:
         portfolio_user_id = int(auth_user["id"])
 
         def _portfolio_load_settings():
+            if _supabase_enabled():
+                rows = _supabase_select(
+                    "portfolio_user_settings", select="setting_key,setting_value",
+                    filters={"user_id": f"eq.{portfolio_user_id}"},
+                )
+                values = {str(row["setting_key"]): float(row["setting_value"]) for row in rows}
+                return {**PORTFOLIO_DEFAULT_SETTINGS, **values}
             with sqlite3.connect(DB_FILE) as _conn:
                 _rows = _conn.execute(
                     "SELECT setting_key, setting_value FROM portfolio_user_settings WHERE user_id=?",
                     (portfolio_user_id,),
                 ).fetchall()
-            return {str(k): float(v) for k, v in _rows}
+            values = {str(k): float(v) for k, v in _rows}
+            return {**PORTFOLIO_DEFAULT_SETTINGS, **values}
 
         def _portfolio_save_setting(key, value):
+            if _supabase_enabled():
+                _supabase_upsert("portfolio_user_settings", [{
+                    "user_id": portfolio_user_id,
+                    "setting_key": str(key),
+                    "setting_value": float(value),
+                }], "user_id,setting_key")
+                return
             with sqlite3.connect(DB_FILE) as _conn:
                 _conn.execute(
                     "INSERT INTO portfolio_user_settings(user_id,setting_key,setting_value) VALUES (?,?,?) "
@@ -8985,6 +9128,24 @@ if auth_user:
                 _conn.commit()
 
         def _portfolio_positions():
+            if _supabase_enabled():
+                rows = _supabase_select(
+                    "portfolio_positions",
+                    select="id,symbol,name,asset_type,currency,quantity,price,fx_to_twd,cost_basis_twd,updated_at",
+                    filters={"user_id": f"eq.{portfolio_user_id}"}, order="id.desc",
+                )
+                frame = pd.DataFrame(rows)
+                if frame.empty:
+                    return pd.DataFrame(columns=[
+                        "id", "代碼", "名稱", "資產類型", "幣別", "數量", "最新價格",
+                        "換算台幣匯率", "台幣成本", "更新時間",
+                    ])
+                return frame.rename(columns={
+                    "symbol": "代碼", "name": "名稱", "asset_type": "資產類型",
+                    "currency": "幣別", "quantity": "數量", "price": "最新價格",
+                    "fx_to_twd": "換算台幣匯率", "cost_basis_twd": "台幣成本",
+                    "updated_at": "更新時間",
+                })
             with sqlite3.connect(DB_FILE) as _conn:
                 return pd.read_sql_query(
                     "SELECT id, symbol AS 代碼, name AS 名稱, asset_type AS 資產類型, currency AS 幣別, "
@@ -9050,14 +9211,24 @@ if auth_user:
             elif p_currency == "TWD" and abs(p_fx - 1.0) > 0.000001:
                 st.error("台幣資產的匯率請填 1。")
             else:
-                with sqlite3.connect(DB_FILE) as _conn:
-                    _conn.execute(
-                        "INSERT INTO portfolio_positions(user_id,symbol,name,asset_type,currency,quantity,price,fx_to_twd,cost_basis_twd,updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        (portfolio_user_id, p_symbol, p_name, p_type, p_currency, float(p_quantity), float(p_price),
-                         float(p_fx), float(p_cost), pd.Timestamp.now().isoformat(timespec="seconds"))
-                    )
-                    _conn.commit()
+                position_data = {
+                    "user_id": portfolio_user_id, "symbol": p_symbol, "name": p_name,
+                    "asset_type": p_type, "currency": p_currency,
+                    "quantity": float(p_quantity), "price": float(p_price),
+                    "fx_to_twd": float(p_fx), "cost_basis_twd": float(p_cost),
+                    "updated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+                }
+                if _supabase_enabled():
+                    _supabase_request("POST", "portfolio_positions", payload=[position_data])
+                else:
+                    with sqlite3.connect(DB_FILE) as _conn:
+                        _conn.execute(
+                            "INSERT INTO portfolio_positions(user_id,symbol,name,asset_type,currency,quantity,price,fx_to_twd,cost_basis_twd,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (portfolio_user_id, p_symbol, p_name, p_type, p_currency, float(p_quantity), float(p_price),
+                             float(p_fx), float(p_cost), position_data["updated_at"])
+                        )
+                        _conn.commit()
                 st.success("持倉已新增。請注意：最新價格與匯率由你輸入，需自行更新。")
 
         positions = _portfolio_positions()
@@ -9159,32 +9330,70 @@ if auth_user:
                 elif u_currency == "TWD" and abs(u_fx - 1.0) > 0.000001:
                     st.error("台幣資產的匯率請填 1。")
                 else:
-                    with sqlite3.connect(DB_FILE) as _conn:
-                        _conn.execute(
-                            "UPDATE portfolio_positions SET name=?,asset_type=?,currency=?,quantity=?,price=?,fx_to_twd=?,cost_basis_twd=?,updated_at=? WHERE id=? AND user_id=?",
-                            (u_name, u_type, u_currency, float(u_quantity), float(u_price), float(u_fx), float(u_cost),
-                             pd.Timestamp.now().isoformat(timespec="seconds"), int(selected_id), portfolio_user_id)
-                        )
-                        _conn.commit()
+                    update_data = {
+                        "name": u_name, "asset_type": u_type, "currency": u_currency,
+                        "quantity": float(u_quantity), "price": float(u_price),
+                        "fx_to_twd": float(u_fx), "cost_basis_twd": float(u_cost),
+                        "updated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+                    }
+                    if _supabase_enabled():
+                        _supabase_request("PATCH", "portfolio_positions", params={
+                            "id": f"eq.{int(selected_id)}", "user_id": f"eq.{portfolio_user_id}"
+                        }, payload=update_data)
+                    else:
+                        with sqlite3.connect(DB_FILE) as _conn:
+                            _conn.execute(
+                                "UPDATE portfolio_positions SET name=?,asset_type=?,currency=?,quantity=?,price=?,fx_to_twd=?,cost_basis_twd=?,updated_at=? WHERE id=? AND user_id=?",
+                                (u_name, u_type, u_currency, float(u_quantity), float(u_price), float(u_fx), float(u_cost),
+                                 update_data["updated_at"], int(selected_id), portfolio_user_id)
+                            )
+                            _conn.commit()
                     st.success("持倉更新完成。請重新整理頁面查看最新計算。")
             if delete_position:
-                with sqlite3.connect(DB_FILE) as _conn:
-                    _conn.execute("DELETE FROM portfolio_positions WHERE id=? AND user_id=?", (int(selected_id), portfolio_user_id))
-                    _conn.commit()
+                if _supabase_enabled():
+                    _supabase_request("DELETE", "portfolio_positions", params={
+                        "id": f"eq.{int(selected_id)}", "user_id": f"eq.{portfolio_user_id}"
+                    })
+                else:
+                    with sqlite3.connect(DB_FILE) as _conn:
+                        _conn.execute("DELETE FROM portfolio_positions WHERE id=? AND user_id=?", (int(selected_id), portfolio_user_id))
+                        _conn.commit()
                 st.success("持倉已刪除。")
 
             st.markdown("#### 5. 組合淨值紀錄與回撤參考")
             st.caption("按下紀錄才會新增一筆淨值快照。快照尚未校正入金／出金，因此回撤僅是粗略參考，不能當成正式績效或最大回撤統計。")
             if st.button("📌 記錄目前組合市值", key="portfolio_record_snapshot"):
-                with sqlite3.connect(DB_FILE) as _conn:
-                    _conn.execute(
-                        "INSERT INTO portfolio_snapshots(user_id,snapshot_date,total_value_twd,stock_value_twd,bond_value_twd,cash_value_twd,note) VALUES(?,?,?,?,?,?,?)",
-                        (portfolio_user_id, pd.Timestamp.now().isoformat(timespec="seconds"), total_value, type_values["stock"], type_values["bond"], type_values["cash"], "手動快照；未調整外部現金流")
-                    )
-                    _conn.commit()
+                snapshot_data = {
+                    "user_id": portfolio_user_id,
+                    "snapshot_date": pd.Timestamp.now().isoformat(timespec="seconds"),
+                    "total_value_twd": total_value, "stock_value_twd": type_values["stock"],
+                    "bond_value_twd": type_values["bond"], "cash_value_twd": type_values["cash"],
+                    "note": "手動快照；未調整外部現金流",
+                }
+                if _supabase_enabled():
+                    _supabase_request("POST", "portfolio_snapshots", payload=[snapshot_data])
+                else:
+                    with sqlite3.connect(DB_FILE) as _conn:
+                        _conn.execute(
+                            "INSERT INTO portfolio_snapshots(user_id,snapshot_date,total_value_twd,stock_value_twd,bond_value_twd,cash_value_twd,note) VALUES(?,?,?,?,?,?,?)",
+                            (portfolio_user_id, snapshot_data["snapshot_date"], total_value, type_values["stock"], type_values["bond"], type_values["cash"], snapshot_data["note"])
+                        )
+                        _conn.commit()
                 st.success("已記錄目前市值快照。")
-            with sqlite3.connect(DB_FILE) as _conn:
-                snapshots = pd.read_sql_query("SELECT snapshot_date AS 記錄時間,total_value_twd AS 組合市值,stock_value_twd AS 股票市值,bond_value_twd AS 債券市值,cash_value_twd AS 現金市值 FROM portfolio_snapshots WHERE user_id=? ORDER BY id", _conn, params=(portfolio_user_id,))
+            if _supabase_enabled():
+                snapshot_rows = _supabase_select(
+                    "portfolio_snapshots",
+                    select="snapshot_date,total_value_twd,stock_value_twd,bond_value_twd,cash_value_twd",
+                    filters={"user_id": f"eq.{portfolio_user_id}"}, order="id.asc",
+                )
+                snapshots = pd.DataFrame(snapshot_rows).rename(columns={
+                    "snapshot_date": "記錄時間", "total_value_twd": "組合市值",
+                    "stock_value_twd": "股票市值", "bond_value_twd": "債券市值",
+                    "cash_value_twd": "現金市值",
+                })
+            else:
+                with sqlite3.connect(DB_FILE) as _conn:
+                    snapshots = pd.read_sql_query("SELECT snapshot_date AS 記錄時間,total_value_twd AS 組合市值,stock_value_twd AS 股票市值,bond_value_twd AS 債券市值,cash_value_twd AS 現金市值 FROM portfolio_snapshots WHERE user_id=? ORDER BY id", _conn, params=(portfolio_user_id,))
             if not snapshots.empty:
                 peak = float(snapshots["組合市值"].cummax().max())
                 latest_snapshot = float(snapshots["組合市值"].iloc[-1])
@@ -9198,9 +9407,12 @@ if auth_user:
                     st.warning("估算回撤已達警示門檻：檢查各資產損失來源與配置偏離。")
                 st.dataframe(snapshots, use_container_width=True, hide_index=True)
                 if st.button("🗑️ 清除所有淨值快照", key="portfolio_clear_snapshots"):
-                    with sqlite3.connect(DB_FILE) as _conn:
-                        _conn.execute("DELETE FROM portfolio_snapshots WHERE user_id=?", (portfolio_user_id,))
-                        _conn.commit()
+                    if _supabase_enabled():
+                        _supabase_request("DELETE", "portfolio_snapshots", params={"user_id": f"eq.{portfolio_user_id}"})
+                    else:
+                        with sqlite3.connect(DB_FILE) as _conn:
+                            _conn.execute("DELETE FROM portfolio_snapshots WHERE user_id=?", (portfolio_user_id,))
+                            _conn.commit()
                     st.success("已清除快照紀錄。")
             else:
                 st.info("尚無快照紀錄。要觀察回撤變化，請在不同日期更新價格後手動記錄。")
