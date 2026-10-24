@@ -1121,52 +1121,66 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 最終對稱裁剪方案：將四個角落的官方控制元件直接推到螢幕可視範圍外並精準切除
+# 🟢 修正版：100% 恢復主畫面完整結構不切邊，並改用全域混合選擇器強力打壓微小元件
 hide_streamlit_style = """
     <style>
-    /* 1. 基礎防線：傳統隱藏依然保留，對雙層結構進行雙重打壓 */
+    /* 1. 徹底恢復原本網頁的完整坐標與排版，解決左邊畫面被切掉的問題 */
+    html, body {
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        width: 100% !important;
+        height: 100% !important;
+    }
+    
+    .stApp {
+        position: relative !important;
+        top: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        padding: 0px !important;
+        margin: 0px !important;
+    }
+
+    /* 2. 移除右上角選單、開發者 Header、部署控制元件與頁尾頁底 */
     #MainMenu, header, footer, 
     div[data-testid="stToolbar"], 
-    button[title="View Lightning app"],
-    .stCommunityBadge,
-    div[class*="stCommunityBadge"] {
+    button[title="View Lightning app"] {
         visibility: hidden !important;
         display: none !important;
         opacity: 0 !important;
+        height: 0px !important;
+        width: 0px !important;
+    }
+
+    /* 3. 多重模糊匹配與動態節點混合打壓：直接讓右下角所有粉紅皇冠與社群徽章在渲染層長寬歸零並透明化 */
+    .stCommunityBadge,
+    div[class*="stCommunityBadge"],
+    iframe[class*="stCommunityBadge"],
+    a[class*="stCommunityBadge"],
+    [class*="CommunityBadge"],
+    [id*="stCommunityBadge"],
+    a[href*="streamlit.io"],
+    button[class*="community"] {
+        visibility: hidden !important;
+        display: none !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        position: absolute !important;
+        transform: scale(0) !important;
         width: 0px !important;
         height: 0px !important;
-    }
-
-    /* 2. 核心大絕：利用視窗位移（Displacement），把右上角與右下角死角強制推出螢幕邊緣 */
-    html, body {
-        overflow: hidden !important; /* 鎖死最外層，不允許滾動露出死角 */
-        width: 100vw !important;
-        height: 100vh !important;
-    }
-
-    .stApp {
-        position: fixed !important;
-        /* 將畫布四周往外擴張，把固定在角落的皇冠與三個點擠出螢幕外 */
-        top: -50px !important;
-        right: -50px !important;
-        bottom: -50px !important;
-        left: -50px !important;
-        width: calc(100vw + 100px) !important;
-        height: calc(100vh + 100px) !important;
-        padding: 50px !important; /* 利用對稱內邊距把正常畫面再拉回中央 */
-    }
-
-    /* 3. 確保使用者內部的操盤按鈕與捲軸在縮放後依然100%正常工作 */
-    .block-container {
-        overflow-y: auto !important; /* 讓使用者的持股明細、K線圖滾動維持完全正常 */
-        height: 100vh !important;
-        max-width: 100% !important;
-        padding-top: 2rem !important;
-        padding-bottom: 5rem !important;
+        max-width: 0px !important;
+        max-height: 0px !important;
+        margin: 0px !important;
+        padding: 0px !important;
     }
     </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
