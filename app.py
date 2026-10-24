@@ -1121,44 +1121,52 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
 
 st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
 
-# 🟢 自訂隱形網頁遮罩：從程式碼內部產生一個乾淨無痕的最外層畫布，徹底隔絕外層皇冠
-st.components.v1.html("""
+# 🟢 最終對稱裁剪方案：將四個角落的官方控制元件直接推到螢幕可視範圍外並精準切除
+hide_streamlit_style = """
     <style>
-    /* 強制將我們內部的分析畫面擴展到滿版，並蓋過所有外面不想要的元件 */
-    iframe {
-        position: fixed !important;
-        top: 0 !important;
-        left: 0 !important;
+    /* 1. 基礎防線：傳統隱藏依然保留，對雙層結構進行雙重打壓 */
+    #MainMenu, header, footer, 
+    div[data-testid="stToolbar"], 
+    button[title="View Lightning app"],
+    .stCommunityBadge,
+    div[class*="stCommunityBadge"] {
+        visibility: hidden !important;
+        display: none !important;
+        opacity: 0 !important;
+        width: 0px !important;
+        height: 0px !important;
+    }
+
+    /* 2. 核心大絕：利用視窗位移（Displacement），把右上角與右下角死角強制推出螢幕邊緣 */
+    html, body {
+        overflow: hidden !important; /* 鎖死最外層，不允許滾動露出死角 */
         width: 100vw !important;
         height: 100vh !important;
-        border: none !important;
-        z-index: 999999 !important;
+    }
+
+    .stApp {
+        position: fixed !important;
+        /* 將畫布四周往外擴張，把固定在角落的皇冠與三個點擠出螢幕外 */
+        top: -50px !important;
+        right: -50px !important;
+        bottom: -50px !important;
+        left: -50px !important;
+        width: calc(100vw + 100px) !important;
+        height: calc(100vh + 100px) !important;
+        padding: 50px !important; /* 利用對稱內邊距把正常畫面再拉回中央 */
+    }
+
+    /* 3. 確保使用者內部的操盤按鈕與捲軸在縮放後依然100%正常工作 */
+    .block-container {
+        overflow-y: auto !important; /* 讓使用者的持股明細、K線圖滾動維持完全正常 */
+        height: 100vh !important;
+        max-width: 100% !important;
+        padding-top: 2rem !important;
+        padding-bottom: 5rem !important;
     }
     </style>
-    <script>
-    (function() {
-        try {
-            // 直接取得目前這台手機點開的網址（排除參數）
-            var cleanUrl = window.location.origin + window.location.pathname + '?embed=true';
-            
-            // 如果最外層還沒有被我們的乾淨畫布覆蓋，就直接強制產生一個無痕主畫布
-            if (window.self === window.top) {
-                var container = window.document.createElement('div');
-                container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:#0A0E17;z-index:999999;overflow:hidden;';
-                
-                var cleanIframe = window.document.createElement('iframe');
-                cleanIframe.src = cleanUrl;
-                cleanIframe.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border:none;';
-                
-                container.appendChild(cleanIframe);
-                window.document.body.appendChild(container);
-            }
-        } catch(e) {
-            // 安全備援防護，若瀏覽器嚴格限制則不執行，確保不卡住原本畫面
-        }
-    })();
-    </script>
-""", height=0, width=0)
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
