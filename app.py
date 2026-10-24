@@ -1136,8 +1136,8 @@ hide_streamlit_style = """
     .stCommunityBadge, div[class*="stCommunityBadge"] {visibility: hidden !important; display: none !important;}
     </style>
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)"""
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 # 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
 st.markdown("""
     <style>
