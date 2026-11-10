@@ -3000,10 +3000,11 @@ def recommend_dynamic_grid(price, history):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _dual_grid_fetch_history(ticker, period="2y"):
+def _dual_grid_fetch_history(ticker, period="2y", *, start=None, end=None):
     """Cached daily OHLCV for the dual-pool screener and illustrative backtest."""
     try:
-        frame = yf.download(ticker, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
+        date_args = {"period": period} if start is None else {"start": start, "end": end}
+        frame = yf.download(ticker, **date_args, interval="1d", auto_adjust=True, progress=False, threads=False)
         if isinstance(frame.columns, pd.MultiIndex):
             frame.columns = frame.columns.get_level_values(0)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -3099,19 +3100,26 @@ def _dual_grid_analyze(ticker, history):
     }
 
 
-def _dual_grid_backtest(close_series, capital, fee_rate, sell_tax_rate, slippage_rate, grid_levels=7):
-    """Illustrative close-only grid simulation; all comparisons use the same initial budget."""
-    prices = pd.Series(close_series).dropna().astype(float)
-    if len(prices) < 60 or capital <= 0 or prices.iloc[0] <= 0:
+def _dual_grid_backtest(close_series, capital, fee_rate, sell_tax_rate, slippage_rate, grid_levels=7,
+                        *, dca_monthly_fraction=0.10):
+    """Calibrate on 60 closes, then compare three strategies over the remaining dates."""
+    prices = pd.to_numeric(pd.Series(close_series), errors="coerce")
+    prices.index = pd.to_datetime(prices.index, errors="coerce")
+    if prices.index.tz is not None:
+        prices.index = prices.index.tz_localize(None)
+    prices = prices[np.isfinite(prices) & (prices > 0) & prices.index.notna()]
+    prices = prices.sort_index(kind="stable")
+    prices = prices[~prices.index.duplicated(keep="last")]
+    if len(prices) <= 60 or not np.isfinite(capital) or capital <= 0 or not 0 < dca_monthly_fraction <= 1:
         return None
-    prices = prices.iloc[-min(len(prices), 504):]
-    initial_price = float(prices.iloc[0])
-    # Establish levels from the first 60 sessions, then freeze them to avoid look-ahead bias.
+
     calibration = prices.iloc[:60]
+    prices = prices.iloc[60:]
     lower = float(calibration.quantile(.10))
     upper = float(calibration.quantile(.90))
     if upper <= lower * 1.02:
-        lower, upper = initial_price * .85, initial_price * 1.15
+        anchor = float(calibration.iloc[0])
+        lower, upper = anchor * .85, anchor * 1.15
     levels = np.linspace(lower, upper, int(max(3, grid_levels)))
     start_price = float(prices.iloc[0])
     cost_rate = max(0.0, float(fee_rate)) + max(0.0, float(slippage_rate))
@@ -3136,59 +3144,53 @@ def _dual_grid_backtest(close_series, capital, fee_rate, sell_tax_rate, slippage
                     shares += qty
                     trades += 1
             for _lv in crossed_up:
-                unit_price = p * (1 + sell_cost_rate)
                 qty = min(shares, trade_budget / p)
                 if qty > 0:
                     cash += qty * p * (1 - sell_cost_rate)
                     shares -= qty
                     trades += 1
-        equity_curve.append(cash + shares * p)
+        equity_curve.append(cash + shares * p * (1 - sell_cost_rate))
         prev_price = p
-    grid_end = float(equity_curve[-1])
-    grid_returns = pd.Series(equity_curve, index=prices.index).pct_change().fillna(0)
-    grid_dd = float((pd.Series(equity_curve) / pd.Series(equity_curve).cummax() - 1).min() * 100)
 
     # Buy-and-hold: buy as many shares as possible at start, value remaining cash too.
     hold_shares = capital / (start_price * (1 + cost_rate))
     hold_cash = capital - hold_shares * start_price * (1 + cost_rate)
     hold_curve = hold_cash + hold_shares * prices * (1 - sell_cost_rate)
-    hold_end = float(hold_curve.iloc[-1])
-    hold_dd = float((hold_curve / hold_curve.cummax() - 1).min() * 100)
 
-    # Monthly DCA with the same total budget, plus marked-to-market ending value net of sell cost.
+    # The planned amount is independent of how many months are in the data.
     month_groups = pd.Series(np.arange(len(prices)), index=prices.index).groupby(prices.index.to_period("M")).first().values
-    dca_contribution = capital / max(len(month_groups), 1)
-    dca_shares = 0.0
-    dca_cash_flows = []
-    dca_curve = []
-    contribution_map = set(int(x) for x in month_groups)
-    for i, p0 in enumerate(prices):
-        p = float(p0)
-        if i in contribution_map:
-            qty = dca_contribution / (p * (1 + cost_rate))
-            dca_shares += qty
-            dca_cash_flows.append(-dca_contribution)
-        dca_curve.append(dca_shares * p + max(0.0, capital - dca_contribution * sum(1 for x in contribution_map if x <= i)))
-    dca_end = float(dca_shares * float(prices.iloc[-1]) * (1 - sell_cost_rate))
-    # Drawdown uses marked equity including cash not yet contributed/invested.
-    dca_path = pd.Series(dca_curve, index=prices.index)
-    dca_dd = float((dca_path / dca_path.cummax() - 1).min() * 100) if len(dca_path) else 0.0
+    monthly_totals = capital * np.minimum(1.0, dca_monthly_fraction * np.arange(1, len(month_groups) + 1))
+    contributions = np.diff(monthly_totals, prepend=0.0)
+    invested = pd.Series(0.0, index=prices.index)
+    invested.iloc[month_groups] = contributions
+    dca_shares = (invested / (prices * (1 + cost_rate))).cumsum()
+    dca_curve = (capital - invested.cumsum()).clip(lower=0) + dca_shares * prices * (1 - sell_cost_rate)
 
-    days = max((prices.index[-1] - prices.index[0]).days, 1)
-    years = days / 365.25
-    def cagr(end):
-        return ((end / capital) ** (1 / years) - 1) * 100 if end > 0 and years > 0 else np.nan
-    dca_flows = [(prices.index[int(i)], -float(dca_contribution)) for i in month_groups]
-    dca_flows.append((prices.index[-1], dca_end))
-    dca_irr = calculate_money_weighted_return(dca_flows) if "calculate_money_weighted_return" in globals() else None
-    dca_annualized = dca_irr * 100 if dca_irr is not None else np.nan
-    metrics = pd.DataFrame([
-        {"策略": "雙邊動態網格（示意）", "期末資產": grid_end, "總報酬%": (grid_end / capital - 1) * 100, "年化報酬CAGR%": cagr(grid_end), "最大回撤%": grid_dd, "成交次數": trades},
-        {"策略": "買進持有", "期末資產": hold_end, "總報酬%": (hold_end / capital - 1) * 100, "年化報酬CAGR%": cagr(hold_end), "最大回撤%": hold_dd, "成交次數": 1},
-        {"策略": "每月定期定額（示意）", "期末資產": dca_end, "總報酬%": (dca_end / capital - 1) * 100, "年化報酬CAGR%": dca_annualized, "最大回撤%": dca_dd, "成交次數": len(month_groups)},
-    ])
-    chart = pd.DataFrame({"日期": prices.index, "雙邊動態網格（示意）": equity_curve, "買進持有": hold_curve.values, "每月定期定額（示意）": dca_curve})
-    return metrics, chart, {"lower": lower, "upper": upper, "trades": trades, "years": years}
+    years = (prices.index[-1] - prices.index[0]).days / 365.25
+    strategies = (
+        ("雙邊動態網格（示意）", pd.Series(equity_curve, index=prices.index), trades),
+        ("買進持有", hold_curve, 1),
+        ("每月定期定額（示意）", dca_curve, int(np.count_nonzero(contributions))),
+    )
+    rows = []
+    for label, curve, trade_count in strategies:
+        end = float(curve.iloc[-1])
+        drawdown = curve / curve.cummax().clip(lower=capital) - 1
+        rows.append({
+            "策略": label,
+            "期末資產": end,
+            "總報酬%": (end / capital - 1) * 100,
+            "年化報酬CAGR%": ((end / capital) ** (1 / years) - 1) * 100 if years > 0 else np.nan,
+            "最大回撤%": float(drawdown.min() * 100),
+            "成交次數": trade_count,
+        })
+    chart = pd.DataFrame({label: curve for label, curve, _ in strategies}).rename_axis("日期").reset_index()
+    return pd.DataFrame(rows), chart, {
+        "lower": lower, "upper": upper, "trades": trades, "years": years,
+        "calibration_start": calibration.index[0].date(), "calibration_end": calibration.index[-1].date(),
+        "evaluation_start": prices.index[0].date(), "evaluation_end": prices.index[-1].date(),
+        "dca_monthly_amount": float(capital * dca_monthly_fraction),
+    }
 
 def calculate_money_weighted_return(cash_flows):
     """Solve annualized return for dated cash flows; return None if no valid root exists."""
@@ -7650,42 +7652,66 @@ if auth_user:
                     st.dataframe(allocation.round(2), use_container_width=True, hide_index=True)
                     st.caption(f"單檔最高配置上限約 {total_capital * per_stock_pct / 100:,.0f} 元。此上限套用在總資金上；同一股票只允許分配到一個主要策略池。實際下單前仍需考量整股／零股規則、手續費最低收費、稅費與匯率。")
 
-                    st.markdown("#### 單一標的示意回測：網格 vs 買進持有 vs 定期定額")
-                    eligible = result_df[result_df["主要策略池"] != "暫不納入"]["股票代碼"].tolist()
-                    if eligible:
-                        bt_ticker = st.selectbox("回測標的", eligible, key="dual_grid_bt_ticker")
-                        bt_capital = st.number_input("回測本金（元）", min_value=10000.0, value=200000.0, step=10000.0, key="dual_grid_bt_capital")
-                        fee_pct = st.number_input("單邊手續費率（%）", min_value=0.0, max_value=1.0, value=0.1425, step=0.01, format="%.4f", key="dual_grid_bt_fee_pct")
-                        tax_pct = st.number_input("賣出交易稅率（%）", min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.3f", key="dual_grid_bt_tax_pct", help="台股普通股票賣出稅率常見值；ETF、不同商品及市場可能不同，請自行調整。")
-                        slippage_pct = st.number_input("單邊滑價假設（%）", min_value=0.0, max_value=2.0, value=0.05, step=0.01, format="%.3f", key="dual_grid_bt_slippage_pct")
-                        levels_count = st.slider("網格價位數", min_value=3, max_value=15, value=7, step=2, key="dual_grid_bt_levels")
-                        if st.button("▶️ 執行示意回測", key="dual_grid_run_backtest"):
-                            bt_history = _dual_grid_fetch_history(bt_ticker, scan_period)
-                            if bt_history.empty:
-                                st.error("無法取得回測歷史資料。")
-                            else:
-                                bt_result = _dual_grid_backtest(
-                                    bt_history["Close"], bt_capital,
-                                    fee_pct / 100, tax_pct / 100, slippage_pct / 100, levels_count,
-                                )
-                                if bt_result is None:
-                                    st.warning("資料不足以回測，至少需要約 60 個交易日。")
-                                else:
-                                    metrics, chart, params = bt_result
-                                    st.session_state["dual_grid_backtest_metrics"] = metrics
-                                    st.session_state["dual_grid_backtest_chart"] = chart
-                                    st.session_state["dual_grid_backtest_params"] = params
-                                    st.session_state["dual_grid_backtest_ticker"] = bt_ticker
-                        if st.session_state.get("dual_grid_backtest_ticker") == bt_ticker and "dual_grid_backtest_metrics" in st.session_state:
-                            metrics = st.session_state["dual_grid_backtest_metrics"]
-                            chart = st.session_state["dual_grid_backtest_chart"]
-                            params = st.session_state["dual_grid_backtest_params"]
-                            st.dataframe(metrics.round(2), use_container_width=True, hide_index=True)
-                            st.line_chart(chart.set_index("日期"), use_container_width=True)
-                            st.caption(f"網格回測固定參考區間：{params['lower']:.2f}–{params['upper']:.2f}；估算成交 {params['trades']} 次。期間約 {params['years']:.2f} 年。")
-                            st.warning("這是試用級示意模型：使用收盤價跨越價位模擬，不含盤中撮合、最低手續費、股數整數限制、股息、借券、停牌、跳空的真實成交順序或匯率。DCA 路徑與網格路徑採簡化估值，請勿直接視為可執行交易績效。")
-                    else:
+                    if not (result_df["主要策略池"] != "暫不納入").any():
                         st.info("目前沒有分數達標的策略候選；依規則可以選擇暫不交易。")
+
+                st.markdown("#### 單一標的示意回測：網格 vs 買進持有 vs 定期定額")
+                st.caption("回測可獨立執行。候選清單僅供選擇股票，近期分數不參與歷史成交判定。")
+                backtest_tickers = list(dict.fromkeys([selected_stock] + [item["股票代碼"] for item in analyses]))
+                bt_ticker = st.selectbox("回測標的", backtest_tickers, key="dual_grid_bt_ticker")
+                bt_last_day = pd.Timestamp.now(tz="Asia/Taipei").date() - pd.Timedelta(days=1)
+                bt_date_range = st.date_input(
+                    "日線資料區間（含校準期）",
+                    value=(bt_last_day - pd.Timedelta(days=730), bt_last_day),
+                    max_value=bt_last_day,
+                    key="dual_grid_bt_dates",
+                    help="前 60 根有效日線只用於校準。延長資料時，保留相同起始日。",
+                )
+                bt_capital = st.number_input("回測本金（元）", min_value=10000.0, value=200000.0, step=10000.0, key="dual_grid_bt_capital")
+                dca_pct = st.number_input(
+                    "定期定額每月投入（占初始本金 %）", min_value=0.1, max_value=100.0,
+                    value=10.0, step=1.0, key="dual_grid_bt_dca_pct",
+                    help="從評估期首根日線開始，每月第一根有效日線投入固定金額，餘額不足時只投入剩餘金額。",
+                )
+                fee_pct = st.number_input("單邊手續費率（%）", min_value=0.0, max_value=1.0, value=0.1425, step=0.01, format="%.4f", key="dual_grid_bt_fee_pct")
+                tax_pct = st.number_input("賣出交易稅率（%）", min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.3f", key="dual_grid_bt_tax_pct", help="台股普通股票賣出稅率常見值；ETF、不同商品及市場可能不同，請自行調整。")
+                slippage_pct = st.number_input("單邊滑價假設（%）", min_value=0.0, max_value=2.0, value=0.05, step=0.01, format="%.3f", key="dual_grid_bt_slippage_pct")
+                levels_count = st.slider("網格價位數", min_value=3, max_value=15, value=7, step=2, key="dual_grid_bt_levels")
+                bt_inputs = (bt_ticker, bt_date_range, bt_capital, dca_pct, fee_pct, tax_pct, slippage_pct, levels_count)
+                if st.button("▶️ 執行示意回測", key="dual_grid_run_backtest"):
+                    st.session_state.pop("dual_grid_backtest_result", None)
+                    if not bt_date_range or len(bt_date_range) != 2 or bt_date_range[0] >= bt_date_range[1]:
+                        st.warning("請選擇起日早於迄日的完整資料區間。")
+                    else:
+                        start_date, end_date = bt_date_range
+                        bt_history = _dual_grid_fetch_history(
+                            bt_ticker, start=start_date, end=end_date + pd.Timedelta(days=1),
+                        )
+                        if bt_history.empty:
+                            st.error("無法取得回測歷史資料。")
+                        else:
+                            bt_result = _dual_grid_backtest(
+                                bt_history["Close"], bt_capital,
+                                fee_pct / 100, tax_pct / 100, slippage_pct / 100, levels_count,
+                                dca_monthly_fraction=dca_pct / 100,
+                            )
+                            if bt_result is None:
+                                st.warning("至少需要 61 根有效日線，前 60 根校準，評估期從第 61 根開始。")
+                            else:
+                                st.session_state["dual_grid_backtest_result"] = (bt_inputs, bt_result)
+                saved_backtest = st.session_state.get("dual_grid_backtest_result")
+                if saved_backtest and saved_backtest[0] == bt_inputs:
+                    metrics, chart, params = saved_backtest[1]
+                    st.dataframe(metrics.round(2), use_container_width=True, hide_index=True)
+                    st.line_chart(chart.set_index("日期"), use_container_width=True)
+                    st.caption(
+                        f"校準期：{params['calibration_start']} 至 {params['calibration_end']}。"
+                        f"共同評估期：{params['evaluation_start']} 至 {params['evaluation_end']}。"
+                        f"定期定額每月預定投入 {params['dca_monthly_amount']:,.2f} 元。"
+                    )
+                    st.caption(f"網格回測固定參考區間：{params['lower']:.2f}–{params['upper']:.2f}；估算成交 {params['trades']} 次。期間約 {params['years']:.2f} 年。")
+                    st.caption("三種曲線均包含未投入現金，持股按扣除假設賣出成本後的價值估算。年化報酬以初始本金為基礎。")
+                    st.warning("這是試用級示意模型：使用收盤價跨越價位模擬，不含盤中撮合、最低手續費、股數整數限制、股息現金流、借券、停牌、跳空的真實成交順序或匯率。歷史調整價格也可能由資料供應商修訂。")
 
                 st.markdown("#### 風控檢查清單")
                 st.markdown("- [ ] 確認單檔配置不超過設定上限，且同一股票沒有跨策略重複占用資金。\n- [ ] 檢查總投入、各池預算與保留現金是否相符。\n- [ ] 震盪型標的若出現明顯趨勢／區間失效，重新評估或暫停網格。\n- [ ] 成長型標的若基本面惡化，不能只因價格下跌就持續加碼。\n- [ ] 最大回撤 15% 僅為風險目標，不能保證達成；須用多市場、多期間和樣本外資料驗證。")
