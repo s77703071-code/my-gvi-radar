@@ -5461,11 +5461,15 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
 # 🔐 使用者帳號登入與自助註冊
 def _logout_account():
     for key in list(st.session_state.keys()):
-        if key == "auth_user" or key.startswith((
+        if key in (
+            "auth_user", "pending_recovery_email", "gemini_api_key_input",
+            "openai_api_key_input", "openai_model_input",
+        ) or key.startswith((
             "port_", "portfolio_", "login_", "register_", "recovery_",
             "password_reset_", "reset_", "finmind_user_token_",
             "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_", "broker_branch_ai_",
-        )) or key == "pending_recovery_email":
+            "account_ai_report:", "ai_report_", "ai_provider_", "send_ai_report_email_",
+        )):
             st.session_state.pop(key, None)
 
 
@@ -5809,7 +5813,9 @@ if auth_user:
         pass
 
     if not api_key_input:
-        api_key_input = st.sidebar.text_input("請輸入您的 Gemini API Key：", type="password")
+        api_key_input = st.sidebar.text_input(
+            "請輸入您的 Gemini API Key：", type="password", key="gemini_api_key_input"
+        )
 
     openai_api_key_input, secret_openai_model = get_openai_secret_values(st.secrets)
     if openai_api_key_input:
@@ -6339,7 +6345,9 @@ if auth_user:
                 
                 st.info(f"🔮 【{c_name}】{selected_tf} 價量動能估算：{chip_status_text}")
 
-                with st.expander(f"🧠 AI 雙核心個股研究報告與 Email 傳送【{c_name}】", expanded=(f"ai_report_{selected_stock}" in st.session_state)):
+                report_scope = f"{auth_user['id']}:{selected_stock}"
+                report_key = f"account_ai_report:{report_scope}"
+                with st.expander(f"🧠 AI 雙核心個股研究報告與 Email 傳送【{c_name}】", expanded=report_key in st.session_state):
                     branch_ai_snapshot_key = _broker_branch_ai_state_key(auth_user.get("id", "guest"), selected_stock)
                     current_branch_ai_context = format_broker_branch_ai_context(
                         st.session_state.get(branch_ai_snapshot_key), selected_stock
@@ -6364,7 +6372,7 @@ if auth_user:
                         ["Gemini", "ChatGPT（含網路搜尋）"],
                         horizontal=True,
                         index=1 if openai_api_key_input else 0,
-                        key=f"ai_provider_{selected_stock}",
+                        key=f"ai_provider_{report_scope}",
                         help="Gemini 使用本系統行情與可取得的新聞；ChatGPT 會額外搜尋近期市場、產業題材與同業資料並附來源。",
                     )
                     if st.button(f"🧠 啟動 AI 投資分析報告【{c_name}】", use_container_width=True, type="primary"):
@@ -6470,56 +6478,52 @@ if auth_user:
                                             "回測資料不足，暫不依技術指標回測提出策略建議。",
                                         ))
                                     )
-                                    report_key = f"ai_report_{selected_stock}"
-                                    st.session_state[report_key] = success_report
-                                    st.session_state[f"{report_key}_provider"] = provider_name
-                                    st.session_state[f"{report_key}_backtest"] = ai_backtest
-                                    st.session_state[f"{report_key}_sources"] = ai_sources
-                                    st.session_state[f"{report_key}_psychology"] = market_psychology_brief
-                                    st.session_state[f"{report_key}_branch_context"] = broker_branch_ai_context
-                                    st.session_state[f"{report_key}_style"] = explanation_style
+                                    st.session_state[report_key] = {
+                                        "text": success_report,
+                                        "provider": provider_name,
+                                        "backtest": ai_backtest,
+                                        "sources": ai_sources,
+                                        "psychology": market_psychology_brief,
+                                        "branch_context": broker_branch_ai_context,
+                                        "style": explanation_style,
+                                    }
                                 except Exception as ai_e:
                                     st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
                     
-                    if f"ai_report_{selected_stock}" in st.session_state:
-                        report_provider = st.session_state.get(f"ai_report_{selected_stock}_provider", "AI")
+                    saved_report = st.session_state.get(report_key)
+                    if saved_report is not None:
+                        report_provider = saved_report["provider"]
                         st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
-                        report_style = st.session_state.get(
-                            f"ai_report_{selected_stock}_style", "一般白話｜專業易讀"
-                        )
+                        report_style = saved_report["style"]
                         if report_style != explanation_style:
                             st.caption(
                                 f"此份報告以「{report_style}」產生；上方已切換為「{explanation_style}」。"
                                 "如要更新報告文字，請重新執行 AI 分析。"
                             )
-                        saved_report_branch_context = st.session_state.get(
-                            f"ai_report_{selected_stock}_branch_context", ""
-                        )
-                        saved_report_text = str(st.session_state.get(f"ai_report_{selected_stock}", ""))
+                        saved_branch_context = saved_report["branch_context"]
+                        ai_report = saved_report["text"]
                         branch_report_heading = "### 分點流向與近 20 筆價格方向｜資料補充解讀"
-                        report_has_branch_interpretation = branch_report_heading in saved_report_text
+                        report_has_branch_interpretation = branch_report_heading in ai_report
                         if current_branch_ai_interpretation and (
-                            saved_report_branch_context != current_branch_ai_context
+                            saved_branch_context != current_branch_ai_context
                             or not report_has_branch_interpretation
                         ):
                             st.warning("目前這份 AI 報告尚未納入目前工作階段的分點資料。請重新產生報告；以下先列出本次分點與價格的資料補充解讀。")
                             st.markdown("##### 分點流向與近 20 筆價格方向｜資料補充解讀")
                             st.markdown(current_branch_ai_interpretation)
-                        saved_psychology_brief = st.session_state.get(f"ai_report_{selected_stock}_psychology")
+                        saved_psychology_brief = saved_report["psychology"]
                         if saved_psychology_brief:
                             st.markdown("#### 🧠 市場心理重點")
                             st.markdown(saved_psychology_brief)
-                        saved_branch_context = st.session_state.get(f"ai_report_{selected_stock}_branch_context", "")
                         if saved_branch_context:
                             with st.expander("查看本次 AI 分析使用的分點摘要", expanded=False):
                                 st.markdown(saved_branch_context)
-                        ai_report = st.session_state[f"ai_report_{selected_stock}"]
                         if explanation_style.startswith("生動童趣"):
                             with st.expander("🧩 生活比喻版研究筆記", expanded=True):
                                 st.markdown(ai_report)
                         else:
                             st.markdown(ai_report)
-                        saved_backtest = st.session_state.get(f"ai_report_{selected_stock}_backtest", {})
+                        saved_backtest = saved_report["backtest"]
                         saved_backtest_table = saved_backtest.get("table") if isinstance(saved_backtest, dict) else None
                         if isinstance(saved_backtest_table, pd.DataFrame) and not saved_backtest_table.empty:
                             with st.expander("查看 AI 報告使用的全指標樣本外回測比較", expanded=False):
@@ -6546,12 +6550,12 @@ if auth_user:
                             st.info(saved_backtest["text"])
                         recipient_email = st.text_input(
                             "寄送分析報告到 Email",
-                            key=f"ai_report_email_recipient_{selected_stock}",
+                            key=f"ai_report_email_recipient_{report_scope}",
                             placeholder="請輸入收件信箱",
                         )
                         if st.button(
                             "✉️ 寄出這份分析",
-                            key=f"send_ai_report_email_{selected_stock}",
+                            key=f"send_ai_report_email_{report_scope}",
                             use_container_width=True,
                         ):
                             if not recipient_email.strip() or "@" not in recipient_email:
@@ -6568,19 +6572,13 @@ if auth_user:
                                     )
                                 else:
                                     email_subject = f"AI 個股分析｜{selected_stock} {c_name}"
-                                    email_psychology_brief = st.session_state.get(
-                                        f"ai_report_{selected_stock}_psychology",
-                                        "此報告產生於市場心理摘要功能加入前；目前報告內可能已有心理面分析。",
-                                    )
-                                    saved_email_branch_context = st.session_state.get(
-                                        f"ai_report_{selected_stock}_branch_context", ""
-                                    )
-                                    email_branch_context = current_branch_ai_context or saved_email_branch_context
+                                    email_psychology_brief = saved_psychology_brief
+                                    email_branch_context = current_branch_ai_context or saved_branch_context
                                     email_branch_interpretation = ""
                                     email_branch_is_current = bool(
                                         current_branch_ai_interpretation
-                                        and saved_email_branch_context == current_branch_ai_context
-                                        and branch_report_heading in str(ai_report)
+                                        and saved_branch_context == current_branch_ai_context
+                                        and report_has_branch_interpretation
                                     )
                                     if current_branch_ai_interpretation and not email_branch_is_current:
                                         email_branch_interpretation = (
@@ -6592,16 +6590,13 @@ if auth_user:
                                         f"【本次 AI 分析使用的分點摘要】\n{email_branch_context}\n\n"
                                         if email_branch_context else ""
                                     )
-                                    saved_email_backtest = st.session_state.get(
-                                        f"ai_report_{selected_stock}_backtest", {}
-                                    )
                                     email_backtest_section = (
                                         "【技術指標樣本外回測比較與條件式建議】\n"
-                                        + str(saved_email_backtest.get("text", "回測資料不足。"))
+                                        + str(saved_backtest.get("text", "回測資料不足。"))
                                         + "\n\n【依回測條件整理的建議】\n"
-                                        + str(saved_email_backtest.get("advice", "目前沒有可用的條件式建議。"))
+                                        + str(saved_backtest.get("advice", "目前沒有可用的條件式建議。"))
                                         + "\n\n"
-                                        if isinstance(saved_email_backtest, dict) else ""
+                                        if isinstance(saved_backtest, dict) else ""
                                     )
                                     email_body = (
                                         f"個股：{selected_stock} {c_name}\n"
