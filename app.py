@@ -1545,7 +1545,7 @@ def init_db():
         note TEXT DEFAULT ''
     )''')
     # Account credentials use salted PBKDF2 hashes. Portfolio rows are scoped
-    # by user_id; legacy rows remain unassigned until the first account registers.
+    # by user_id; legacy rows without an owner stay unassigned.
     c.execute('''CREATE TABLE IF NOT EXISTS app_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -1710,7 +1710,6 @@ def _ensure_local_account(auth_user):
     with sqlite3.connect(DB_FILE, timeout=30) as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute("SELECT id FROM app_users WHERE id=?", (user_id,)).fetchone()
-        account_count = conn.execute("SELECT COUNT(*) FROM app_users").fetchone()[0]
         if not existing:
             local_name = username[:32]
             conflict = conn.execute(
@@ -1724,27 +1723,13 @@ def _ensure_local_account(auth_user):
                 (user_id, local_name, email, salt, placeholder_hash,
                  pd.Timestamp.now().isoformat(timespec="seconds")),
             )
-            if account_count == 0:
-                conn.execute(
-                    "UPDATE portfolio_positions SET user_id=? WHERE user_id IS NULL", (user_id,)
-                )
-                conn.execute(
-                    "UPDATE portfolio_snapshots SET user_id=? WHERE user_id IS NULL", (user_id,)
-                )
-                for key, value in conn.execute(
-                    "SELECT setting_key,setting_value FROM portfolio_settings"
-                ).fetchall():
-                    conn.execute(
-                        "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) "
-                        "VALUES(?,?,?)", (user_id, key, value)
-                    )
         for key, value in defaults.items():
             conn.execute(
                 "INSERT OR IGNORE INTO portfolio_user_settings(user_id,setting_key,setting_value) "
                 "VALUES(?,?,?)", (user_id, key, value)
             )
         conn.commit()
-    return user_id, account_count == 0, username, email
+    return user_id, username, email
 
 
 def _register_account(username, password, email):
@@ -1757,9 +1742,9 @@ def _register_account(username, password, email):
     session = result.get("session")
     # Supabase may require email confirmation before creating a session.
     if not session or not auth_user.get("id"):
-        return None, False
-    user_id, is_first_account, _, _ = _ensure_local_account(auth_user)
-    return user_id, is_first_account
+        return None
+    user_id, _, _ = _ensure_local_account(auth_user)
+    return user_id
 
 
 def _verify_account(email, password):
@@ -1774,7 +1759,7 @@ def _verify_account(email, password):
     if not auth_user.get("id"):
         return None
     try:
-        user_id, _, username, user_email = _ensure_local_account(auth_user)
+        user_id, username, user_email = _ensure_local_account(auth_user)
     except Exception:
         return None
     return {
@@ -5661,15 +5646,13 @@ else:
                     st.error("兩次輸入的密碼不一致。")
                 else:
                     try:
-                        user_id, is_first_account = _register_account(register_name, register_password, register_email)
+                        user_id = _register_account(register_name, register_password, register_email)
                         if user_id is None:
                             st.success("註冊申請已送出。請先查看 Email 並完成 Supabase 信箱驗證，再使用 Email 與密碼登入。")
                         else:
                             st.session_state["auth_user"] = {
                                 "id": user_id, "username": register_name, "email": register_email
                             }
-                            if is_first_account:
-                                st.session_state["account_notice"] = "已建立第一個帳號；本次執行環境中可辨識的既有共用投資組合資料已歸入此帳號。"
                             st.session_state.pop("account_login_view", None)
                             st.rerun()
                     except ValueError as exc:
@@ -5721,9 +5704,6 @@ else:
             st.session_state["account_login_view"] = False
             st.rerun()
     st.stop()
-
-if st.session_state.pop("account_notice", None):
-    st.sidebar.info("原有共用投資組合資料已保留並歸入第一個建立的帳號。")
 
 if auth_user:
     with st.sidebar.expander("設定／更新備援 Email"):
