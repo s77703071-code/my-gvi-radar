@@ -3,7 +3,10 @@
 # ==============================================================================
 import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl, html
 import streamlit.components.v1 as components
+from base64 import b64encode
+from contextlib import closing
 from email.message import EmailMessage
+from pathlib import Path
 try:
     from google import genai
 except ImportError:
@@ -1593,6 +1596,39 @@ def init_db():
     conn.close()
 
 init_db()
+
+
+def _export_portfolio(user_id):
+    database_uri = Path(DB_FILE).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        settings = dict(conn.execute(
+            "SELECT setting_key, setting_value FROM portfolio_user_settings "
+            "WHERE user_id=? ORDER BY setting_key",
+            (user_id,),
+        ).fetchall())
+        positions = [dict(row) for row in conn.execute(
+            "SELECT symbol, name, asset_type, currency, quantity, price, fx_to_twd, "
+            "cost_basis_twd, updated_at FROM portfolio_positions WHERE user_id=? ORDER BY id",
+            (user_id,),
+        )]
+        snapshots = [dict(row) for row in conn.execute(
+            "SELECT snapshot_date, total_value_twd, stock_value_twd, bond_value_twd, "
+            "cash_value_twd, note FROM portfolio_snapshots WHERE user_id=? ORDER BY id",
+            (user_id,),
+        )]
+
+    exported_at = pd.Timestamp.now(tz="UTC")
+    content = json.dumps({
+        "schema_version": 1,
+        "exported_at_utc": exported_at.isoformat(),
+        "positions": positions,
+        "settings": settings,
+        "snapshots": snapshots,
+    }, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+    return f"gvi-portfolio-{exported_at:%Y%m%dT%H%M%SZ}.json", content
+
 
 def _password_digest(password, salt_hex):
     # Retained for the legacy in-app email-binding challenge flow only.
@@ -9277,6 +9313,24 @@ if auth_user:
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
         portfolio_user_id = int(auth_user["id"])
+
+        if st.button("準備匯出我的投資組合", key="portfolio_prepare_export"):
+            try:
+                filename, content = _export_portfolio(portfolio_user_id)
+            except (sqlite3.Error, ValueError):
+                st.error("目前無法匯出完整資料。請稍後再試，若仍失敗請聯絡管理員。")
+            else:
+                # Deliver within this signed-in session without publishing a media URL.
+                payload = b64encode(content).decode("ascii")
+                link = (
+                    f'<a href="data:application/json;base64,{payload}" download="{filename}">'
+                    "下載我的持倉、設定與快照（JSON）</a>"
+                )
+                if hasattr(st, "iframe"):
+                    st.iframe(link, height=42, alt="投資組合匯出")
+                else:
+                    components.html(link, height=42)
+                st.caption("下載檔包含個人投資資料，請保存在私人位置。")
 
         def _portfolio_load_settings():
             with sqlite3.connect(DB_FILE) as _conn:
