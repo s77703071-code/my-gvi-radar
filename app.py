@@ -3946,48 +3946,115 @@ def fetch_institutional_price_volume_context(ticker, as_of_date):
     except Exception:
         return {'股價資料日': None, '近5日股價變化(%)': None, '近5日均量變化(%)': None}
 
+TDCC_DISTRIBUTION_URL = "https://openapi.tdcc.com.tw/v1/opendata/1-5"
+TDCC_HOLDING_GROUPS = {"retail": ("1", "2"), "big": ("12", "13", "14", "15")}
+
+
+def _parse_tdcc_concentration(payload, ticker):
+    """Summarize complete TDCC tier groups without treating missing rows as zero."""
+    if not isinstance(payload, list):
+        return {"status": "format_error"}
+    if not payload:
+        return {"status": "missing"}
+    if not isinstance(payload[0], dict) or "證券代號" not in payload[0]:
+        return {"status": "format_error"}
+
+    code = ticker.strip().upper().removesuffix(".TWO").removesuffix(".TW")
+    target_tiers = {tier for tiers in TDCC_HOLDING_GROUPS.values() for tier in tiers}
+    weeks = {}
+    for row in payload:
+        if not isinstance(row, dict) or str(row.get("證券代號", "")).strip() != code:
+            continue
+        raw_date = str(row.get("資料日期", row.get("\ufeff資料日期", ""))).strip()
+        date = pd.to_datetime(raw_date, format="%Y%m%d", errors="coerce") if re.fullmatch(r"[0-9]{8}", raw_date) else pd.NaT
+        if pd.isna(date):
+            return {"status": "format_error"}
+        week = weeks.setdefault(date.date().isoformat(), {})
+        tier = str(row.get("持股分級", "")).strip()
+        if tier not in target_tiers:
+            continue
+        shares = str(row.get("股數", "")).strip()
+        ratio = _to_number(row.get("占集保庫存數比例%", row.get("佔集保庫存數比例%")))
+        if tier in week or not re.fullmatch(r"[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+", shares) or ratio is None or not 0 <= ratio <= 100:
+            week[tier] = None
+        else:
+            week[tier] = (int(shares.replace(",", "")), ratio)
+
+    if not weeks:
+        return {"status": "missing"}
+
+    dates = sorted(weeks, reverse=True)[:2]
+    result = {"date": dates[0], "previous_date": dates[1] if len(dates) == 2 else None}
+    for name, tiers in TDCC_HOLDING_GROUPS.items():
+        totals = []
+        for date in dates:
+            values = [weeks[date].get(tier) for tier in tiers]
+            totals.append(
+                (sum(value[0] for value in values), round(sum(value[1] for value in values), 8))
+                if all(value is not None for value in values) else (None, None)
+            )
+        result[f"{name}_shares"], result[f"{name}_pct"] = totals[0]
+        current = totals[0][1]
+        previous = totals[1][1] if len(totals) == 2 else None
+        result[f"{name}_change_pp"] = round(current - previous, 8) if current is not None and previous is not None else None
+
+    valid_groups = sum(result[f"{name}_pct"] is not None for name in TDCC_HOLDING_GROUPS)
+    result["status"] = {0: "format_error", 1: "partial", 2: "ok"}[valid_groups]
+    return result
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_tdcc_concentration(ticker):
-    """Fetch weekly TDCC shareholding distribution; return big-holder/retail ratios and dates."""
-    code = ticker.replace('.TWO', '').replace('.TW', '').strip()
-    response = requests.get('https://openapi.tdcc.com.tw/v1/opendata/5-9', timeout=20,
-                            headers={'User-Agent': 'Mozilla/5.0'})
+    response = requests.get(TDCC_DISTRIBUTION_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
-    payload = response.json()
-    rows = []
-    for raw in payload if isinstance(payload, list) else []:
-        raw_code = str(raw.get('證券代號') or raw.get('股票代號') or raw.get('SecuritiesCompanyCode') or raw.get('Code') or '').strip()
-        if raw_code != code:
-            continue
-        level = str(raw.get('持股分級') or raw.get('持股級距') or raw.get('股數/單位數級距') or raw.get('Level') or '')
-        date_value = str(raw.get('資料日期') or raw.get('資料年月') or raw.get('Date') or '')
-        ratio = _to_number(raw.get('占集保庫存數比例%') or raw.get('占集保庫存數比例') or raw.get('持股比例') or raw.get('Ratio'))
-        if ratio is None:
-            continue
-        digits = [int(x.replace(',', '')) for x in re.findall(r'\d[\d,]*', level)]
-        if not digits:
-            continue
-        low = digits[0]
-        high = digits[1] if len(digits) > 1 else None
-        rows.append({'date': date_value, 'low': low, 'high': high, 'ratio': ratio})
-    if not rows:
-        return None
-    frame = pd.DataFrame(rows)
-    dates = sorted(frame['date'].dropna().unique(), reverse=True)
-    if not dates:
-        return None
-    summaries = []
-    for date_value in dates[:2]:
-        day = frame[frame['date'] == date_value]
-        retail = day[day['high'].notna() & (day['high'] <= 5000)]['ratio'].sum()
-        big = day[(day['low'] >= 400001) | (day['high'].isna() & (day['low'] >= 400001))]['ratio'].sum()
-        summaries.append({'date': date_value, 'retail_pct': float(retail), 'big_pct': float(big)})
-    latest = summaries[0]
-    previous = summaries[1] if len(summaries) > 1 else None
-    return {'date': latest['date'], 'retail_pct': latest['retail_pct'], 'big_pct': latest['big_pct'],
-            'big_change_pp': latest['big_pct'] - previous['big_pct'] if previous else None,
-            'retail_change_pp': latest['retail_pct'] - previous['retail_pct'] if previous else None,
-            'previous_date': previous['date'] if previous else None}
+    return _parse_tdcc_concentration(response.json(), ticker)
+
+
+def _render_tdcc_concentration(ticker):
+    try:
+        with st.spinner("讀取集保中心持股級距資料…"):
+            result = fetch_tdcc_concentration(ticker)
+    except ValueError:
+        result = {"status": "format_error"}
+    except requests.RequestException:
+        result = {"status": "source_error"}
+
+    state_key = f"tdcc_last_valid_{ticker}"
+    status = result["status"]
+    if status == "ok":
+        st.session_state[state_key] = result
+    elif status != "partial":
+        messages = {
+            "missing": "官方資料未包含這檔證券。",
+            "format_error": "集保資料格式異常或級距不完整。",
+            "source_error": "集保資料暫時無法更新。",
+        }
+        message = messages[status]
+        last_valid = st.session_state.get(state_key)
+        if last_valid is None:
+            st.warning(message + (f" 資料日期：{result['date']}。" if result.get("date") else ""))
+            return
+        st.warning(message + " 以下為本次工作階段最後有效資料，未更新。")
+        result = last_valid
+    else:
+        st.warning("部分集保持股級距資料不完整，缺少的欄位以「資料不足」顯示。")
+
+    labels = {"retail": "小額持股級距（≤5,000 股）", "big": "大額持股級距（≥400,001 股）"}
+    for (name, label), column in zip(labels.items(), st.columns(2)):
+        ratio = result[f"{name}_pct"]
+        change = result[f"{name}_change_pp"]
+        column.metric(
+            label, f"{ratio:.2f}%" if ratio is not None else "資料不足",
+            delta=f"{change:+.2f} 個百分點" if change is not None else None,
+            delta_color="off",
+        )
+        shares = result[f"{name}_shares"]
+        if shares is not None:
+            column.caption(f"級距合計 {shares:,} 股／單位")
+    if any(result[f"{name}_change_pp"] is not None for name in labels):
+        st.caption(f"比較日期：{result['previous_date']} → {result['date']}。占比變化以百分點計。")
+    else:
+        st.caption(f"資料日期：{result['date']}。目前沒有可比較的前期級距資料。")
 
 def fetch_mops_insider_holding(ticker):
     """Read latest MOPS monthly director/insider holding table for a single Taiwan company."""
@@ -7264,37 +7331,8 @@ if auth_user:
                 st.markdown("#### 👥 集保持股級距變化（週資料）")
                 st.caption("以持股級距觀察小額與大額持有比例變化。這是持有分布，不代表買賣方向，也無法直接判定持有人是散戶或主力。")
                 if is_taiwan_stock:
-                    tdcc_data = None
-                    try:
-                        with st.spinner('讀取集保中心持股級距資料…'):
-                            tdcc_data = fetch_tdcc_concentration(selected_stock)
-                    except Exception:
-                        tdcc_data = None
-                    if tdcc_data:
-                        retail_delta = tdcc_data.get('retail_change_pp')
-                        big_delta = tdcc_data.get('big_change_pp')
-                        tdcc_cols = st.columns(2)
-                        with tdcc_cols[0]:
-                            st.metric(
-                                "小額持股級距（≤5,000 股）",
-                                f"{tdcc_data['retail_pct']:.2f}%",
-                                delta=f"{retail_delta:+.2f} 個百分點" if retail_delta is not None else None,
-                                delta_color="off",
-                            )
-                        with tdcc_cols[1]:
-                            st.metric(
-                                "大額持股級距（≥400,001 股）",
-                                f"{tdcc_data['big_pct']:.2f}%",
-                                delta=f"{big_delta:+.2f} 個百分點" if big_delta is not None else None,
-                                delta_color="off",
-                            )
-                        comparison = (
-                            f"比較日期：{tdcc_data['previous_date']} → {tdcc_data['date']}。"
-                            if tdcc_data.get('previous_date') else f"資料日期：{tdcc_data['date']}；目前只有一個可比較週期。"
-                        )
-                        st.caption(comparison + "變化以集保庫存占比計算；百分點增加不等同該級距淨買超。")
-                    else:
-                        st.info("目前無法取得這檔股票的集保持股級距資料；不以零或推估值代替。")
+                    st.caption(f"資料來源：[臺灣集中保管結算所]({TDCC_DISTRIBUTION_URL})")
+                    _render_tdcc_concentration(selected_stock)
                 else:
                     st.info("集保持股級距資料目前僅適用台股。")
 
