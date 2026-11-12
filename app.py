@@ -3,10 +3,11 @@
 # ==============================================================================
 import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf, pandas as pd, numpy as np, json, sqlite3, io, time, requests, smtplib, ssl, html
 import streamlit.components.v1 as components
-from base64 import b64encode
+from base64 import b64encode, urlsafe_b64decode
 from contextlib import closing
 from email.message import EmailMessage
 from pathlib import Path
+from uuid import UUID
 try:
     from google import genai
 except ImportError:
@@ -1769,6 +1770,236 @@ def _verify_account(email, password):
         "supabase_user_id": str(auth_user["id"]),
         "access_token": result.get("access_token", ""),
     }
+
+
+DUAL_GRID_PROJECT_REF = "aytlgxlbbetzxilyeuho"
+DUAL_GRID_SUPABASE_URL = f"https://{DUAL_GRID_PROJECT_REF}.supabase.co"
+
+
+def _dual_grid_public_api_key(key):
+    if re.fullmatch(r"sb_publishable_[A-Za-z0-9_-]+", key):
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", key):
+        return False
+    encoded = key.split(".")[1]
+    try:
+        claims = json.loads(urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    except ValueError:
+        return False
+    return (isinstance(claims, dict) and claims.get("role") == "anon"
+            and claims.get("ref") == DUAL_GRID_PROJECT_REF)
+
+
+def _dual_grid_permission_request(account, route, payload=None):
+    token = account.get("access_token")
+    if not token:
+        return 401, None
+    try:
+        url, key = _supabase_auth_config()
+    except RuntimeError:
+        return 0, None
+    if url != DUAL_GRID_SUPABASE_URL or not _dual_grid_public_api_key(key):
+        return 0, None
+
+    method = "GET" if payload is None else "POST"
+    profile = "Accept-Profile" if method == "GET" else "Content-Profile"
+    try:
+        response = requests.request(
+            method, f"{url}/rest/v1/rpc/{route}",
+            headers={"apikey": key, "Authorization": f"Bearer {token}", profile: "gvi_access_api"},
+            json=payload, timeout=(5, 12), allow_redirects=False,
+        )
+        return response.status_code, response.json() if response.status_code == 200 else None
+    except (requests.RequestException, ValueError):
+        return 0, None
+
+
+def _require_dual_grid_access(account):
+    """Stop the module before it can read data or run a strategy."""
+    if os.environ.get("GVI_DUAL_GRID_ACCESS") != "1":
+        return
+
+    status, access = _dual_grid_permission_request(account, "read_module_access")
+    message = "暫時無法確認雙策略網格權限，請稍後再試。"
+    if status == 200 and isinstance(access, dict) and access.get("module") == "dual_grid":
+        global_enabled = access.get("global_enabled")
+        override = access.get("member_override")
+        allowed = access.get("allowed")
+        if (type(global_enabled) is bool and type(allowed) is bool
+                and "member_override" in access and (override is None or type(override) is bool)
+                and allowed == (global_enabled and override is not False)):
+            if allowed:
+                return
+            message = ("雙策略網格目前暫停使用。" if not global_enabled
+                       else "這個帳號目前無法使用雙策略網格。")
+    elif status in (401, 403):
+        message = "登入狀態無法驗證，請重新登入後再試。"
+
+    for key in ("dual_grid_analysis_results", "dual_grid_analysis_tickers", "dual_grid_backtest_result"):
+        st.session_state.pop(key, None)
+    st.warning(message)
+    st.stop()
+
+
+def _dual_grid_management_context(account):
+    status, context = _dual_grid_permission_request(account, "read_module_management")
+    if status != 200 or not isinstance(context, dict) or context.get("module") != "dual_grid":
+        return None
+    if type(context.get("super_admin")) is not bool or type(context.get("global_enabled")) is not bool:
+        return None
+    targets = context.get("targets")
+    if not isinstance(targets, list) or not (context["super_admin"] or targets):
+        return None
+    try:
+        for row in targets:
+            if (not isinstance(row, dict) or "override" not in row
+                    or (row["override"] is not None and type(row["override"]) is not bool)
+                    or str(UUID(row["member_id"])) != row["member_id"]):
+                return None
+        if context["super_admin"]:
+            scopes = context.get("delegations")
+            if not isinstance(scopes, list) or any(
+                not isinstance(scope, dict) or str(UUID(scope["admin_id"])) != scope["admin_id"]
+                or str(UUID(scope["member_id"])) != scope["member_id"] for scope in scopes
+            ):
+                return None
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return None
+    return context
+
+
+def _submit_dual_grid_management(account, route, payload, reason):
+    if not reason.strip():
+        st.error("請填寫變更原因。")
+        return
+    status, result = _dual_grid_permission_request(account, route, {**payload, "p_reason": reason})
+    if status == 200 and isinstance(result, dict) and type(result.get("changed")) is bool:
+        st.session_state["module_access_notice"] = "設定已儲存。" if result["changed"] else "設定已是此狀態。"
+        st.rerun()
+    if status in (401, 403):
+        st.error("權限已變更，這次操作未儲存。請重新開啟管理頁。")
+    else:
+        st.error("目前無法確認設定是否儲存，請重新載入管理頁確認。")
+
+
+def _change_dual_grid_management(account, target, enabled, reason):
+    _submit_dual_grid_management(account, "change_module_access", {
+        "p_target": target, "p_enabled": enabled,
+    }, reason)
+
+
+def _render_dual_grid_delegation(account, scopes):
+    st.markdown("#### 管理員委派")
+    if scopes:
+        st.dataframe(
+            [{"管理員識別碼": scope["admin_id"], "會員識別碼": scope["member_id"]} for scope in scopes],
+            hide_index=True,
+        )
+    with st.form("module_access_delegation_form"):
+        admin = st.text_input("委派管理員識別碼")
+        member = st.text_input("委派會員識別碼")
+        active = st.selectbox("委派操作", ("新增委派", "撤銷委派"))
+        reason = st.text_input("委派變更原因", max_chars=200)
+        if st.form_submit_button("儲存委派"):
+            try:
+                admin_id, member_id = str(UUID(admin.strip())), str(UUID(member.strip()))
+            except ValueError:
+                st.error("請輸入有效的管理員與會員識別碼。")
+                return
+            if admin_id == member_id:
+                st.error("管理員與會員必須是不同帳號。")
+                return
+            _submit_dual_grid_management(account, "change_module_delegation", {
+                "p_admin": admin_id, "p_member": member_id, "p_active": active == "新增委派",
+            }, reason)
+
+
+def _render_dual_grid_audit(account):
+    st.subheader("雙策略網格權限稽核")
+    status, events = _dual_grid_permission_request(account, "read_module_audit")
+    if status in (401, 403):
+        st.warning("目前沒有查看權限稽核的權限。")
+        return
+    if status != 200 or not isinstance(events, list):
+        st.error("目前無法載入稽核紀錄，請稍後再試。")
+        return
+    if not events:
+        st.info("目前沒有權限變更紀錄。")
+        return
+
+    actions = {
+        "set_global": ("全域開關", ("關閉", "開啟")),
+        "set_member": ("個別設定", ("停用", "允許")),
+        "grant_delegation": ("新增委派", ("無委派", "已委派")),
+        "revoke_delegation": ("撤銷委派", ("無委派", "已委派")),
+    }
+    roles = {"super_admin": "Super Admin", "delegated": "委派管理員"}
+    rows = []
+    try:
+        for event in events:
+            label, values = actions[event["action"]]
+            before, after = event["before_value"], event["after_value"]
+            if type(after) is not bool or (before is not None and type(before) is not bool):
+                raise ValueError("Unexpected audit value")
+            rows.append({
+                "時間（台北）": pd.Timestamp(event["recorded_at"]).tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M:%S"),
+                "操作": label,
+                "操作者識別碼": str(UUID(event["actor_id"])),
+                "授權身分": roles[event["authorization_basis"]],
+                "會員識別碼": str(UUID(event["target_id"])) if event["target_id"] else "—",
+                "委派管理員識別碼": str(UUID(event["delegate_id"])) if event["delegate_id"] else "—",
+                "變更前": "沿用預設" if before is None else values[before],
+                "變更後": values[after],
+                "原因": event["reason"],
+            })
+    except (AttributeError, KeyError, TypeError, ValueError):
+        st.error("目前無法載入稽核紀錄，請稍後再試。")
+        return
+    st.caption("顯示最近 50 筆，依變更時間由新到舊排列。")
+    st.dataframe(rows, hide_index=True)
+
+
+def _render_dual_grid_management(account, context):
+    if context["super_admin"]:
+        view = st.radio("管理頁面", ("權限設定", "權限稽核"), horizontal=True)
+        if view == "權限稽核":
+            _render_dual_grid_audit(account)
+            return
+    st.subheader("雙策略網格管理")
+    st.caption("全域狀態：開啟" if context["global_enabled"] else "全域狀態：關閉")
+    if notice := st.session_state.pop("module_access_notice", ""):
+        st.success(notice)
+
+    if context["super_admin"]:
+        with st.form("module_access_global_form"):
+            enabled = st.selectbox("全域設定", ("開啟", "關閉"), index=int(not context["global_enabled"]))
+            reason = st.text_input("全域變更原因", max_chars=200)
+            if st.form_submit_button("儲存全域設定"):
+                _change_dual_grid_management(account, None, enabled == "開啟", reason)
+
+    labels = {None: "沿用預設", True: "允許", False: "停用"}
+    with st.form("module_access_member_form"):
+        if context["super_admin"]:
+            if context["targets"]:
+                st.dataframe(
+                    [{"會員識別碼": row["member_id"], "個別設定": labels[row["override"]]} for row in context["targets"]],
+                    hide_index=True,
+                )
+            target = st.text_input("會員識別碼")
+        else:
+            statuses = {row["member_id"]: labels[row["override"]] for row in context["targets"]}
+            target = st.selectbox("可管理會員", tuple(statuses), format_func=lambda uid: f"{uid} · {statuses[uid]}")
+        allowed = st.selectbox("個別設定", ("允許", "停用"))
+        reason = st.text_input("個別變更原因", max_chars=200)
+        if st.form_submit_button("儲存個別設定"):
+            try:
+                target_id = str(UUID(target.strip()))
+            except ValueError:
+                st.error("請輸入有效的會員識別碼。")
+            else:
+                _change_dual_grid_management(account, target_id, allowed == "允許", reason)
+    if context["super_admin"]:
+        _render_dual_grid_delegation(account, context["delegations"])
 
 
 def _request_supabase_password_reset(email):
@@ -5555,7 +5786,7 @@ def _logout_account():
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
             "openai_api_key_input", "openai_model_input",
         ) or key.startswith((
-            "port_", "portfolio_", "login_", "register_", "recovery_",
+            "port_", "portfolio_", "dual_grid_", "module_access_", "login_", "register_", "recovery_",
             "password_reset_", "reset_", "finmind_user_token_",
             "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_", "broker_branch_ai_",
             "account_ai_report:", "ai_report_", "ai_provider_", "send_ai_report_email_",
@@ -5741,6 +5972,21 @@ if auth_user:
     ).strip().upper()
 
     st.sidebar.markdown("---")
+    if os.environ.get("GVI_DUAL_GRID_ACCESS") == "1":
+        management = _dual_grid_management_context(auth_user)
+        if st.session_state.get("module_access_open"):
+            if st.sidebar.button("返回策略模組", key="module_access_close"):
+                st.session_state.pop("module_access_open", None)
+                st.rerun()
+            if management is None:
+                st.warning("目前無法使用雙策略網格管理。")
+            else:
+                _render_dual_grid_management(auth_user, management)
+            st.stop()
+        if management and st.sidebar.button("雙策略網格管理", key="module_access_open_button"):
+            st.session_state["module_access_open"] = True
+            st.rerun()
+
     st.sidebar.markdown("### 🧭 核心策略模組導航")
     MODULE_LIST = [
         "📊 彩色 K 線圖與成交量",
@@ -5777,6 +6023,8 @@ if auth_user:
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
     )
+    if selected_module == "🧠 智慧型雙策略網格系統":
+        _require_dual_grid_access(auth_user)
     st.sidebar.markdown("### 🗣️ 解說風格與版面")
     explanation_style = st.sidebar.radio(
         "選擇顯示方式",
@@ -7620,6 +7868,7 @@ if auth_user:
                     per_stock_pct = st.slider("單檔最高占總資金（%）", min_value=5, max_value=40, value=15, step=5, key="dual_grid_per_stock_pct")
 
                 if scan_btn:
+                    _require_dual_grid_access(auth_user)
                     tickers = []
                     for item in re.split(r"[,，;；\s]+", tickers_raw.upper()):
                         item = item.strip()
@@ -7697,6 +7946,7 @@ if auth_user:
                 levels_count = st.slider("網格價位數", min_value=3, max_value=15, value=7, step=2, key="dual_grid_bt_levels")
                 bt_inputs = (bt_ticker, bt_date_range, bt_capital, dca_pct, fee_pct, tax_pct, slippage_pct, levels_count)
                 if st.button("▶️ 執行示意回測", key="dual_grid_run_backtest"):
+                    _require_dual_grid_access(auth_user)
                     st.session_state.pop("dual_grid_backtest_result", None)
                     if not bt_date_range or len(bt_date_range) != 2 or bt_date_range[0] >= bt_date_range[1]:
                         st.warning("請選擇起日早於迄日的完整資料區間。")
