@@ -6,6 +6,7 @@ import streamlit.components.v1 as components
 from base64 import b64encode, urlsafe_b64decode
 from contextlib import closing
 from email.message import EmailMessage
+from math import isfinite
 from pathlib import Path
 from uuid import UUID
 try:
@@ -1620,6 +1621,10 @@ def _export_portfolio(user_id):
             (user_id,),
         )]
 
+    return _encode_portfolio_export(settings, positions, snapshots)
+
+
+def _encode_portfolio_export(settings, positions, snapshots):
     exported_at = pd.Timestamp.now(tz="UTC")
     content = json.dumps({
         "schema_version": 1,
@@ -1812,6 +1817,139 @@ def _dual_grid_permission_request(account, route, payload=None):
         return response.status_code, response.json() if response.status_code == 200 else None
     except (requests.RequestException, ValueError):
         return 0, None
+
+
+PILOT_POSITION_COLUMNS = {
+    "legacy_id": "id", "symbol": "代碼", "name": "名稱", "asset_type": "資產類型",
+    "currency": "幣別", "quantity": "數量", "price": "最新價格", "fx_to_twd": "換算台幣匯率",
+    "cost_basis_twd": "台幣成本", "updated_at": "更新時間",
+}
+PILOT_SNAPSHOT_COLUMNS = {
+    "snapshot_date": "記錄時間", "total_value_twd": "組合市值", "stock_value_twd": "股票市值",
+    "bond_value_twd": "債券市值", "cash_value_twd": "現金市值",
+}
+
+
+def _validate_pilot_portfolio_rows(data):
+    positions, snapshots = data.get("positions"), data.get("snapshots")
+    for rows, keys, numeric, nullable in (
+        (positions, set(PILOT_POSITION_COLUMNS), {"quantity", "price", "fx_to_twd", "cost_basis_twd"}, set()),
+        (snapshots, {*PILOT_SNAPSHOT_COLUMNS, "legacy_id", "note"}, set(PILOT_SNAPSHOT_COLUMNS) - {"snapshot_date"}, {"note"}),
+    ):
+        if not isinstance(rows, list):
+            raise ValueError("Malformed portfolio data")
+        ids = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.keys() != keys:
+                raise ValueError("Malformed portfolio data")
+            legacy_id = row["legacy_id"]
+            if type(legacy_id) is not int or legacy_id < 1 or legacy_id in ids:
+                raise ValueError("Malformed portfolio data")
+            ids.add(legacy_id)
+            for key in keys - numeric - {"legacy_id"}:
+                if not isinstance(row[key], str) and not (key in nullable and row[key] is None):
+                    raise ValueError("Malformed portfolio data")
+            try:
+                valid = all(type(row[key]) in (int, float) and isfinite(row[key]) for key in numeric)
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise ValueError("Malformed portfolio data")
+    if data["revision"] == 0 and (positions or snapshots):
+        raise ValueError("Malformed portfolio data")
+
+
+PILOT_SETTING_LABELS = {
+    "target_stock_pct": "股票目標（%）", "target_bond_pct": "債券目標（%）",
+    "target_cash_pct": "現金目標（%）", "rebalance_threshold_pct": "再平衡門檻（%）",
+    "minimum_cash_twd": "最低現金（台幣）", "drawdown_warning_pct": "回撤提醒（%）",
+    "drawdown_review_pct": "回撤檢視（%）", "drawdown_limit_pct": "回撤上限（%）",
+}
+
+
+def _render_portfolio_export_link(filename, content):
+    # Deliver within this signed-in session without publishing a media URL.
+    payload = b64encode(content).decode("ascii")
+    link = (
+        f'<a href="data:application/json;base64,{payload}" download="{filename}">'
+        "下載我的持倉、設定與快照（JSON）</a>"
+    )
+    if hasattr(st, "iframe"):
+        st.iframe(link, height=42, alt="投資組合匯出")
+    else:
+        components.html(link, height=42)
+    st.caption("下載檔包含個人投資資料，請保存在私人位置。")
+
+
+def _is_portfolio_pilot(account):
+    selected = os.environ.get("GVI_PORTFOLIO_PILOT_UID", "").strip()
+    if not selected:
+        return False
+    try:
+        return UUID(selected) == UUID(account["supabase_user_id"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _read_portfolio_pilot(account):
+    token = account.get("access_token")
+    if not token:
+        raise ValueError("Sign-in required")
+    url, key = _supabase_auth_config()
+    if url != DUAL_GRID_SUPABASE_URL or not _dual_grid_public_api_key(key):
+        raise ValueError("Portfolio pilot configuration")
+    response = requests.request(
+        "GET", f"{url}/rest/v1/rpc/read_imported_portfolio",
+        headers={"apikey": key, "Authorization": f"Bearer {token}", "Accept-Profile": "gvi_portfolio_pilot_api"},
+        timeout=(5, 12), allow_redirects=False,
+    )
+    if response.status_code != 200:
+        raise RuntimeError("Portfolio pilot request failed")
+    data = response.json()
+    if not isinstance(data, dict) or type(data.get("revision")) is not int or data["revision"] < 0:
+        raise ValueError("Malformed portfolio data")
+    _validate_pilot_portfolio_rows(data)
+    settings = data["settings"]
+    if data["revision"] == 0:
+        if settings is not None:
+            raise ValueError("Malformed portfolio settings")
+    elif (not isinstance(settings, dict) or settings.keys() != PILOT_SETTING_LABELS.keys()
+            or not all(type(value) in (int, float) and isfinite(value) for value in settings.values())):
+        raise ValueError("Malformed portfolio settings")
+    return data
+
+
+def _render_portfolio_pilot(account):
+    try:
+        data = _read_portfolio_pilot(account)
+    except (KeyError, ValueError, OverflowError, RuntimeError, requests.RequestException):
+        st.error("暫時無法讀取雲端投資組合。請稍後再試，或切回原有投資組合。")
+        return
+
+    settings = data["settings"]
+    positions = data["positions"]
+    snapshots = data["snapshots"]
+    if data["revision"] == 0:
+        st.info("目前沒有雲端投資組合資料。")
+    if settings is not None:
+        st.markdown("#### 配置與風險規則")
+        st.dataframe([{"設定": label, "數值": settings[key]} for key, label in PILOT_SETTING_LABELS.items()],
+                     hide_index=True)
+    if positions:
+        st.markdown("#### 持倉")
+        labels = {key: label for key, label in PILOT_POSITION_COLUMNS.items() if key != "legacy_id"}
+        st.dataframe([{label: row[key] for key, label in labels.items()} for row in positions], hide_index=True)
+    if snapshots:
+        st.markdown("#### 歷史快照")
+        labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
+        st.dataframe([{label: row[key] for key, label in labels.items()} for row in snapshots], hide_index=True)
+    if st.button("準備匯出我的投資組合", key="portfolio_prepare_export"):
+        filename, content = _encode_portfolio_export(
+            settings or {},
+            [{key: value for key, value in row.items() if key != "legacy_id"} for row in positions],
+            [{key: value for key, value in row.items() if key != "legacy_id"} for row in snapshots],
+        )
+        _render_portfolio_export_link(filename, content)
 
 
 def _require_dual_grid_access(account):
@@ -9606,6 +9744,12 @@ if auth_user:
     if selected_module == "🧭 投資組合理財":
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
+        if _is_portfolio_pilot(auth_user):
+            source = st.radio("投資組合來源", ("原有投資組合", "雲端唯讀試行"), horizontal=True)
+            if source == "雲端唯讀試行":
+                _render_portfolio_pilot(auth_user)
+                st.stop()
+
         portfolio_user_id = int(auth_user["id"])
 
         if st.button("準備匯出我的投資組合", key="portfolio_prepare_export"):
@@ -9614,17 +9758,7 @@ if auth_user:
             except (sqlite3.Error, ValueError):
                 st.error("目前無法匯出完整資料。請稍後再試，若仍失敗請聯絡管理員。")
             else:
-                # Deliver within this signed-in session without publishing a media URL.
-                payload = b64encode(content).decode("ascii")
-                link = (
-                    f'<a href="data:application/json;base64,{payload}" download="{filename}">'
-                    "下載我的持倉、設定與快照（JSON）</a>"
-                )
-                if hasattr(st, "iframe"):
-                    st.iframe(link, height=42, alt="投資組合匯出")
-                else:
-                    components.html(link, height=42)
-                st.caption("下載檔包含個人投資資料，請保存在私人位置。")
+                _render_portfolio_export_link(filename, content)
 
         def _portfolio_load_settings():
             with sqlite3.connect(DB_FILE) as _conn:
