@@ -8,7 +8,7 @@ from contextlib import closing
 from email.message import EmailMessage
 from math import isfinite
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 try:
     from google import genai
 except ImportError:
@@ -1891,18 +1891,24 @@ def _is_portfolio_pilot(account):
         return False
 
 
-def _read_portfolio_pilot(account):
+def _portfolio_pilot_request(account, route, payload=None):
     token = account.get("access_token")
     if not token:
         raise ValueError("Sign-in required")
     url, key = _supabase_auth_config()
     if url != DUAL_GRID_SUPABASE_URL or not _dual_grid_public_api_key(key):
         raise ValueError("Portfolio pilot configuration")
-    response = requests.request(
-        "GET", f"{url}/rest/v1/rpc/read_imported_portfolio",
-        headers={"apikey": key, "Authorization": f"Bearer {token}", "Accept-Profile": "gvi_portfolio_pilot_api"},
-        timeout=(5, 12), allow_redirects=False,
+    method = "GET" if payload is None else "POST"
+    profile = "Accept-Profile" if payload is None else "Content-Profile"
+    return requests.request(
+        method, f"{url}/rest/v1/rpc/{route}",
+        headers={"apikey": key, "Authorization": f"Bearer {token}", profile: "gvi_portfolio_pilot_api"},
+        json=payload, timeout=(5, 12), allow_redirects=False,
     )
+
+
+def _read_portfolio_pilot(account):
+    response = _portfolio_pilot_request(account, "read_imported_portfolio")
     if response.status_code != 200:
         raise RuntimeError("Portfolio pilot request failed")
     data = response.json()
@@ -1919,6 +1925,90 @@ def _read_portfolio_pilot(account):
     return data
 
 
+PILOT_SETTINGS_STATE = "portfolio_pilot_settings_state"
+PILOT_SETTINGS_FIELDS = {
+    "target_stock_pct": (40.0, 0.0, 100.0),
+    "target_bond_pct": (50.0, 0.0, 100.0),
+    "target_cash_pct": (10.0, 0.0, 100.0),
+    "rebalance_threshold_pct": (5.0, 1.0, 30.0),
+    "minimum_cash_twd": (0.0, 0.0, None),
+    "drawdown_warning_pct": (8.0, 1.0, 30.0),
+    "drawdown_review_pct": (12.0, 1.0, 40.0),
+    "drawdown_limit_pct": (15.0, 1.0, 60.0),
+}
+
+
+def _submit_pilot_settings(account, state):
+    pending = state["pending"]
+    try:
+        response = _portfolio_pilot_request(account, "save_settings", pending)
+        if response.status_code == 200:
+            receipt = response.json()
+            if (isinstance(receipt, dict) and type(receipt.get("revision")) is int
+                    and receipt["revision"] == pending["p_expected_revision"] + 1
+                    and type(receipt.get("replayed")) is bool):
+                state.pop("pending")
+                state["saved"] = True
+                state["reload"] = True
+                st.rerun()
+        if response.status_code in (400, 401, 403, 409, 423):
+            state.pop("pending")
+            if response.status_code == 409:
+                state["conflict"] = True
+                st.rerun()
+            if response.status_code == 400:
+                st.error("請核對配置合計為 100%，且回撤提醒、檢視與上限依序遞增。")
+            else:
+                st.error("目前無法儲存配置，請確認登入與試行寫入權限。")
+            return
+    except (RuntimeError, ValueError, requests.RequestException):
+        pass
+    st.rerun()
+
+
+def _render_pilot_settings_form(account, data):
+    revision = data["revision"]
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(PILOT_SETTINGS_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "revision": revision, "form_id": uuid4().hex}
+        st.session_state[PILOT_SETTINGS_STATE] = state
+    if state.pop("saved", False):
+        st.success("雲端配置已儲存。")
+    if state.pop("reload", False):
+        state.update(revision=revision, form_id=uuid4().hex)
+    if "pending" in state:
+        st.warning("尚未確認儲存結果。請重試同一筆操作。")
+        if st.button("重試雲端配置儲存"):
+            _submit_pilot_settings(account, state)
+        return
+    if state["revision"] != revision or state.get("conflict"):
+        st.warning("雲端配置版本已更新。請重新讀取後再編輯。")
+        if st.button("重新讀取雲端配置"):
+            state.pop("conflict", None)
+            state["reload"] = True
+            st.rerun()
+        return
+
+    stored = data["settings"]
+    if stored is None:
+        st.caption("下方是表單建議值，儲存後才會寫入你的雲端配置。")
+    with st.form("pilot_configuration_" + state["form_id"]):
+        values = {}
+        for name, (default, minimum, maximum) in PILOT_SETTINGS_FIELDS.items():
+            value = default if stored is None else float(stored[name])
+            # Older data can lie outside today's editable bounds.
+            values[name] = st.number_input(
+                PILOT_SETTING_LABELS[name], min_value=min(minimum, value),
+                max_value=max(maximum, value) if maximum is not None else None,
+                value=value, key=f"{state['form_id']}_{name}",
+            )
+        if st.form_submit_button("儲存雲端配置"):
+            state["pending"] = {"p_expected_revision": state["revision"],
+                                "p_operation_id": str(uuid4()), "p_settings": values}
+            _submit_pilot_settings(account, state)
+
+
 def _render_portfolio_pilot(account):
     try:
         data = _read_portfolio_pilot(account)
@@ -1931,7 +2021,9 @@ def _render_portfolio_pilot(account):
     snapshots = data["snapshots"]
     if data["revision"] == 0:
         st.info("目前沒有雲端投資組合資料。")
-    if settings is not None:
+    if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
+        _render_pilot_settings_form(account, data)
+    elif settings is not None:
         st.markdown("#### 配置與風險規則")
         st.dataframe([{"設定": label, "數值": settings[key]} for key, label in PILOT_SETTING_LABELS.items()],
                      hide_index=True)
@@ -5919,6 +6011,7 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
 
 # 🔐 使用者帳號登入與自助註冊
 def _logout_account():
+    st.session_state.pop(PILOT_SETTINGS_STATE, None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
@@ -9745,8 +9838,10 @@ if auth_user:
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
         if _is_portfolio_pilot(auth_user):
-            source = st.radio("投資組合來源", ("原有投資組合", "雲端唯讀試行"), horizontal=True)
-            if source == "雲端唯讀試行":
+            cloud_label = ("雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
+                           else "雲端唯讀試行")
+            source = st.radio("投資組合來源", ("原有投資組合", cloud_label), horizontal=True)
+            if source == cloud_label:
                 _render_portfolio_pilot(auth_user)
                 st.stop()
 
