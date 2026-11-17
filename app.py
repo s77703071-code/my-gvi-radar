@@ -2010,34 +2010,113 @@ def _render_pilot_settings_form(account, data):
 
 
 PILOT_POSITION_STATE = "portfolio_pilot_position_state"
+PILOT_POSITION_EDIT_STATE = "portfolio_pilot_position_edit_state"
 
 
-def _submit_pilot_position(account, state):
+def _submit_pilot_position(account, state, *, editing=False):
     pending = state["pending"]
+    route = "update_position" if editing else "add_position"
     try:
-        response = _portfolio_pilot_request(account, "add_position", pending)
+        response = _portfolio_pilot_request(account, route, pending)
         if response.status_code == 200:
             receipt = response.json()
             if (isinstance(receipt, dict) and type(receipt.get("revision")) is int
                     and receipt["revision"] == pending["p_expected_revision"] + 1
                     and type(receipt.get("record_id")) is int and receipt["record_id"] > 0
+                    and (not editing or receipt["record_id"] == pending["p_record_id"])
                     and type(receipt.get("replayed")) is bool):
                 state.pop("pending")
                 state["saved"] = True
                 st.rerun()
-        if response.status_code in (400, 401, 403, 409, 423):
+        if response.status_code in (400, 401, 403, 404, 409, 423):
             state.pop("pending")
-            if response.status_code == 409:
+            if response.status_code in (404, 409):
                 state["conflict"] = True
                 st.rerun()
             if response.status_code == 400:
-                st.error("請核對持倉代碼、數量、價格、匯率及成本。")
+                st.error("請核對持倉欄位、數量、價格、匯率及成本。")
             else:
-                st.error("目前無法新增雲端持倉，請確認登入與試行權限。")
+                action = "修改" if editing else "新增"
+                st.error(f"目前無法{action}雲端持倉，請確認登入與試行權限。")
             return
     except (RuntimeError, ValueError, requests.RequestException):
         pass
     st.rerun()
+
+
+def _pilot_position_fields(key_prefix, position=None):
+    stored = position or {}
+    asset_types = ("股票", "債券", "現金")
+    currencies = ("TWD", "USD", "JPY", "HKD", "EUR")
+    asset = stored.get("asset_type", asset_types[0])
+    currency = stored.get("currency", currencies[0])
+    if asset not in asset_types:
+        asset_types += (asset,)
+    if currency not in currencies:
+        currencies += (currency,)
+    values = {
+        "name": st.text_input("持倉名稱", value=stored.get("name", ""), key=f"{key_prefix}_name"),
+        "asset_type": st.selectbox("持倉類型", asset_types, index=asset_types.index(asset), key=f"{key_prefix}_asset"),
+        "currency": st.selectbox("持倉幣別", currencies, index=currencies.index(currency), key=f"{key_prefix}_currency"),
+    }
+    for field, label, minimum in (
+        ("quantity", "持倉數量", 0.0),
+        ("price", "持倉單價", 0.0),
+        ("fx_to_twd", "兌台幣匯率", 0.000001),
+        ("cost_basis_twd", "持倉總成本（台幣）", 0.0),
+    ):
+        value = float(stored[field]) if position is not None else None
+        help_text = "每一單位持倉幣別可兌換的台幣金額。TWD 請填 1。" if field == "fx_to_twd" else None
+        edited = st.number_input(label, min_value=min(minimum, value) if value is not None else minimum,
+                                 value=value, format="%.6f", help=help_text, key=f"{key_prefix}_{field}")
+        values[field] = stored[field] if position is not None and edited == value else edited
+    return values
+
+
+def _render_pilot_position_edit(account, data):
+    st.markdown("#### 修改雲端持倉")
+    owner = account["supabase_user_id"]
+    revision = data["revision"]
+    state = st.session_state.get(PILOT_POSITION_EDIT_STATE)
+    if state is None or state["owner"] != owner or state.pop("reload", False):
+        state = {"owner": owner, "revision": revision, "form_id": uuid4().hex}
+        st.session_state[PILOT_POSITION_EDIT_STATE] = state
+    if state.pop("saved", False):
+        st.success("雲端持倉修改已儲存。")
+        state.update(revision=revision, form_id=uuid4().hex)
+    if "pending" in state:
+        st.warning("尚未確認持倉修改結果。請重試同一筆操作。")
+        if st.button("重試修改雲端持倉"):
+            _submit_pilot_position(account, state, editing=True)
+        return
+
+    positions = {row["legacy_id"]: row for row in data["positions"]}
+    if not positions:
+        st.info("目前沒有可修改的雲端持倉。")
+        return
+    if state["revision"] != revision or state.get("conflict"):
+        st.warning("雲端投資組合已更新，請重新讀取後再修改持倉。")
+        if st.button("重新讀取待修改持倉"):
+            state["reload"] = True
+            st.rerun()
+        return
+
+    record_id = st.selectbox(
+        "選擇要修改的持倉", tuple(positions), index=None,
+        format_func=lambda row_id: f"{positions[row_id]['symbol']} · {positions[row_id]['name']}（編號 {row_id}）",
+    )
+    if record_id is None:
+        return
+    form_id = f"pilot_position_edit_{state['form_id']}_{record_id}"
+    with st.form(form_id):
+        values = _pilot_position_fields(form_id, positions[record_id])
+        if st.form_submit_button("儲存持倉修改"):
+            if any(value is None for value in values.values()) or values["quantity"] <= 0:
+                st.error("請填寫正數數量、單價、匯率及總成本。")
+                return
+            state["pending"] = {"p_expected_revision": state["revision"], "p_operation_id": str(uuid4()),
+                                "p_record_id": record_id, "p_values": values}
+            _submit_pilot_position(account, state, editing=True)
 
 
 def _render_pilot_position_form(account, data):
@@ -2069,21 +2148,13 @@ def _render_pilot_position_form(account, data):
 
     with st.form("pilot_position_" + state["form_id"]):
         symbol = st.text_input("持倉代碼")
-        name = st.text_input("持倉名稱")
-        asset_type = st.selectbox("持倉類型", ("股票", "債券", "現金"))
-        currency = st.selectbox("持倉幣別", ("TWD", "USD", "JPY", "HKD", "EUR"))
-        quantity = st.number_input("持倉數量", min_value=0.0, value=None, format="%.6f")
-        price = st.number_input("持倉單價", min_value=0.0, value=None, format="%.6f")
-        fx = st.number_input("兌台幣匯率", min_value=0.000001, value=None, format="%.6f",
-                             help="每一單位持倉幣別可兌換的台幣金額。TWD 請填 1。")
-        cost = st.number_input("持倉總成本（台幣）", min_value=0.0, value=None, format="%.6f")
+        values = _pilot_position_fields(state["form_id"])
         if st.form_submit_button("儲存新增持倉"):
-            if not symbol.strip() or quantity is None or quantity <= 0 or price is None or cost is None or fx is None:
+            if not symbol.strip() or any(value is None for value in values.values()) or values["quantity"] <= 0:
                 st.error("請填寫持倉代碼、正數數量、單價、匯率及總成本。")
                 return
-            values = {"symbol": symbol.strip(), "name": name.strip(), "asset_type": asset_type,
-                      "currency": currency, "quantity": quantity, "price": price,
-                      "fx_to_twd": fx, "cost_basis_twd": cost}
+            values["symbol"] = symbol.strip()
+            values["name"] = values["name"].strip()
             state["pending"] = {"p_expected_revision": state["revision"],
                                 "p_operation_id": str(uuid4()), "p_values": values}
             _submit_pilot_position(account, state)
@@ -2113,6 +2184,8 @@ def _render_portfolio_pilot(account):
         st.markdown("#### 持倉")
         labels = {key: label for key, label in PILOT_POSITION_COLUMNS.items() if key != "legacy_id"}
         st.dataframe([{label: row[key] for key, label in labels.items()} for row in positions], hide_index=True)
+    if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_EDIT") == "1":
+        _render_pilot_position_edit(account, data)
     if snapshots:
         st.markdown("#### 歷史快照")
         labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
@@ -6095,6 +6168,7 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
 def _logout_account():
     st.session_state.pop(PILOT_SETTINGS_STATE, None)
     st.session_state.pop(PILOT_POSITION_STATE, None)
+    st.session_state.pop(PILOT_POSITION_EDIT_STATE, None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
@@ -9921,7 +9995,9 @@ if auth_user:
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
         if _is_portfolio_pilot(auth_user):
-            cloud_label = ("雲端投資組合試行" if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_ADD") == "1"
+            position_enabled = any(os.environ.get(flag) == "1" for flag in (
+                "GVI_PORTFOLIO_PILOT_POSITION_ADD", "GVI_PORTFOLIO_PILOT_POSITION_EDIT"))
+            cloud_label = ("雲端投資組合試行" if position_enabled
                            else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
                            else "雲端唯讀試行")
             source = st.radio("投資組合來源", ("原有投資組合", cloud_label), horizontal=True)
