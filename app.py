@@ -1867,15 +1867,16 @@ PILOT_SETTING_LABELS = {
 }
 
 
-def _render_portfolio_export_link(filename, content):
+def _render_portfolio_export_link(filename, content, *,
+                                  label="下載我的持倉、設定與快照（JSON）", title="投資組合匯出"):
     # Deliver within this signed-in session without publishing a media URL.
     payload = b64encode(content).decode("ascii")
     link = (
         f'<a href="data:application/json;base64,{payload}" download="{filename}">'
-        "下載我的持倉、設定與快照（JSON）</a>"
+        f"{html.escape(label)}</a>"
     )
     if hasattr(st, "iframe"):
-        st.iframe(link, height=42, alt="投資組合匯出")
+        st.iframe(link, height=42, alt=title)
     else:
         components.html(link, height=42)
     st.caption("下載檔包含個人投資資料，請保存在私人位置。")
@@ -2254,6 +2255,103 @@ def _render_pilot_snapshot(account, data):
         _submit_pilot_portfolio_operation(account, state, route="record_snapshot")
 
 
+PILOT_INCOME_STATE = "portfolio_pilot_income_state"
+PILOT_INCOME_TYPES = {"dividend": "股息", "interest": "利息"}
+PILOT_INCOME_CURRENCIES = ("TWD", "USD", "JPY", "HKD", "EUR")
+PILOT_INCOME_AMOUNT = re.compile(r"[0-9]{1,24}(?:[.][0-9]{1,12})?")
+
+
+def _submit_pilot_income(account, state):
+    pending = state["pending"]
+    try:
+        response = _portfolio_pilot_request(account, "record_income", pending)
+        if response.status_code == 200:
+            result = response.json()
+            if (isinstance(result, dict) and result.get("operation_id") == pending["p_operation_id"]
+                    and type(result.get("replayed")) is bool):
+                state.pop("pending")
+                state.update(saved=True, form_id=uuid4().hex)
+                st.rerun()
+        if response.status_code in (400, 401, 403, 404, 409, 422, 423):
+            state.pop("pending")
+            if response.status_code in (400, 422):
+                st.error("請核對收入類型、實際入帳日、幣別與實收金額。")
+            elif response.status_code == 409:
+                st.error("這筆操作已用於不同的收入明細。請核對歷史紀錄後再新增。")
+            else:
+                st.error("目前無法儲存投資收入，請確認登入與試行權限。")
+            return
+    except (RuntimeError, ValueError, requests.RequestException):
+        pass
+    st.rerun()
+
+
+def _render_pilot_income(account):
+    st.markdown("#### 股息與利息")
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(PILOT_INCOME_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "form_id": uuid4().hex}
+        st.session_state[PILOT_INCOME_STATE] = state
+    if state.pop("saved", False):
+        st.success("投資收入已儲存。")
+    if "pending" in state:
+        st.warning("尚未確認收入儲存結果。請重試同一筆操作。")
+        if st.button("重試儲存投資收入"):
+            _submit_pilot_income(account, state)
+
+    try:
+        response = _portfolio_pilot_request(account, "read_income_entries")
+        rows = response.json() if response.status_code == 200 else None
+        fields = {"operation_id", "income_type", "booked_on", "currency", "net_amount", "reference", "note", "recorded_at"}
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or row.keys() != fields or row["income_type"] not in PILOT_INCOME_TYPES
+            or row["currency"] not in PILOT_INCOME_CURRENCIES
+            or not isinstance(row["net_amount"], str) or not PILOT_INCOME_AMOUNT.fullmatch(row["net_amount"])
+            for row in rows
+        ):
+            raise ValueError("Invalid income history")
+    except (RuntimeError, ValueError, TypeError, requests.RequestException):
+        st.error("暫時無法讀取投資收入明細。請稍後再試。")
+        return
+
+    if rows:
+        for currency in PILOT_INCOME_CURRENCIES:
+            entries = [{"入帳日": row["booked_on"], "類型": PILOT_INCOME_TYPES[row["income_type"]],
+                        "實收金額": row["net_amount"], "標的或帳戶": row["reference"], "備註": row["note"]}
+                       for row in rows if row["currency"] == currency]
+            if entries:
+                st.markdown(f"**{currency}**")
+                st.dataframe(entries, hide_index=True)
+        if st.button("準備匯出投資收入明細"):
+            now = pd.Timestamp.now(tz="UTC")
+            content = json.dumps({"schema_version": 1, "exported_at_utc": now.isoformat(), "income_entries": rows},
+                                 ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+            _render_portfolio_export_link(f"gvi-income-{now:%Y%m%dT%H%M%SZ}.json", content,
+                                          label="下載股息與利息明細（JSON）", title="投資收入明細匯出")
+    else:
+        st.info("尚無已儲存的股息或利息明細。")
+
+    if "pending" in state:
+        return
+    with st.form("pilot_income_" + state["form_id"], clear_on_submit=False):
+        kind = st.selectbox("收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get)
+        booked_on = st.date_input("實際入帳日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
+                                  max_value=pd.Timestamp.now(tz="Asia/Taipei").date())
+        currency = st.selectbox("收入幣別", PILOT_INCOME_CURRENCIES)
+        amount = st.text_input("實收金額（原幣）", help="請輸入實際入帳金額，最多可填 12 位小數。").strip()
+        reference = st.text_input("標的或帳戶（選填）", max_chars=100).strip()
+        note = st.text_area("收入備註（選填）", max_chars=500).strip()
+        if st.form_submit_button("儲存投資收入"):
+            if booked_on is None or not PILOT_INCOME_AMOUNT.fullmatch(amount) or not any(c in "123456789" for c in amount):
+                st.error("請選擇實際入帳日，並輸入大於零的原幣實收金額。")
+                return
+            state["pending"] = {"p_operation_id": str(uuid4()), "p_income_type": kind,
+                                "p_booked_on": booked_on.isoformat(), "p_currency": currency,
+                                "p_net_amount": amount, "p_reference": reference or None, "p_note": note or None}
+            _submit_pilot_income(account, state)
+
+
 def _render_portfolio_pilot(account):
     try:
         data = _read_portfolio_pilot(account)
@@ -2297,6 +2395,8 @@ def _render_portfolio_pilot(account):
             [{key: value for key, value in row.items() if key != "legacy_id"} for row in snapshots],
         )
         _render_portfolio_export_link(filename, content)
+    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1":
+        _render_pilot_income(account)
 
 
 def _require_dual_grid_access(account):
@@ -6271,6 +6371,7 @@ def _logout_account():
     st.session_state.pop(PILOT_POSITION_EDIT_STATE, None)
     st.session_state.pop(PILOT_POSITION_DELETE_STATE, None)
     st.session_state.pop(PILOT_SNAPSHOT_STATE, None)
+    st.session_state.pop(PILOT_INCOME_STATE, None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
@@ -10099,7 +10200,8 @@ if auth_user:
         if _is_portfolio_pilot(auth_user):
             portfolio_enabled = any(os.environ.get(flag) == "1" for flag in (
                 "GVI_PORTFOLIO_PILOT_POSITION_ADD", "GVI_PORTFOLIO_PILOT_POSITION_EDIT",
-                "GVI_PORTFOLIO_PILOT_POSITION_DELETE", "GVI_PORTFOLIO_PILOT_SNAPSHOT"))
+                "GVI_PORTFOLIO_PILOT_POSITION_DELETE", "GVI_PORTFOLIO_PILOT_SNAPSHOT",
+                "GVI_PORTFOLIO_PILOT_INCOME"))
             cloud_label = ("雲端投資組合試行" if portfolio_enabled
                            else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
                            else "雲端唯讀試行")
