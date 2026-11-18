@@ -2257,14 +2257,14 @@ def _render_pilot_snapshot(account, data):
 
 PILOT_INCOME_STATE = "portfolio_pilot_income_state"
 PILOT_INCOME_TYPES = {"dividend": "股息", "interest": "利息"}
-PILOT_INCOME_CURRENCIES = ("TWD", "USD", "JPY", "HKD", "EUR")
-PILOT_INCOME_AMOUNT = re.compile(r"[0-9]{1,24}(?:[.][0-9]{1,12})?")
+PILOT_ENTRY_CURRENCIES = ("TWD", "USD", "JPY", "HKD", "EUR")
+PILOT_ENTRY_DECIMAL = re.compile(r"[0-9]{1,24}(?:[.][0-9]{1,12})?")
 
 
-def _submit_pilot_income(account, state):
+def _submit_pilot_entry(account, state, *, route, label, entry_label, invalid_message):
     pending = state["pending"]
     try:
-        response = _portfolio_pilot_request(account, "record_income", pending)
+        response = _portfolio_pilot_request(account, route, pending)
         if response.status_code == 200:
             result = response.json()
             if (isinstance(result, dict) and result.get("operation_id") == pending["p_operation_id"]
@@ -2275,15 +2275,20 @@ def _submit_pilot_income(account, state):
         if response.status_code in (400, 401, 403, 404, 409, 422, 423):
             state.pop("pending")
             if response.status_code in (400, 422):
-                st.error("請核對收入類型、實際入帳日、幣別與實收金額。")
+                st.error(invalid_message)
             elif response.status_code == 409:
-                st.error("這筆操作已用於不同的收入明細。請核對歷史紀錄後再新增。")
+                st.error(f"這筆操作已用於不同的{entry_label}。請核對歷史紀錄後再新增。")
             else:
-                st.error("目前無法儲存投資收入，請確認登入與試行權限。")
+                st.error(f"目前無法儲存{label}，請確認登入與試行權限。")
             return
     except (RuntimeError, ValueError, requests.RequestException):
         pass
     st.rerun()
+
+
+def _submit_pilot_income(account, state):
+    _submit_pilot_entry(account, state, route="record_income", label="投資收入", entry_label="收入明細",
+                        invalid_message="請核對收入類型、實際入帳日、幣別與實收金額。")
 
 
 def _render_pilot_income(account):
@@ -2306,8 +2311,8 @@ def _render_pilot_income(account):
         fields = {"operation_id", "income_type", "booked_on", "currency", "net_amount", "reference", "note", "recorded_at"}
         if not isinstance(rows, list) or any(
             not isinstance(row, dict) or row.keys() != fields or row["income_type"] not in PILOT_INCOME_TYPES
-            or row["currency"] not in PILOT_INCOME_CURRENCIES
-            or not isinstance(row["net_amount"], str) or not PILOT_INCOME_AMOUNT.fullmatch(row["net_amount"])
+            or row["currency"] not in PILOT_ENTRY_CURRENCIES
+            or not isinstance(row["net_amount"], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row["net_amount"])
             for row in rows
         ):
             raise ValueError("Invalid income history")
@@ -2316,7 +2321,7 @@ def _render_pilot_income(account):
         return
 
     if rows:
-        for currency in PILOT_INCOME_CURRENCIES:
+        for currency in PILOT_ENTRY_CURRENCIES:
             entries = [{"入帳日": row["booked_on"], "類型": PILOT_INCOME_TYPES[row["income_type"]],
                         "實收金額": row["net_amount"], "標的或帳戶": row["reference"], "備註": row["note"]}
                        for row in rows if row["currency"] == currency]
@@ -2338,18 +2343,105 @@ def _render_pilot_income(account):
         kind = st.selectbox("收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get)
         booked_on = st.date_input("實際入帳日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
                                   max_value=pd.Timestamp.now(tz="Asia/Taipei").date())
-        currency = st.selectbox("收入幣別", PILOT_INCOME_CURRENCIES)
+        currency = st.selectbox("收入幣別", PILOT_ENTRY_CURRENCIES)
         amount = st.text_input("實收金額（原幣）", help="請輸入實際入帳金額，最多可填 12 位小數。").strip()
         reference = st.text_input("標的或帳戶（選填）", max_chars=100).strip()
         note = st.text_area("收入備註（選填）", max_chars=500).strip()
         if st.form_submit_button("儲存投資收入"):
-            if booked_on is None or not PILOT_INCOME_AMOUNT.fullmatch(amount) or not any(c in "123456789" for c in amount):
+            if booked_on is None or not PILOT_ENTRY_DECIMAL.fullmatch(amount) or not any(c in "123456789" for c in amount):
                 st.error("請選擇實際入帳日，並輸入大於零的原幣實收金額。")
                 return
             state["pending"] = {"p_operation_id": str(uuid4()), "p_income_type": kind,
                                 "p_booked_on": booked_on.isoformat(), "p_currency": currency,
                                 "p_net_amount": amount, "p_reference": reference or None, "p_note": note or None}
             _submit_pilot_income(account, state)
+
+
+PILOT_TRADE_STATE = "portfolio_pilot_trade_state"
+PILOT_TRADE_SIDES = {"buy": "買入", "sell": "賣出"}
+
+
+def _submit_pilot_trade(account, state):
+    _submit_pilot_entry(account, state, route="record_trade", label="買賣成交", entry_label="成交明細",
+                        invalid_message="請核對成交日、標的、幣別、數量、單價及費用。")
+
+
+def _render_pilot_trade(account):
+    st.markdown("#### 買賣成交明細")
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(PILOT_TRADE_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "form_id": uuid4().hex}
+        st.session_state[PILOT_TRADE_STATE] = state
+    if state.pop("saved", False):
+        st.success("買賣成交已儲存。")
+    if "pending" in state:
+        st.warning("尚未確認成交儲存結果。請重試同一筆操作。")
+        if st.button("重試儲存買賣成交"):
+            _submit_pilot_trade(account, state)
+
+    try:
+        response = _portfolio_pilot_request(account, "read_trade_entries")
+        rows = response.json() if response.status_code == 200 else None
+        fields = {"operation_id", "executed_on", "side", "symbol", "currency", "quantity",
+                  "unit_price", "fee", "tax", "note", "recorded_at"}
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or row.keys() != fields or row["side"] not in PILOT_TRADE_SIDES
+            or row["currency"] not in PILOT_ENTRY_CURRENCIES
+            or any(not isinstance(row[name], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])
+                   for name in ("quantity", "unit_price"))
+            or any(row[name] is not None and (not isinstance(row[name], str)
+                   or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])) for name in ("fee", "tax"))
+            for row in rows
+        ):
+            raise ValueError("Invalid trade history")
+    except (RuntimeError, ValueError, TypeError, requests.RequestException):
+        st.error("暫時無法讀取買賣成交明細。請稍後再試。")
+        return
+
+    if rows:
+        st.dataframe([
+            {"成交日": row["executed_on"], "方向": PILOT_TRADE_SIDES[row["side"]], "標的": row["symbol"],
+             "原幣": row["currency"], "成交數量": row["quantity"], "成交單價": row["unit_price"],
+             "手續費": row["fee"] or "未填", "交易稅": row["tax"] or "未填", "備註": row["note"]}
+            for row in rows
+        ], hide_index=True)
+        if st.button("準備匯出買賣成交明細"):
+            now = pd.Timestamp.now(tz="UTC")
+            content = json.dumps({"schema_version": 1, "exported_at_utc": now.isoformat(), "trade_entries": rows},
+                                 ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+            _render_portfolio_export_link(f"gvi-trades-{now:%Y%m%dT%H%M%SZ}.json", content,
+                                          label="下載買賣成交明細（JSON）", title="買賣成交明細匯出")
+    else:
+        st.info("尚無已儲存的買賣成交明細。")
+
+    if "pending" in state:
+        return
+    st.caption("記錄已成交的買賣供查閱與對帳。目前登記後持倉、現金和快照維持原值。")
+    with st.form("pilot_trade_" + state["form_id"], clear_on_submit=False):
+        side = st.selectbox("成交方向", tuple(PILOT_TRADE_SIDES), format_func=PILOT_TRADE_SIDES.get)
+        symbol = st.text_input("成交標的", max_chars=40).strip()
+        executed_on = st.date_input("實際成交日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
+                                    max_value=pd.Timestamp.now(tz="Asia/Taipei").date())
+        currency = st.selectbox("成交幣別", PILOT_ENTRY_CURRENCIES)
+        quantity = st.text_input("成交數量").strip()
+        price = st.text_input("成交單價（原幣）").strip()
+        st.caption("數量與金額最多可填 12 位小數。費用使用成交幣別，空白代表未填，無費用請輸入 0。")
+        fee = st.text_input("手續費（選填）").strip()
+        tax = st.text_input("交易稅（選填）").strip()
+        note = st.text_area("成交備註（選填）", max_chars=500).strip()
+        if st.form_submit_button("儲存買賣成交"):
+            if executed_on is None or not symbol or any(
+                not PILOT_ENTRY_DECIMAL.fullmatch(value) or not any(c in "123456789" for c in value)
+                for value in (quantity, price)
+            ) or any(value and not PILOT_ENTRY_DECIMAL.fullmatch(value) for value in (fee, tax)):
+                st.error("請填寫成交標的、實際成交日及大於零的數量與單價。費用可留白或填非負數。")
+                return
+            state["pending"] = {"p_operation_id": str(uuid4()), "p_executed_on": executed_on.isoformat(),
+                                "p_side": side, "p_symbol": symbol, "p_currency": currency,
+                                "p_quantity": quantity, "p_unit_price": price,
+                                "p_fee": fee or None, "p_tax": tax or None, "p_note": note or None}
+            _submit_pilot_trade(account, state)
 
 
 def _render_portfolio_pilot(account):
@@ -2397,6 +2489,8 @@ def _render_portfolio_pilot(account):
         _render_portfolio_export_link(filename, content)
     if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1":
         _render_pilot_income(account)
+    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
+        _render_pilot_trade(account)
 
 
 def _require_dual_grid_access(account):
@@ -6372,6 +6466,7 @@ def _logout_account():
     st.session_state.pop(PILOT_POSITION_DELETE_STATE, None)
     st.session_state.pop(PILOT_SNAPSHOT_STATE, None)
     st.session_state.pop(PILOT_INCOME_STATE, None)
+    st.session_state.pop(PILOT_TRADE_STATE, None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
@@ -10201,7 +10296,7 @@ if auth_user:
             portfolio_enabled = any(os.environ.get(flag) == "1" for flag in (
                 "GVI_PORTFOLIO_PILOT_POSITION_ADD", "GVI_PORTFOLIO_PILOT_POSITION_EDIT",
                 "GVI_PORTFOLIO_PILOT_POSITION_DELETE", "GVI_PORTFOLIO_PILOT_SNAPSHOT",
-                "GVI_PORTFOLIO_PILOT_INCOME"))
+                "GVI_PORTFOLIO_PILOT_INCOME", "GVI_PORTFOLIO_PILOT_TRADE"))
             cloud_label = ("雲端投資組合試行" if portfolio_enabled
                            else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
                            else "雲端唯讀試行")
