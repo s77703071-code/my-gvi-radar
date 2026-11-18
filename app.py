@@ -2012,11 +2012,17 @@ def _render_pilot_settings_form(account, data):
 PILOT_POSITION_STATE = "portfolio_pilot_position_state"
 PILOT_POSITION_EDIT_STATE = "portfolio_pilot_position_edit_state"
 PILOT_POSITION_DELETE_STATE = "portfolio_pilot_position_delete_state"
+PILOT_SNAPSHOT_STATE = "portfolio_pilot_snapshot_state"
 
 
-def _submit_pilot_position(account, state, *, route="add_position"):
+def _submit_pilot_portfolio_operation(account, state, *, route="add_position"):
     pending = state["pending"]
-    action = {"add_position": "新增", "update_position": "修改", "delete_position": "刪除"}[route]
+    action = {
+        "add_position": "新增雲端持倉",
+        "update_position": "修改雲端持倉",
+        "delete_position": "刪除雲端持倉",
+        "record_snapshot": "記錄雲端快照",
+    }[route]
     try:
         response = _portfolio_pilot_request(account, route, pending)
         if response.status_code == 200:
@@ -2037,10 +2043,12 @@ def _submit_pilot_position(account, state, *, route="add_position"):
             if response.status_code == 400:
                 if route == "delete_position":
                     st.error("無法辨識要刪除的持倉，請重新選擇。")
+                elif route == "record_snapshot":
+                    st.error("無法記錄快照，請核對已存持倉的數量、單價、匯率與分類。")
                 else:
                     st.error("請核對持倉欄位、數量、價格、匯率及成本。")
             else:
-                st.error(f"目前無法{action}雲端持倉，請確認登入與試行權限。")
+                st.error(f"目前無法{action}，請確認登入與試行權限。")
             return
     except (RuntimeError, ValueError, requests.RequestException):
         pass
@@ -2094,7 +2102,7 @@ def _render_pilot_position_edit(account, data):
     if "pending" in state:
         st.warning("尚未確認持倉修改結果。請重試同一筆操作。")
         if st.button("重試修改雲端持倉"):
-            _submit_pilot_position(account, state, route="update_position")
+            _submit_pilot_portfolio_operation(account, state, route="update_position")
         return
 
     positions = {row["legacy_id"]: row for row in data["positions"]}
@@ -2123,7 +2131,7 @@ def _render_pilot_position_edit(account, data):
                 return
             state["pending"] = {"p_expected_revision": state["revision"], "p_operation_id": str(uuid4()),
                                 "p_record_id": record_id, "p_values": values}
-            _submit_pilot_position(account, state, route="update_position")
+            _submit_pilot_portfolio_operation(account, state, route="update_position")
 
 
 def _render_pilot_position_form(account, data):
@@ -2144,7 +2152,7 @@ def _render_pilot_position_form(account, data):
     if "pending" in state:
         st.warning("尚未確認持倉儲存結果。請重試同一筆操作。")
         if st.button("重試新增雲端持倉"):
-            _submit_pilot_position(account, state)
+            _submit_pilot_portfolio_operation(account, state)
         return
     if state["revision"] != revision or state.get("conflict"):
         st.warning("雲端投資組合版本已更新。請重新讀取後再新增持倉。")
@@ -2164,7 +2172,7 @@ def _render_pilot_position_form(account, data):
             values["name"] = values["name"].strip()
             state["pending"] = {"p_expected_revision": state["revision"],
                                 "p_operation_id": str(uuid4()), "p_values": values}
-            _submit_pilot_position(account, state)
+            _submit_pilot_portfolio_operation(account, state)
 
 
 def _render_pilot_position_delete(account, data):
@@ -2181,7 +2189,7 @@ def _render_pilot_position_delete(account, data):
     if "pending" in state:
         st.warning("尚未確認刪除結果。重試會送出同一筆刪除請求。")
         if st.button("重試刪除雲端持倉"):
-            _submit_pilot_position(account, state, route="delete_position")
+            _submit_pilot_portfolio_operation(account, state, route="delete_position")
         return
 
     positions = {row["legacy_id"]: row for row in data["positions"]}
@@ -2213,7 +2221,37 @@ def _render_pilot_position_delete(account, data):
     if st.button("確認刪除持倉", disabled=not confirmed):
         state["pending"] = {"p_expected_revision": state["revision"], "p_operation_id": str(uuid4()),
                             "p_record_id": record_id}
-        _submit_pilot_position(account, state, route="delete_position")
+        _submit_pilot_portfolio_operation(account, state, route="delete_position")
+
+
+def _render_pilot_snapshot(account, data):
+    owner = account["supabase_user_id"]
+    revision = data["revision"]
+    state = st.session_state.get(PILOT_SNAPSHOT_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "revision": revision}
+        st.session_state[PILOT_SNAPSHOT_STATE] = state
+    if state.pop("saved", False):
+        st.success("雲端快照已記錄。")
+        state["revision"] = revision
+    if "pending" in state:
+        st.warning("尚未確認快照記錄結果。請重試同一筆操作。")
+        if st.button("重試記錄雲端快照"):
+            _submit_pilot_portfolio_operation(account, state, route="record_snapshot")
+        return
+    if state["revision"] != revision or state.get("conflict"):
+        st.warning("雲端投資組合已更新。請重新讀取持倉後再記錄快照。")
+        if st.button("重新讀取快照所用持倉"):
+            st.session_state.pop(PILOT_SNAPSHOT_STATE)
+            st.rerun()
+        return
+    if not data["positions"]:
+        st.info("目前沒有雲端持倉可供記錄快照。")
+        return
+    st.caption("以已儲存的持倉數量、單價與匯率計算，未調整入金或出金。")
+    if st.button("記錄雲端快照"):
+        state["pending"] = {"p_expected_revision": state["revision"], "p_operation_id": str(uuid4())}
+        _submit_pilot_portfolio_operation(account, state, route="record_snapshot")
 
 
 def _render_portfolio_pilot(account):
@@ -2244,8 +2282,12 @@ def _render_portfolio_pilot(account):
         _render_pilot_position_edit(account, data)
     if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_DELETE") == "1":
         _render_pilot_position_delete(account, data)
-    if snapshots:
+    snapshot_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_SNAPSHOT") == "1"
+    if snapshots or snapshot_enabled:
         st.markdown("#### 歷史快照")
+    if snapshot_enabled:
+        _render_pilot_snapshot(account, data)
+    if snapshots:
         labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
         st.dataframe([{label: row[key] for key, label in labels.items()} for row in snapshots], hide_index=True)
     if st.button("準備匯出我的投資組合", key="portfolio_prepare_export"):
@@ -6228,6 +6270,7 @@ def _logout_account():
     st.session_state.pop(PILOT_POSITION_STATE, None)
     st.session_state.pop(PILOT_POSITION_EDIT_STATE, None)
     st.session_state.pop(PILOT_POSITION_DELETE_STATE, None)
+    st.session_state.pop(PILOT_SNAPSHOT_STATE, None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
@@ -10054,10 +10097,10 @@ if auth_user:
         st.subheader("🧭 投資組合理財")
         st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
         if _is_portfolio_pilot(auth_user):
-            position_enabled = any(os.environ.get(flag) == "1" for flag in (
+            portfolio_enabled = any(os.environ.get(flag) == "1" for flag in (
                 "GVI_PORTFOLIO_PILOT_POSITION_ADD", "GVI_PORTFOLIO_PILOT_POSITION_EDIT",
-                "GVI_PORTFOLIO_PILOT_POSITION_DELETE"))
-            cloud_label = ("雲端投資組合試行" if position_enabled
+                "GVI_PORTFOLIO_PILOT_POSITION_DELETE", "GVI_PORTFOLIO_PILOT_SNAPSHOT"))
+            cloud_label = ("雲端投資組合試行" if portfolio_enabled
                            else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
                            else "雲端唯讀試行")
             source = st.radio("投資組合來源", ("原有投資組合", cloud_label), horizontal=True)
