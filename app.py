@@ -5,6 +5,7 @@ import sys, os, re, csv, hashlib, hmac, secrets, streamlit as st, yfinance as yf
 import streamlit.components.v1 as components
 from base64 import b64encode, urlsafe_b64decode
 from contextlib import closing
+from datetime import date
 from email.message import EmailMessage
 from math import isfinite
 from pathlib import Path
@@ -2256,30 +2257,39 @@ def _render_pilot_snapshot(account, data):
 
 
 PILOT_INCOME_STATE = "portfolio_pilot_income_state"
+PILOT_INCOME_CORRECTION_STATE = "portfolio_pilot_income_correction_state"
 PILOT_INCOME_TYPES = {"dividend": "股息", "interest": "利息"}
 PILOT_ENTRY_CURRENCIES = ("TWD", "USD", "JPY", "HKD", "EUR")
 PILOT_ENTRY_DECIMAL = re.compile(r"[0-9]{1,24}(?:[.][0-9]{1,12})?")
 
 
-def _submit_pilot_entry(account, state, *, route, label, entry_label, invalid_message):
+def _submit_pilot_entry(account, state, *, route, label, entry_label, invalid_message, conflict_message=None):
     pending = state["pending"]
+    previous = pending.get("p_previous_operation_id")
     try:
         response = _portfolio_pilot_request(account, route, pending)
         if response.status_code == 200:
             result = response.json()
             if (isinstance(result, dict) and result.get("operation_id") == pending["p_operation_id"]
-                    and type(result.get("replayed")) is bool):
+                    and type(result.get("replayed")) is bool
+                    and (previous is None or result.get("previous_operation_id") == previous)):
                 state.pop("pending")
                 state.update(saved=True, form_id=uuid4().hex)
                 st.rerun()
         if response.status_code in (400, 401, 403, 404, 409, 422, 423):
             state.pop("pending")
             if response.status_code in (400, 422):
-                st.error(invalid_message)
+                message = invalid_message
             elif response.status_code == 409:
-                st.error(f"這筆操作已用於不同的{entry_label}。請核對歷史紀錄後再新增。")
+                message = conflict_message or f"這筆操作已用於不同的{entry_label}。請核對歷史紀錄後再新增。"
             else:
-                st.error(f"目前無法儲存{label}，請確認登入與試行權限。")
+                message = f"目前無法儲存{label}，請確認登入與試行權限。"
+            if previous is not None:
+                state["error"] = message
+                if response.status_code in (400, 401, 403, 422, 423):
+                    state["draft"] = pending
+                st.rerun()
+            st.error(message)
             return
     except (RuntimeError, ValueError, requests.RequestException):
         pass
@@ -2289,6 +2299,17 @@ def _submit_pilot_entry(account, state, *, route, label, entry_label, invalid_me
 def _submit_pilot_income(account, state):
     _submit_pilot_entry(account, state, route="record_income", label="投資收入", entry_label="收入明細",
                         invalid_message="請核對收入類型、實際入帳日、幣別與實收金額。")
+
+
+def _validate_pilot_income_rows(rows):
+    fields = {"operation_id", "income_type", "booked_on", "currency", "net_amount", "reference", "note", "recorded_at"}
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or row.keys() != fields or row["income_type"] not in PILOT_INCOME_TYPES
+        or row["currency"] not in PILOT_ENTRY_CURRENCIES
+        or not isinstance(row["net_amount"], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row["net_amount"])
+        for row in rows
+    ):
+        raise ValueError("Invalid income history")
 
 
 def _render_pilot_income(account):
@@ -2305,20 +2326,20 @@ def _render_pilot_income(account):
         if st.button("重試儲存投資收入"):
             _submit_pilot_income(account, state)
 
-    try:
-        response = _portfolio_pilot_request(account, "read_income_entries")
-        rows = response.json() if response.status_code == 200 else None
-        fields = {"operation_id", "income_type", "booked_on", "currency", "net_amount", "reference", "note", "recorded_at"}
-        if not isinstance(rows, list) or any(
-            not isinstance(row, dict) or row.keys() != fields or row["income_type"] not in PILOT_INCOME_TYPES
-            or row["currency"] not in PILOT_ENTRY_CURRENCIES
-            or not isinstance(row["net_amount"], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row["net_amount"])
-            for row in rows
-        ):
-            raise ValueError("Invalid income history")
-    except (RuntimeError, ValueError, TypeError, requests.RequestException):
-        st.error("暫時無法讀取投資收入明細。請稍後再試。")
-        return
+    history = None
+    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1":
+        try:
+            rows, history = _read_pilot_correction_history(account, "income", _validate_pilot_income_rows)
+        except (RuntimeError, ValueError, TypeError, requests.RequestException):
+            st.warning("暫時無法讀取收入更正歷史。")
+    if history is None:
+        try:
+            response = _portfolio_pilot_request(account, "read_income_entries")
+            rows = response.json() if response.status_code == 200 else None
+            _validate_pilot_income_rows(rows)
+        except (RuntimeError, ValueError, TypeError, requests.RequestException):
+            st.error("暫時無法讀取投資收入明細。請稍後再試。")
+            return
 
     if rows:
         for currency in PILOT_ENTRY_CURRENCIES:
@@ -2337,6 +2358,8 @@ def _render_pilot_income(account):
     else:
         st.info("尚無已儲存的股息或利息明細。")
 
+    if history is not None:
+        _render_pilot_correction(account, rows, history, income=True)
     if "pending" in state:
         return
     with st.form("pilot_income_" + state["form_id"], clear_on_submit=False):
@@ -2358,12 +2381,230 @@ def _render_pilot_income(account):
 
 
 PILOT_TRADE_STATE = "portfolio_pilot_trade_state"
+PILOT_TRADE_CORRECTION_STATE = "portfolio_pilot_trade_correction_state"
 PILOT_TRADE_SIDES = {"buy": "買入", "sell": "賣出"}
+PILOT_TRADE_FIELDS = {"operation_id", "executed_on", "side", "symbol", "currency", "quantity",
+                     "unit_price", "fee", "tax", "note", "recorded_at"}
+PILOT_TRADE_FORM_ERROR = "請填寫成交標的、實際成交日及大於零的數量與單價。費用可留白或填非負數。"
 
 
 def _submit_pilot_trade(account, state):
     _submit_pilot_entry(account, state, route="record_trade", label="買賣成交", entry_label="成交明細",
                         invalid_message="請核對成交日、標的、幣別、數量、單價及費用。")
+
+
+def _validate_pilot_trade_rows(rows):
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or row.keys() != PILOT_TRADE_FIELDS or row["side"] not in PILOT_TRADE_SIDES
+        or row["currency"] not in PILOT_ENTRY_CURRENCIES
+        or any(not isinstance(row[name], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])
+               for name in ("quantity", "unit_price"))
+        or any(row[name] is not None and (not isinstance(row[name], str)
+               or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])) for name in ("fee", "tax"))
+        for row in rows
+    ):
+        raise ValueError("Invalid trade history")
+
+
+def _read_pilot_correction_history(account, kind, validate_rows):
+    entries_key = f"{kind}_entries"
+    response = _portfolio_pilot_request(account, f"read_{kind}_history")
+    history = response.json() if response.status_code == 200 else None
+    if not isinstance(history, dict) or history.keys() != {entries_key, "corrections"}:
+        raise ValueError("Invalid version history")
+    entries, corrections = history[entries_key], history["corrections"]
+    validate_rows(entries)
+    by_id = {row["operation_id"]: row for row in entries}
+    fields = {"operation_id", "previous_operation_id", "reason", "corrected_at"}
+    if len(by_id) != len(entries) or not isinstance(corrections, list) or any(
+        not isinstance(event, dict) or event.keys() != fields
+        or not all(isinstance(value, str) for value in event.values())
+        or event["operation_id"] not in by_id or event["previous_operation_id"] not in by_id
+        or event["operation_id"] == event["previous_operation_id"]
+        for event in corrections
+    ):
+        raise ValueError("Invalid trade correction history")
+    replaced = {event["previous_operation_id"] for event in corrections}
+    successors = {event["operation_id"] for event in corrections}
+    if len(replaced) != len(corrections) or len(successors) != len(corrections):
+        raise ValueError("Conflicting trade version history")
+    return [row for row in entries if row["operation_id"] not in replaced], history
+
+
+def _pilot_trade_display(row):
+    return {"成交日": row["executed_on"], "方向": PILOT_TRADE_SIDES[row["side"]], "標的": row["symbol"],
+            "原幣": row["currency"], "成交數量": row["quantity"], "成交單價": row["unit_price"],
+            "手續費": row["fee"] or "未填", "交易稅": row["tax"] or "未填", "備註": row["note"] or ""}
+
+
+def _pilot_trade_form_fields(initial=None):
+    values = initial or {}
+    prefix = "更正後" if initial is not None else ""
+    side = st.selectbox(f"{prefix}成交方向", tuple(PILOT_TRADE_SIDES), format_func=PILOT_TRADE_SIDES.get,
+                        index=tuple(PILOT_TRADE_SIDES).index(values.get("side", "buy")))
+    symbol = st.text_input(f"{prefix}成交標的", value=values.get("symbol", ""), max_chars=40).strip()
+    current_date = pd.Timestamp.now(tz="Asia/Taipei").date()
+    initial_date = date.fromisoformat(values["executed_on"]) if values.get("executed_on") else None
+    first_date = date(1900, 1, 1)
+    executed_on = st.date_input(f"{prefix}實際成交日", value=initial_date, min_value=min(first_date, initial_date or first_date),
+                                max_value=current_date)
+    currency = st.selectbox(f"{prefix}成交幣別", PILOT_ENTRY_CURRENCIES,
+                            index=PILOT_ENTRY_CURRENCIES.index(values.get("currency", "TWD")))
+    quantity = st.text_input(f"{prefix}成交數量", value=values.get("quantity", "")).strip()
+    price = st.text_input(f"{prefix}成交單價（原幣）", value=values.get("unit_price", "")).strip()
+    st.caption("數量與金額最多可填 12 位小數。費用使用成交幣別，空白代表未填，無費用請輸入 0。")
+    fee = st.text_input(f"{prefix}手續費（選填）", value=values.get("fee") or "").strip()
+    tax = st.text_input(f"{prefix}交易稅（選填）", value=values.get("tax") or "").strip()
+    note = st.text_area(f"{prefix}成交備註（選填）", value=values.get("note") or "", max_chars=500).strip()
+    return {"side": side, "symbol": symbol, "executed_on": executed_on.isoformat() if executed_on else None,
+            "currency": currency, "quantity": quantity, "unit_price": price,
+            "fee": fee or None, "tax": tax or None, "note": note or None}
+
+
+def _valid_pilot_trade_form(values):
+    return (
+        bool(values["executed_on"] and values["symbol"])
+        and all(PILOT_ENTRY_DECIMAL.fullmatch(values[key]) and any(c in "123456789" for c in values[key])
+                for key in ("quantity", "unit_price"))
+        and all(values[key] is None or PILOT_ENTRY_DECIMAL.fullmatch(values[key]) for key in ("fee", "tax"))
+    )
+
+
+def _pilot_income_display(row):
+    return {"入帳日": row["booked_on"], "類型": PILOT_INCOME_TYPES[row["income_type"]], "原幣": row["currency"],
+            "實收金額": row["net_amount"], "標的或帳戶": row["reference"] or "", "備註": row["note"] or ""}
+
+
+def _pilot_income_correction_fields(initial):
+    kind = st.selectbox("更正後收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get,
+                        index=tuple(PILOT_INCOME_TYPES).index(initial["income_type"]))
+    original_date = date.fromisoformat(initial["booked_on"])
+    booked_on = st.date_input("更正後實際入帳日", value=original_date, min_value=min(date(1900, 1, 1), original_date),
+                              max_value=max(original_date, pd.Timestamp.now(tz="Asia/Taipei").date()))
+    currency = st.selectbox("更正後收入幣別", PILOT_ENTRY_CURRENCIES,
+                            index=PILOT_ENTRY_CURRENCIES.index(initial["currency"]))
+    amount = st.text_input("更正後實收金額（原幣）", value=initial["net_amount"]).strip()
+    reference = st.text_input("更正後標的或帳戶（選填）", value=initial["reference"] or "", max_chars=100).strip()
+    note = st.text_area("更正後收入備註（選填）", value=initial["note"] or "", max_chars=500).strip()
+    return {"income_type": kind, "booked_on": booked_on.isoformat() if booked_on else None,
+            "currency": currency, "net_amount": amount, "reference": reference or None, "note": note or None}
+
+
+def _valid_pilot_income_correction(values):
+    amount = values["net_amount"]
+    return bool(values["booked_on"] and PILOT_ENTRY_DECIMAL.fullmatch(amount) and any(c in "123456789" for c in amount))
+
+
+def _submit_pilot_correction(account, state, kind, category):
+    _submit_pilot_entry(
+        account, state, route=f"correct_{kind}", label=f"{category}更正", entry_label=f"{category}更正",
+        invalid_message=f"請核對更正後的{category}明細及更正理由。",
+        conflict_message=f"這筆{category}的版本已變更，或操作內容與先前不符。請重新選擇目前有效的版本。",
+    )
+
+
+def _render_pilot_correction(account, rows, history, *, income=False):
+    kind, category, state_key = ("income", "收入", PILOT_INCOME_CORRECTION_STATE) if income else (
+        "trade", "成交", PILOT_TRADE_CORRECTION_STATE)
+    display_row = _pilot_income_display if income else _pilot_trade_display
+    date_key = "booked_on" if income else "executed_on"
+    st.markdown(f"##### {category}更正")
+    revisions = {row["operation_id"]: row for row in history[f"{kind}_entries"]}
+    if history["corrections"]:
+        with st.expander(f"查看{category}更正歷史"):
+            st.dataframe([
+                {"更正時間": event["corrected_at"], "更正理由": event["reason"],
+                 "前版識別": event["previous_operation_id"], "更正版識別": event["operation_id"]}
+                for event in history["corrections"]
+            ], hide_index=True)
+            st.dataframe([
+                {"版本識別": row["operation_id"], **display_row(row)} for row in revisions.values()
+            ], hide_index=True)
+    if revisions and st.button(f"準備匯出完整{category}歷史"):
+        now = pd.Timestamp.now(tz="UTC")
+        content = json.dumps({"schema_version": 2, "exported_at_utc": now.isoformat(), **history},
+                             ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+        _render_portfolio_export_link(f"gvi-{kind}-history-{now:%Y%m%dT%H%M%SZ}.json", content,
+                                      label=f"下載完整{category}歷史（JSON）", title=f"完整{category}歷史匯出")
+
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(state_key)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "form_id": uuid4().hex}
+        st.session_state[state_key] = state
+    if state.pop("saved", False):
+        st.success(f"{category}更正已儲存。")
+    error = state.pop("error", None)
+    if error:
+        st.error(error)
+    if "pending" in state:
+        st.warning("尚未確認更正儲存結果。請重試同一筆操作。")
+        if st.button(f"重試儲存{category}更正"):
+            _submit_pilot_correction(account, state, kind, category)
+        return
+
+    active = {row["operation_id"]: row for row in rows}
+    draft = state.get("draft")
+    if state.get("preview") and draft:
+        previous = draft["p_previous_operation_id"]
+        if previous not in active:
+            st.warning(f"原版本已有更新。請重新選擇{category}明細。")
+            if st.button(f"重新選擇{category}明細"):
+                state.pop("draft")
+                state.pop("preview")
+                st.rerun()
+            return
+        before = display_row(active[previous])
+        after = display_row({key.removeprefix("p_"): value for key, value in draft.items()})
+        st.dataframe([{"欄位": key, "目前版本": before[key], "更正後": after[key]} for key in before],
+                     hide_index=True)
+        st.text(f"更正理由：{draft['p_reason']}")
+        confirmed = st.checkbox("我已核對更正前後內容", key=f"{kind}_confirm_" + draft["p_operation_id"])
+        if st.button(f"返回編輯{category}更正"):
+            state.pop("preview")
+            st.rerun()
+        if st.button(f"確認儲存{category}更正", disabled=not confirmed):
+            state["pending"] = state.pop("draft")
+            state.pop("preview")
+            _submit_pilot_correction(account, state, kind, category)
+        return
+
+    if not active:
+        return
+    options = list(active)
+    draft_target = draft["p_previous_operation_id"] if draft else None
+    def option_label(key):
+        row = active[key]
+        label = (f"{PILOT_INCOME_TYPES[row['income_type']]} · {row['currency']} {row['net_amount']}" if income else
+                 f"{row['symbol']} · {PILOT_TRADE_SIDES[row['side']]}")
+        return f"{row[date_key]} · {label} · {key[:8]}"
+
+    selected = st.selectbox(f"選擇要更正的{category}", options,
+                            index=options.index(draft_target) if draft_target in active else None,
+                            key=f"{kind}_correction_selection", format_func=option_label)
+    if selected is None:
+        return
+    same_draft = draft is not None and draft["p_previous_operation_id"] == selected
+    initial = {key.removeprefix("p_"): value for key, value in draft.items()} if same_draft else active[selected]
+    try:
+        date.fromisoformat(initial[date_key])
+    except (TypeError, ValueError):
+        st.error(f"無法編輯這筆{category}的日期。請核對歷史紀錄。")
+        return
+    with st.form(f"pilot_{kind}_correction_{state['form_id']}_{selected}"):
+        revised = _pilot_income_correction_fields(initial) if income else _pilot_trade_form_fields(initial)
+        reason = st.text_area("更正理由", value=draft["p_reason"] if same_draft else "", max_chars=500,
+                              key=f"{kind}_reason_{state['form_id']}_{selected}").strip()
+        if st.form_submit_button(f"預覽{category}更正"):
+            if not reason:
+                st.error("請填寫更正理由。")
+            elif not (_valid_pilot_income_correction(revised) if income else _valid_pilot_trade_form(revised)):
+                st.error("請核對入帳日與大於零的原幣實收金額。" if income else PILOT_TRADE_FORM_ERROR)
+            else:
+                state["draft"] = {"p_previous_operation_id": selected, "p_operation_id": str(uuid4()),
+                                  "p_reason": reason, **{f"p_{key}": value for key, value in revised.items()}}
+                state["preview"] = True
+                st.rerun()
 
 
 def _render_pilot_trade(account):
@@ -2380,32 +2621,23 @@ def _render_pilot_trade(account):
         if st.button("重試儲存買賣成交"):
             _submit_pilot_trade(account, state)
 
-    try:
-        response = _portfolio_pilot_request(account, "read_trade_entries")
-        rows = response.json() if response.status_code == 200 else None
-        fields = {"operation_id", "executed_on", "side", "symbol", "currency", "quantity",
-                  "unit_price", "fee", "tax", "note", "recorded_at"}
-        if not isinstance(rows, list) or any(
-            not isinstance(row, dict) or row.keys() != fields or row["side"] not in PILOT_TRADE_SIDES
-            or row["currency"] not in PILOT_ENTRY_CURRENCIES
-            or any(not isinstance(row[name], str) or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])
-                   for name in ("quantity", "unit_price"))
-            or any(row[name] is not None and (not isinstance(row[name], str)
-                   or not PILOT_ENTRY_DECIMAL.fullmatch(row[name])) for name in ("fee", "tax"))
-            for row in rows
-        ):
-            raise ValueError("Invalid trade history")
-    except (RuntimeError, ValueError, TypeError, requests.RequestException):
-        st.error("暫時無法讀取買賣成交明細。請稍後再試。")
-        return
+    history = None
+    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1":
+        try:
+            rows, history = _read_pilot_correction_history(account, "trade", _validate_pilot_trade_rows)
+        except (RuntimeError, ValueError, TypeError, requests.RequestException):
+            st.warning("暫時無法讀取成交更正歷史。")
+    if history is None:
+        try:
+            response = _portfolio_pilot_request(account, "read_trade_entries")
+            rows = response.json() if response.status_code == 200 else None
+            _validate_pilot_trade_rows(rows)
+        except (RuntimeError, ValueError, TypeError, requests.RequestException):
+            st.error("暫時無法讀取買賣成交明細。請稍後再試。")
+            return
 
     if rows:
-        st.dataframe([
-            {"成交日": row["executed_on"], "方向": PILOT_TRADE_SIDES[row["side"]], "標的": row["symbol"],
-             "原幣": row["currency"], "成交數量": row["quantity"], "成交單價": row["unit_price"],
-             "手續費": row["fee"] or "未填", "交易稅": row["tax"] or "未填", "備註": row["note"]}
-            for row in rows
-        ], hide_index=True)
+        st.dataframe([_pilot_trade_display(row) for row in rows], hide_index=True)
         if st.button("準備匯出買賣成交明細"):
             now = pd.Timestamp.now(tz="UTC")
             content = json.dumps({"schema_version": 1, "exported_at_utc": now.isoformat(), "trade_entries": rows},
@@ -2415,32 +2647,18 @@ def _render_pilot_trade(account):
     else:
         st.info("尚無已儲存的買賣成交明細。")
 
+    if history is not None:
+        _render_pilot_correction(account, rows, history)
     if "pending" in state:
         return
     st.caption("記錄已成交的買賣供查閱與對帳。目前登記後持倉、現金和快照維持原值。")
     with st.form("pilot_trade_" + state["form_id"], clear_on_submit=False):
-        side = st.selectbox("成交方向", tuple(PILOT_TRADE_SIDES), format_func=PILOT_TRADE_SIDES.get)
-        symbol = st.text_input("成交標的", max_chars=40).strip()
-        executed_on = st.date_input("實際成交日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
-                                    max_value=pd.Timestamp.now(tz="Asia/Taipei").date())
-        currency = st.selectbox("成交幣別", PILOT_ENTRY_CURRENCIES)
-        quantity = st.text_input("成交數量").strip()
-        price = st.text_input("成交單價（原幣）").strip()
-        st.caption("數量與金額最多可填 12 位小數。費用使用成交幣別，空白代表未填，無費用請輸入 0。")
-        fee = st.text_input("手續費（選填）").strip()
-        tax = st.text_input("交易稅（選填）").strip()
-        note = st.text_area("成交備註（選填）", max_chars=500).strip()
+        values = _pilot_trade_form_fields()
         if st.form_submit_button("儲存買賣成交"):
-            if executed_on is None or not symbol or any(
-                not PILOT_ENTRY_DECIMAL.fullmatch(value) or not any(c in "123456789" for c in value)
-                for value in (quantity, price)
-            ) or any(value and not PILOT_ENTRY_DECIMAL.fullmatch(value) for value in (fee, tax)):
-                st.error("請填寫成交標的、實際成交日及大於零的數量與單價。費用可留白或填非負數。")
+            if not _valid_pilot_trade_form(values):
+                st.error(PILOT_TRADE_FORM_ERROR)
                 return
-            state["pending"] = {"p_operation_id": str(uuid4()), "p_executed_on": executed_on.isoformat(),
-                                "p_side": side, "p_symbol": symbol, "p_currency": currency,
-                                "p_quantity": quantity, "p_unit_price": price,
-                                "p_fee": fee or None, "p_tax": tax or None, "p_note": note or None}
+            state["pending"] = {"p_operation_id": str(uuid4()), **{f"p_{key}": value for key, value in values.items()}}
             _submit_pilot_trade(account, state)
 
 
@@ -6467,6 +6685,10 @@ def _logout_account():
     st.session_state.pop(PILOT_SNAPSHOT_STATE, None)
     st.session_state.pop(PILOT_INCOME_STATE, None)
     st.session_state.pop(PILOT_TRADE_STATE, None)
+    st.session_state.pop(PILOT_TRADE_CORRECTION_STATE, None)
+    st.session_state.pop("trade_correction_selection", None)
+    st.session_state.pop(PILOT_INCOME_CORRECTION_STATE, None)
+    st.session_state.pop("income_correction_selection", None)
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
