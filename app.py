@@ -1125,334 +1125,13 @@ def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Op
         benchmark_scope = "TWSE 上市市場官方含息報酬指數；官方資料失效時退回 0050" if benchmark_symbol == "TWSE_TAIEX_TR" else "0050 臺灣50大型股含息代理" if benchmark_symbol == "0050.TW" else "SPY S&P 500 含息代理"
         st.info(f"比較模式以相同投入額比較配息組合與 {benchmark_symbol}（{benchmark_scope}）。舊系統未保存逐日歷史成分，故無法重建舊策略的歷史績效。")
 
-st.set_page_config(page_title="機構級三核心策略雷達 3.12", layout="wide", page_icon="📈")
-
-# 🎨 機構級沉浸式深色金融終端 UI 與行動端優化 CSS
-st.markdown("""
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
-
-        :root {
-            --font-main: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft JhengHei", sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
-            --font-display: 'Plus Jakarta Sans', sans-serif;
-        }
-
-        html, body, [class*="css"] {
-            font-family: var(--font-main);
-            -webkit-font-smoothing: antialiased;
-        }
-
-        /* 全域動態深色漸層背景 */
-        .stApp {
-            background: radial-gradient(circle at 10% 10%, rgba(30, 41, 69, 0.45) 0%, transparent 40%),
-                        radial-gradient(circle at 90% 90%, rgba(17, 24, 39, 0.6) 0%, transparent 45%),
-                        linear-gradient(180deg, #0A0E17 0%, #060910 100%) !important;
-            background-attachment: fixed !important;
-        }
-
-        /* 專業極窄漸層滾動條 */
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: rgba(10, 14, 23, 0.8); }
-        ::-webkit-scrollbar-thumb { background: rgba(59, 130, 246, 0.35); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(59, 130, 246, 0.7); }
-
-        .block-container {
-            width: 100%;
-            max-width: 100%;
-            padding: 1.2rem 1.6rem 3rem !important;
-        }
-
-        /* 專業金融指標卡片 (stMetric) 玻璃擬態與 3D 浮動效果 */
-        [data-testid="stMetric"] {
-            background: linear-gradient(135deg, rgba(20, 28, 48, 0.7) 0%, rgba(13, 19, 33, 0.9) 100%) !important;
-            border: 1px solid rgba(255, 255, 255, 0.08) !important;
-            border-radius: 12px !important;
-            padding: 0.95rem 1.15rem !important;
-            backdrop-filter: blur(12px) !important;
-            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4) !important;
-            transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        }
-        [data-testid="stMetric"]:hover {
-            border-color: rgba(59, 130, 246, 0.5) !important;
-            transform: translateY(-2px) !important;
-            box-shadow: 0 10px 25px -3px rgba(59, 130, 246, 0.2), 0 4px 12px rgba(0, 0, 0, 0.45) !important;
-        }
-        [data-testid="stMetricLabel"] {
-            font-size: 0.82rem !important;
-            font-weight: 600 !important;
-            letter-spacing: 0.03em !important;
-            color: #94A3B8 !important;
-            text-transform: uppercase !important;
-        }
-        [data-testid="stMetricValue"] {
-            font-family: var(--font-mono) !important;
-            font-size: 1.55rem !important;
-            font-weight: 700 !important;
-            color: #FFFFFF !important;
-            letter-spacing: -0.02em !important;
-        }
-        [data-testid="stMetricDelta"] {
-            font-family: var(--font-mono) !important;
-            font-size: 0.85rem !important;
-            font-weight: 600 !important;
-        }
-
-        /* 🎛️ 十大策略導航主控台 - 實體立體按鈕 (Tactile 3D Buttons) 質感設計 */
-        div[data-testid="stTabs"] {
-            background: transparent !important;
-            margin-top: 1.2rem !important;
-        }
-        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-            display: flex !important;
-            flex-wrap: wrap !important;
-            gap: 0.65rem !important;
-            background: linear-gradient(135deg, rgba(17, 24, 39, 0.95) 0%, rgba(10, 15, 26, 0.98) 100%) !important;
-            padding: 0.9rem !important;
-            border-radius: 16px !important;
-            border: 1.5px solid rgba(59, 130, 246, 0.3) !important;
-            backdrop-filter: blur(14px) !important;
-            box-shadow: 0 12px 35px -5px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
-            justify-content: flex-start !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"] {
-            flex: 1 1 calc(20% - 0.65rem) !important;
-            min-width: 175px !important;
-            min-height: 54px !important;
-            border-radius: 11px !important;
-            padding: 0.65rem 0.9rem !important;
-            font-weight: 600 !important;
-            font-size: 0.92rem !important;
-            letter-spacing: 0.01em !important;
-            color: #CBD5E1 !important;
-            border: 1px solid rgba(255, 255, 255, 0.12) !important;
-            background: linear-gradient(180deg, #1E293B 0%, #0F172A 100%) !important;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.45), 0 2px 4px -1px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
-            transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            text-align: center !important;
-            cursor: pointer !important;
-            white-space: nowrap !important;
-            position: relative !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:hover {
-            color: #FFFFFF !important;
-            background: linear-gradient(180deg, #334155 0%, #1E293B 100%) !important;
-            border-color: rgba(96, 165, 250, 0.85) !important;
-            transform: translateY(-2.5px) !important;
-            box-shadow: 0 8px 20px rgba(59, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"]:active {
-            transform: translateY(1.5px) scale(0.98) !important;
-            box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.6) !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-            background: linear-gradient(135deg, #2563EB 0%, #4F46E5 50%, #7C3AED 100%) !important;
-            border: 1.5px solid #93C5FD !important;
-            color: #FFFFFF !important;
-            font-weight: 700 !important;
-            transform: translateY(-1.5px) !important;
-            box-shadow: 0 0 24px rgba(59, 130, 246, 0.7), 0 4px 14px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
-        }
-        div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
-        div[data-testid="stTabs"] [data-baseweb="tab-border"] {
-            display: none !important;
-        }
-
-        /* 側邊欄深色層次與邊界線條 */
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #090D15 0%, #05080E 100%) !important;
-            border-right: 1px solid rgba(255, 255, 255, 0.07) !important;
-        }
-        section[data-testid="stSidebar"] .block-container {
-            padding: 1.2rem 1rem 3rem !important;
-        }
-
-        /* 現代電光按鈕設計 (stButton, stDownloadButton) */
-        div[data-testid="stButton"] button,
-        div[data-testid="stDownloadButton"] button,
-        div[data-testid="stFormSubmitButton"] button {
-            background: linear-gradient(135deg, #2563EB 0%, #4F46E5 100%) !important;
-            color: #FFFFFF !important;
-            font-weight: 600 !important;
-            border: 1px solid rgba(255, 255, 255, 0.15) !important;
-            border-radius: 9px !important;
-            padding: 0.55rem 1.15rem !important;
-            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35) !important;
-            transition: all 0.22s ease !important;
-        }
-        div[data-testid="stButton"] button:hover,
-        div[data-testid="stDownloadButton"] button:hover,
-        div[data-testid="stFormSubmitButton"] button:hover {
-            transform: translateY(-1.5px) !important;
-            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5) !important;
-            filter: brightness(1.12) !important;
-        }
-        div[data-testid="stButton"] button:active,
-        div[data-testid="stDownloadButton"] button:active,
-        div[data-testid="stFormSubmitButton"] button:active {
-            transform: translateY(0) !important;
-            filter: brightness(0.95) !important;
-        }
-
-        /* 表單控制項、輸入框與下拉選單 */
-        input, textarea, div[data-baseweb="select"] > div {
-            background-color: rgba(15, 23, 42, 0.75) !important;
-            border: 1px solid rgba(255, 255, 255, 0.1) !important;
-            border-radius: 8px !important;
-            color: #F8FAFC !important;
-            transition: all 0.2s ease !important;
-        }
-        input:focus, textarea:focus, div[data-baseweb="select"] > div:focus-within {
-            border-color: #3B82F6 !important;
-            box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.3) !important;
-        }
-
-        /* 折疊展開面板 (stExpander) */
-        div[data-testid="stExpander"] {
-            background: rgba(17, 24, 39, 0.5) !important;
-            border: 1px solid rgba(255, 255, 255, 0.08) !important;
-            border-radius: 10px !important;
-            backdrop-filter: blur(8px) !important;
-            margin-bottom: 0.6rem !important;
-        }
-
-        /* Plotly 原生圖表圓角美化 */
-        .js-plotly-plot .plotly .main-svg {
-            border-radius: 10px !important;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        /* 即時訊號呼吸燈微動畫 */
-        @keyframes radar-pulse {
-            0% { transform: scale(0.95); opacity: 0.8; }
-            50% { transform: scale(1.15); opacity: 1; }
-            100% { transform: scale(0.95); opacity: 0.8; }
-        }
-
-        @media (max-width: 768px) {
-            .block-container {
-                padding: 0.75rem 0.65rem 4rem !important;
-            }
-            section.main > div {
-                max-width: 100% !important;
-            }
-            h1 { font-size: 1.55rem !important; line-height: 1.25 !important; }
-            h2 { font-size: 1.3rem !important; line-height: 1.3 !important; }
-            h3 { font-size: 1.1rem !important; line-height: 1.35 !important; }
-            .stMetric { padding: 0.45rem !important; }
-            [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
-
-            div[data-testid="stHorizontalBlock"] {
-                flex-wrap: wrap !important;
-                gap: 0.55rem !important;
-            }
-            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                min-width: 0 !important;
-                flex: 1 1 calc(50% - 0.55rem) !important;
-                width: calc(50% - 0.55rem) !important;
-                min-width: calc(50% - 0.55rem) !important;
-            }
-            div[data-testid="stHorizontalBlock"]:has(div[data-testid="stPlotlyChart"]),
-            div[data-testid="stHorizontalBlock"]:has(.js-plotly-plot) {
-                align-items: stretch !important;
-            }
-            div[data-testid="stHorizontalBlock"]:has(div[data-testid="stPlotlyChart"]) > div[data-testid="column"],
-            div[data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > div[data-testid="column"] {
-                flex: 1 1 100% !important;
-                width: 100% !important;
-                min-width: 100% !important;
-            }
-
-            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-                display: flex !important;
-                flex-wrap: wrap !important;
-                gap: 0.45rem !important;
-                padding: 0.6rem !important;
-            }
-            div[data-testid="stTabs"] button[role="tab"] {
-                flex: 1 1 calc(50% - 0.45rem) !important;
-                min-width: 140px !important;
-                min-height: 48px !important;
-                padding: 0.45rem 0.6rem !important;
-                font-size: 0.84rem !important;
-                white-space: normal !important;
-                line-height: 1.2 !important;
-            }
-
-            div[data-testid="stButton"] button,
-            div[data-testid="stDownloadButton"] button,
-            div[data-testid="stFormSubmitButton"] button {
-                min-height: 44px !important;
-                width: 100% !important;
-                touch-action: manipulation;
-            }
-            input, textarea,
-            div[data-baseweb="select"] > div {
-                min-height: 44px !important;
-                font-size: 16px !important;
-            }
-            div[data-testid="stRadio"] [role="radiogroup"] {
-                flex-wrap: wrap !important;
-                gap: 0.35rem 0.75rem !important;
-            }
-            div[data-testid="stDataFrame"], div[data-testid="stTable"] {
-                max-width: 100% !important;
-            }
-            div[data-testid="stPlotlyChart"],
-            .stPlotlyChart,
-            .js-plotly-plot,
-            .js-plotly-plot .plot-container,
-            .js-plotly-plot .svg-container {
-                width: 100% !important;
-                max-width: 100% !important;
-                min-width: 0 !important;
-            }
-            .modebar-btn {
-                min-width: 42px !important;
-                min-height: 42px !important;
-                padding: 10px !important;
-                touch-action: manipulation !important;
-            }
-            .modebar-container {
-                opacity: 1 !important;
-                visibility: visible !important;
-            }
-            .modebar {
-                max-width: calc(100vw - 1.5rem) !important;
-                overflow-x: auto !important;
-                white-space: nowrap !important;
-                -webkit-overflow-scrolling: touch;
-            }
-            .modebar-group {
-                display: inline-flex !important;
-                flex-wrap: nowrap !important;
-            }
-            div[data-testid="stPlotlyChart"] {
-                max-width: 100% !important;
-                overflow-x: auto !important;
-                -webkit-overflow-scrolling: touch;
-            }
-            div[data-testid="stPlotlyChart"] .js-plotly-plot {
-                min-width: 0 !important;
-                max-width: 100% !important;
-            }
-        }
-        @media (max-width: 420px) {
-            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                flex-basis: 100% !important;
-                width: 100% !important;
-                min-width: 100% !important;
-            }
-            div[data-testid="stTabs"] button[role="tab"] {
-                padding: 0.45rem 0.58rem !important;
-                font-size: 0.8rem !important;
-            }
-        }
-    </style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="正序｜投資研究與管理", layout="wide", page_icon="📈")
+theme_path = Path(__file__).resolve().parent / "assets" / "zhengxu.css"
+if theme_path.is_file():
+    st.markdown(
+        f'<style class="zhengxu-theme">{theme_path.read_text(encoding="utf-8")}</style>',
+        unsafe_allow_html=True,
+    )
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -3754,14 +3433,14 @@ def render_plotly_delete_hotkey(st, chart_key, clear_revision=0):
     encoded_revision = json.dumps(int(clear_revision))
     components.html(f"""
     <style>
-      body {{ margin: 0; font-family: sans-serif; color: #CBD5E1; background: transparent; }}
+      body {{ margin: 0; font-family: sans-serif; color: #173B2C; background: transparent; }}
       #shape-delete-panel {{ display: flex; align-items: center; gap: 8px; overflow-x: auto;
         padding: 8px 2px; white-space: nowrap; -webkit-overflow-scrolling: touch; }}
       #shape-delete-panel button {{ min-height: 42px; padding: 8px 12px; border-radius: 8px;
-        border: 1px solid #475569; background: #172033; color: #F8FAFC; font-size: 14px;
+        border: 1px solid #CADCD1; background: #FFFFFF; color: #173B2C; font-size: 14px;
         cursor: pointer; touch-action: manipulation; }}
       #shape-delete-panel button:disabled {{ opacity: .55; cursor: default; }}
-      #shape-delete-status {{ padding: 3px 2px; font-size: 13px; color: #94A3B8; }}
+      #shape-delete-status {{ padding: 3px 2px; font-size: 13px; color: #486657; }}
     </style>
     <div id="shape-delete-status">標線刪除工具載入中…</div>
     <div id="shape-delete-panel"></div>
@@ -6997,50 +6676,22 @@ def _render_investment_workbench(account, explanation_style):
     if backdrop.is_file():
         hero_image = b64encode(backdrop.read_bytes()).decode("ascii")
         st.markdown(
-            '<style>.st-key-workbench_hero {'
+            '<style class="zhengxu-workbench-theme">.st-key-workbench_hero {'
             'background-image: linear-gradient(90deg,#0a2d22e8,#0a2d2245),'
             f'url("data:image/webp;base64,{hero_image}") !important;'
             '}</style>',
             unsafe_allow_html=True,
         )
     st.markdown("""
-        <style>
-        .stApp:has(.st-key-zhengxu_workbench) { background: #eff4f1 !important; }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] {
-            background: transparent !important; border: 0 !important;
-            box-shadow: none !important; pointer-events: none;
-        }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stExpandSidebarButton"] {
-            color: #173b2c !important; pointer-events: auto;
-        }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"]
-        :is([data-testid="stAppDeployButton"], [data-testid="stMainMenu"]),
+        <style class="zhengxu-workbench-theme">
         .st-key-zhengxu_workbench [data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
             display: none !important;
         }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stSidebar"] {
-            background: linear-gradient(155deg,#172f29,#0f4434) !important;
-        }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stMainBlockContainer"]
-        > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:has(style) {
+        [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"]
+        > [data-testid="stElementContainer"]:has(.zhengxu-workbench-theme) {
             display: none;
         }
-        @media (min-width: 1024px) {
-            .stApp:has(.st-key-zhengxu_workbench) [data-testid="stSidebar"][data-collapsed="false"] {
-                width: 230px !important; min-width: 230px !important; max-width: 230px !important;
-            }
-        }
-        .stApp:has(.st-key-zhengxu_workbench) .st-key-sidebar_strategy_selector { display: none; }
-        .st-key-workbench_navigation [data-testid="stExpander"] {
-            background: rgba(255,255,255,.045) !important; border-color: #3d6657 !important;
-        }
-        .st-key-workbench_navigation [data-testid="stButton"] button {
-            background: #1b4e3d !important; box-shadow: none !important; text-align: left;
-        }
         .st-key-zhengxu_workbench { color: #173b2c; gap: .7rem !important; }
-        .stApp:has([data-testid="stSidebar"][data-collapsed="true"]) .st-key-zhengxu_workbench {
-            padding-top: 2.1rem;
-        }
         .st-key-zhengxu_workbench :is(h1, h2, h3, h4) { color: #173b2c !important; }
         .st-key-zhengxu_workbench h3 { font-size: 1.15rem !important; padding: 0 0 .2rem; }
         .st-key-workbench_hero {
@@ -7139,24 +6790,9 @@ else:
     st.sidebar.caption("登入後可使用操盤終端，投資組合資料依帳號分開保存。")
     if not st.session_state.get("account_login_view", False):
         st.markdown("""
-            <style>
-            .login-hero{max-width:820px;margin:9vh auto 1rem;padding:clamp(1.5rem,5vw,3.25rem);
-              border:1px solid rgba(148,163,184,.24);border-radius:24px;text-align:center;
-              background:radial-gradient(ellipse at 50% 0%,rgba(37,99,235,.22),transparent 62%),
-                         linear-gradient(145deg,#101a2b,#0b1220 68%,#111827);
-              box-shadow:0 24px 70px rgba(0,0,0,.35);}
-            .login-kicker{color:#60a5fa;font-size:.78rem;font-weight:800;letter-spacing:.16em;}
-            .login-hero h1{font-size:clamp(1.8rem,5vw,2.7rem);margin:.7rem 0;color:#f8fafc;}
-            .login-hero p{color:#aab7c8;font-size:1.02rem;line-height:1.7;margin:.35rem auto;max-width:570px;}
-            .login-pills{display:flex;justify-content:center;flex-wrap:wrap;gap:.55rem;margin-top:1.5rem;}
-            .login-pills span{border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.68);
-              border-radius:99px;padding:.42rem .8rem;color:#cbd5e1;font-size:.82rem;}
-            </style>
-            <section class="login-hero">
-              <div class="login-kicker">SECURE INVESTMENT WORKSPACE</div>
-              <h1>操盤手投資終端</h1>
-              <p>整合市場診斷、策略研究與個人投資組合，為你的分析流程提供清晰、專屬的工作空間。</p>
-              <div class="login-pills"><span>市場分析</span><span>策略研究</span><span>帳號專屬投資組合</span></div>
+            <section class="zhengxu-login-hero">
+              <h1>正序投資研究與管理</h1>
+              <p>登入後可使用市場分析、策略研究與個人投資組合。</p>
             </section>
         """, unsafe_allow_html=True)
         splash_cols = st.columns([1, 1.3, 1])
@@ -7350,14 +6986,14 @@ if auth_user:
         key="sidebar_strategy_selector",
         on_change=_close_workbench_on_module_change,
     )
-    if workbench_open:
-        with navigation.container(key="workbench_navigation"):
-            for group in dict.fromkeys(MODULE_GROUPS.values()):
-                with st.expander(group):
-                    for index, (module, category) in enumerate(MODULE_GROUPS.items()):
-                        if category == group:
-                            st.button(module, key=f"workbench_menu_{index}", width="stretch",
-                                      on_click=_open_workbench_module, args=(module,))
+    with navigation.container(key="workbench_navigation"):
+        for group in dict.fromkeys(MODULE_GROUPS.values()):
+            with st.expander(group, expanded=not workbench_open and MODULE_GROUPS.get(selected_module) == group):
+                for index, (module, category) in enumerate(MODULE_GROUPS.items()):
+                    if category == group:
+                        st.button(module, key=f"workbench_menu_{index}", width="stretch",
+                                  type="primary" if not workbench_open and module == selected_module else "secondary",
+                                  on_click=_open_workbench_module, args=(module,))
     navigation.markdown("### 🗣️ 解說風格與版面")
     explanation_style = navigation.radio(
         "選擇顯示方式",
@@ -7413,30 +7049,11 @@ if auth_user:
         if notice:
             st.info(notice)
 
-    st.markdown("""
-        <div style="background: linear-gradient(135deg, rgba(20, 29, 49, 0.75) 0%, rgba(11, 16, 29, 0.9) 100%);
-                    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 1.2rem 1.6rem;
-                    margin-bottom: 1.2rem; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-                    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
-            <div>
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 0.4rem;">
-                    <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:#10B981; box-shadow:0 0 10px #10B981; animation: radar-pulse 2s infinite;"></span>
-                    <span style="font-size: 0.75rem; font-weight: 700; color: #10B981; letter-spacing: 0.08em; text-transform: uppercase;">LIVE MARKET TERMINAL</span>
-                    <span style="background: rgba(59, 130, 246, 0.2); color: #93C5FD; font-size: 0.72rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.3);">v3.12 PRO</span>
-                </div>
-                <h1 style="font-size: 1.7rem; font-weight: 800; margin: 0;
-                           background: linear-gradient(90deg, #FFFFFF 0%, #93C5FD 40%, #A78BFA 100%);
-                           -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-                    機構級三核心策略雷達 · 全能量化看盤終端
-                </h1>
-            </div>
-            <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
-                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">🧠 AI 雙核心診斷</span>
-                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">⚖️ 網格複利與回測</span>
-                <span style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 8px; font-size: 0.8rem; color: #CBD5E1;">🏦 三大法人獨立雷達</span>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        '<section class="zhengxu-module-hero">'
+        f'<h1>{html.escape(selected_module)}</h1></section>',
+        unsafe_allow_html=True,
+    )
 
     market_indexes = _render_market_overview()
 
@@ -7849,9 +7466,9 @@ if auth_user:
                     },
                 ]
                 status_style = {
-                    True: ("達門檻", "#34D399"),
-                    False: ("未達門檻", "#FBBF24"),
-                    None: ("資料不足", "#94A3B8"),
+                    True: ("達門檻", "#176746"),
+                    False: ("未達門檻", "#875218"),
+                    None: ("資料不足", "#486657"),
                 }
                 available_core_checks = [
                     three_core_psychology["checks"].get(item["psych_key"])
@@ -7885,10 +7502,10 @@ if auth_user:
                     brief = compact_psychology[item["psych_key"]][check]
                     compact_cards.append(
                         "<div style=\"min-width:150px;flex:1 1 150px;border:1px solid rgba(148,163,184,.28);"
-                        "border-radius:9px;padding:9px 10px;background:rgba(15,23,42,.52);\">"
-                        f"<div style=\"font-weight:700;color:#F8FAFC;\">{html.escape(item['strategy'])}</div>"
+                        "border-radius:9px;padding:9px 10px;background:#FFFFFF;\">"
+                        f"<div style=\"font-weight:700;color:#173B2C;\">{html.escape(item['strategy'])}</div>"
                         f"<div style=\"margin:3px 0;color:{status_color};font-size:.88rem;\">{status_label}｜{score_label}</div>"
-                        f"<div style=\"font-size:.84rem;line-height:1.45;color:#CBD5E1;\">🧠 {html.escape(brief)}</div>"
+                        f"<div style=\"font-size:.84rem;line-height:1.45;color:#486657;\">🧠 {html.escape(brief)}</div>"
                         "</div>"
                     )
                 compact_best = (
@@ -7897,13 +7514,13 @@ if auth_user:
                 )
                 compact_core_html = (
                     "<div style=\"border-left:4px solid " + valuation_color + ";padding:11px 13px;"
-                    "border-radius:8px;background:rgba(30,41,59,.58);\">"
-                    "<div style=\"font-size:1.03rem;font-weight:750;color:#F8FAFC;margin-bottom:5px;\">⚖️ 三核心研究條件比對</div>"
-                    f"<div style=\"font-size:.88rem;color:#CBD5E1;margin-bottom:9px;\">{html.escape(compact_best)}</div>"
+                    "border-radius:8px;background:#E6F0E9;\">"
+                    "<div style=\"font-size:1.03rem;font-weight:750;color:#173B2C;margin-bottom:5px;\">⚖️ 三核心研究條件比對</div>"
+                    f"<div style=\"font-size:.88rem;color:#486657;margin-bottom:9px;\">{html.escape(compact_best)}</div>"
                     "<div style=\"display:flex;flex-wrap:wrap;gap:7px;\">"
                     + "".join(compact_cards)
                     + "</div>"
-                    f"<div style=\"margin-top:9px;font-size:.88rem;color:#E2E8F0;\">🧭 心理合併觀察：{html.escape(compact_overall)}</div>"
+                    f"<div style=\"margin-top:9px;font-size:.88rem;color:#173B2C;\">🧭 心理合併觀察：{html.escape(compact_overall)}</div>"
                     "</div>"
                 )
 
@@ -7941,13 +7558,13 @@ if auth_user:
                             highlight_text = html.escape(item["highlight"])
                             st.markdown(
                                 "<div style=\"margin:9px 0;padding:11px 13px;border:1px solid rgba(148,163,184,.25);"
-                                "border-radius:9px;background:rgba(15,23,42,.42);\">"
-                                f"<div style=\"font-weight:750;color:#F8FAFC;\">{html.escape(strategy_name)} "
+                                "border-radius:9px;background:#FFFFFF;\">"
+                                f"<div style=\"font-weight:750;color:#173B2C;\">{html.escape(strategy_name)} "
                                 f"<span style=\"color:{status_color};font-size:.88rem;\">{status_label}｜比對 {score_text}</span></div>"
-                                f"<div style=\"margin:7px 0;color:#F8FAFC;line-height:1.65;\">"
+                                f"<div style=\"margin:7px 0;color:#173B2C;line-height:1.65;\">"
                                 f"<span style=\"text-decoration:underline;text-decoration-color:#FBBF24;"
                                 f"text-decoration-thickness:3px;text-underline-offset:3px;\">🖍️ 畫線重點：{highlight_text}</span></div>"
-                                f"<div style=\"font-size:.9rem;color:#CBD5E1;line-height:1.6;\"><b>門檻：</b>{html.escape(item['threshold'])}<br>"
+                                f"<div style=\"font-size:.9rem;color:#486657;line-height:1.6;\"><b>門檻：</b>{html.escape(item['threshold'])}<br>"
                                 f"<b>數據比對：</b>{html.escape(reasons[strategy_name])}<br>"
                                 f"<b>市場心理：</b>{html.escape(detail_text)}<br>"
                                 f"<b>資料來源：</b>{html.escape(detail_sources[strategy_name])}</div>"
@@ -8260,25 +7877,6 @@ if auth_user:
             st.error(f"數據載入異常：{e}")
 
     try:
-        st.markdown(f"""
-            <div style="margin: 1.2rem 0 1.2rem 0; background: linear-gradient(90deg, rgba(30, 41, 59, 0.75) 0%, rgba(15, 23, 42, 0.4) 100%);
-                        border-left: 5px solid #3B82F6; border-radius: 0 14px 14px 0; padding: 0.85rem 1.4rem;
-                        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem;
-                        box-shadow: 0 6px 20px rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <span style="font-size: 1.4rem;">🎯</span>
-                    <div style="font-size: 1.2rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em;">
-                        當前檢視策略面板：<span style="color: #60A5FA;">{selected_module}</span>
-                    </div>
-                </div>
-                <div style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; color: #93C5FD;">
-                    👈 可隨時於左側邊欄切換 10 種策略模組
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-
-        # Keep the behavior guide with the active panel, below the terminal
-        # header and market overview instead of placing it at the page top.
         _render_market_psychology_guide(st, selected_module, explanation_style)
 
         if df_chart is None or df_chart.empty:
@@ -8627,7 +8225,7 @@ if auth_user:
                     title=dict(
                         text=f"【{html.escape(str(c_name), quote=False)}】K 線圖｜{selected_tf}",
                         x=0.01, xanchor="left", y=0.99, yanchor="top",
-                        font=dict(size=16, color="#F8FAFC"),
+                        font=dict(size=16, color="#173B2C"),
                         subtitle=dict(text=""),
                     ),
                     xaxis_rangeslider_visible=False,

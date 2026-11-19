@@ -1,3 +1,18 @@
 [client]
 toolbarMode = "minimal"
 
+[theme]
+base = "light"
+primaryColor = "#236647"
+backgroundColor = "#EFF4F1"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#173B2C"
+borderColor = "#CADCD1"
+showWidgetBorder = true
+
+[theme.sidebar]
+primaryColor = "#8AD6AD"
+backgroundColor = "#153A2C"
+secondaryBackgroundColor = "#204D3C"
+textColor = "#F3FAF6"
+borderColor = "#487360"
