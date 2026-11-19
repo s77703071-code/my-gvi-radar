@@ -1,0 +1,129 @@
+:root {
+    --zhengxu-page: #eff4f1;
+    --zhengxu-surface: #fff;
+    --zhengxu-ink: #173b2c;
+    --zhengxu-muted: #486657;
+    --zhengxu-border: #cadcd1;
+    --zhengxu-action: #236647;
+}
+
+.stApp { background: var(--zhengxu-page); }
+[data-testid="stHeader"] {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    pointer-events: none;
+}
+[data-testid="stExpandSidebarButton"] {
+    color: var(--zhengxu-ink) !important;
+    pointer-events: auto;
+}
+[data-testid="stHeader"] :is([data-testid="stAppDeployButton"], [data-testid="stMainMenu"]) {
+    display: none !important;
+}
+[data-testid="stMainBlockContainer"] {
+    max-width: 100% !important;
+    padding: 1.25rem 1.6rem 3rem !important;
+}
+.stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stMainBlockContainer"] {
+    padding-top: 3.3rem !important;
+}
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"]
+> [data-testid="stElementContainer"]:has(.zhengxu-theme) {
+    display: none;
+}
+
+[data-testid="stSidebar"] {
+    background: linear-gradient(155deg, #172f29, #0f4434);
+}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: #d1e7db; }
+[data-testid="stSidebar"]:has(.st-key-workbench_navigation) .st-key-sidebar_strategy_selector {
+    display: none;
+}
+.st-key-workbench_navigation [data-testid="stExpander"] {
+    background: #1b4e3d;
+    border-color: #487360;
+}
+.st-key-workbench_navigation button { text-align: left; }
+
+[data-testid="stMetric"] {
+    background: var(--zhengxu-surface);
+    border: 1px solid var(--zhengxu-border);
+    border-radius: 12px;
+    padding: .7rem .9rem;
+}
+[data-testid="stMetricLabel"] { color: var(--zhengxu-muted); }
+[data-testid="stMetricValue"] {
+    color: var(--zhengxu-ink);
+    font-size: 1.42rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+[data-testid="stMainBlockContainer"] [data-testid="stCaptionContainer"] p {
+    color: var(--zhengxu-muted);
+}
+[data-testid="stMainBlockContainer"] [data-testid="stExpander"] {
+    background: var(--zhengxu-surface);
+    border-radius: 10px;
+}
+[data-testid="stTabs"] [role="tablist"] { flex-wrap: wrap; }
+[data-testid="stTabs"] [role="tab"] { padding-inline: .65rem; }
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] { font-weight: 700; }
+[data-testid="stMainBlockContainer"] :is([data-testid="stButton"], [data-testid="stDownloadButton"],
+                                       [data-testid="stFormSubmitButton"]) button {
+    border-radius: 8px;
+}
+[data-testid="stMainBlockContainer"] button:focus-visible {
+    outline: 2px solid var(--zhengxu-action);
+    outline-offset: 2px;
+}
+
+.zhengxu-module-hero {
+    background: linear-gradient(105deg, #124b36, #236647);
+    border-radius: 13px;
+    padding: 1rem 1.3rem;
+}
+.zhengxu-module-hero h1 {
+    margin: 0;
+    padding: 0;
+    font-size: clamp(1.35rem, 3vw, 1.75rem);
+    line-height: 1.35;
+    color: #fff;
+}
+.zhengxu-login-hero {
+    max-width: 720px;
+    margin: min(9vh, 64px) auto 1rem;
+    padding: clamp(1.2rem, 4vw, 2.5rem);
+    background: var(--zhengxu-surface);
+    border: 1px solid var(--zhengxu-border);
+    border-radius: 18px;
+    text-align: center;
+}
+.zhengxu-login-hero h1 { color: var(--zhengxu-ink); }
+.zhengxu-login-hero p { color: var(--zhengxu-muted); }
+
+@media (min-width: 1024px) {
+    [data-testid="stSidebar"][data-collapsed="false"] {
+        width: 230px !important;
+        min-width: 230px !important;
+        max-width: 230px !important;
+    }
+}
+@media (max-width: 768px) {
+    [data-testid="stMainBlockContainer"] { padding-inline: .65rem !important; }
+    [data-testid="stRadio"] [role="radiogroup"] { flex-wrap: wrap; }
+    [data-testid="stPlotlyChart"] { max-width: 100%; overflow-x: auto; }
+    [data-testid="stPlotlyChart"] .modebar-btn {
+        min-width: 40px;
+        min-height: 40px;
+        touch-action: manipulation;
+    }
+    [data-testid="stPlotlyChart"] .modebar-container { opacity: 1; visibility: visible; }
+    [data-testid="stPlotlyChart"] .modebar {
+        max-width: calc(100vw - 1.5rem);
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+    [data-testid="stMetric"] { padding: .45rem .55rem; }
+    [data-testid="stMetricValue"] { font-size: 1.1rem; }
+}
