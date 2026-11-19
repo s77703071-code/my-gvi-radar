@@ -7,7 +7,7 @@ from base64 import b64encode, urlsafe_b64decode
 from contextlib import closing
 from datetime import date
 from email.message import EmailMessage
-from math import isfinite
+from math import fsum, isfinite
 from pathlib import Path
 from uuid import UUID, uuid4
 try:
@@ -1611,11 +1611,7 @@ def _export_portfolio(user_id):
             "WHERE user_id=? ORDER BY setting_key",
             (user_id,),
         ).fetchall())
-        positions = [dict(row) for row in conn.execute(
-            "SELECT symbol, name, asset_type, currency, quantity, price, fx_to_twd, "
-            "cost_basis_twd, updated_at FROM portfolio_positions WHERE user_id=? ORDER BY id",
-            (user_id,),
-        )]
+        positions = _read_legacy_positions(conn, user_id)
         snapshots = [dict(row) for row in conn.execute(
             "SELECT snapshot_date, total_value_twd, stock_value_twd, bond_value_twd, "
             "cash_value_twd, note FROM portfolio_snapshots WHERE user_id=? ORDER BY id",
@@ -1623,6 +1619,14 @@ def _export_portfolio(user_id):
         )]
 
     return _encode_portfolio_export(settings, positions, snapshots)
+
+
+def _read_legacy_positions(conn, user_id):
+    return [dict(row) for row in conn.execute(
+        "SELECT symbol, name, asset_type, currency, quantity, price, fx_to_twd, "
+        "cost_basis_twd, updated_at FROM portfolio_positions WHERE user_id=? ORDER BY id",
+        (user_id,),
+    )]
 
 
 def _encode_portfolio_export(settings, positions, snapshots):
@@ -2406,6 +2410,13 @@ def _validate_pilot_trade_rows(rows):
         raise ValueError("Invalid trade history")
 
 
+def _read_pilot_trade_entries(account):
+    response = _portfolio_pilot_request(account, "read_trade_entries")
+    rows = response.json() if response.status_code == 200 else None
+    _validate_pilot_trade_rows(rows)
+    return rows
+
+
 def _read_pilot_correction_history(account, kind, validate_rows):
     entries_key = f"{kind}_entries"
     response = _portfolio_pilot_request(account, f"read_{kind}_history")
@@ -2629,9 +2640,7 @@ def _render_pilot_trade(account):
             st.warning("暫時無法讀取成交更正歷史。")
     if history is None:
         try:
-            response = _portfolio_pilot_request(account, "read_trade_entries")
-            rows = response.json() if response.status_code == 200 else None
-            _validate_pilot_trade_rows(rows)
+            rows = _read_pilot_trade_entries(account)
         except (RuntimeError, ValueError, TypeError, requests.RequestException):
             st.error("暫時無法讀取買賣成交明細。請稍後再試。")
             return
@@ -4834,9 +4843,11 @@ def build_institutional_screen(trades, shares_by_code, tickers, investor, min_ne
     return pd.DataFrame(rows)
 
 
+TRADER_WATCHLIST_DEFAULTS = ("2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL") + ("",) * 7
+
+
 def get_trader_watchlist_symbols():
     """Read the watchlist across module reruns without depending on another page's local variable."""
-    defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
     saved_values = st.session_state.get("trader_watchlist_values")
     if isinstance(saved_values, (list, tuple)):
         source_values = saved_values
@@ -4845,7 +4856,7 @@ def get_trader_watchlist_symbols():
         if any(key in st.session_state for key in widget_keys):
             source_values = [st.session_state.get(key, "") for key in widget_keys]
         else:
-            source_values = defaults
+            source_values = TRADER_WATCHLIST_DEFAULTS
 
     normalized = []
     for value in source_values:
@@ -6692,12 +6703,14 @@ def _logout_account():
     for key in list(st.session_state.keys()):
         if key in (
             "auth_user", "pending_recovery_email", "gemini_api_key_input",
-            "openai_api_key_input", "openai_model_input",
+            "openai_api_key_input", "openai_model_input", "sidebar_strategy_selector", "selected_stock_input",
+            "trader_backtest_history", "explanation_style_selector",
         ) or key.startswith((
             "port_", "portfolio_", "dual_grid_", "module_access_", "login_", "register_", "recovery_",
             "password_reset_", "reset_", "finmind_user_token_",
             "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_", "broker_branch_ai_",
             "account_ai_report:", "ai_report_", "ai_provider_", "send_ai_report_email_",
+            "workbench_", "trader_watchlist_", "trader_watch_ticker_", "observer_action_notice_",
         )):
             st.session_state.pop(key, None)
 
@@ -6706,6 +6719,255 @@ def _clear_finmind_session_token(token_key, acknowledgement_key):
     """Remove a user-entered provider token and its acknowledgement from this session."""
     st.session_state.pop(token_key, None)
     st.session_state.pop(acknowledgement_key, None)
+
+
+def _close_workbench_on_module_change():
+    st.session_state.pop("workbench_open", None)
+    st.session_state.pop("workbench_watch_symbol", None)
+    st.session_state.pop("portfolio_workbench_cloud", None)
+
+
+def _open_workbench_module(module, cloud=False):
+    _close_workbench_on_module_change()
+    st.session_state["sidebar_strategy_selector"] = module
+    if cloud:
+        st.session_state["portfolio_workbench_cloud"] = True
+
+
+def _jump_to_stock_diagnosis(ticker):
+    _open_workbench_module("📊 彩色 K 線圖與成交量")
+    st.session_state["selected_stock_input"] = str(ticker).strip().upper()
+
+
+def _open_workbench_watch_symbol():
+    ticker = st.session_state.get("workbench_watch_symbol")
+    if ticker:
+        _jump_to_stock_diagnosis(ticker)
+
+
+def _render_workbench_watchlist():
+    st.subheader("自選股")
+    st.caption("與三雷達的觀察代碼共用清單，登出後會回到預設清單。")
+    symbols = get_trader_watchlist_symbols()
+    if symbols:
+        st.selectbox(
+            "選擇代碼以開啟個股診斷", symbols, index=None, placeholder="選擇自選股",
+            key="workbench_watch_symbol", on_change=_open_workbench_watch_symbol,
+        )
+    else:
+        st.info("目前沒有自選股，可到三雷達新增觀察代碼。")
+    st.button("到三雷達編輯自選股", key="workbench_edit_watchlist",
+              on_click=_open_workbench_module, args=("🚀 華爾街機構級三核心策略雷達",))
+
+
+def _market_index_snapshot(symbol):
+    try:
+        history = yf.Ticker(symbol).history(period="5d", interval="1d", auto_adjust=False)
+    except Exception:
+        return None
+    if not isinstance(history, pd.DataFrame):
+        return None
+    if isinstance(history.columns, pd.MultiIndex):
+        history = history.droplevel(list(range(1, history.columns.nlevels)), axis="columns")
+    if "Close" not in history or not isinstance(history.index, pd.DatetimeIndex):
+        return None
+    closes = history["Close"]
+    if not isinstance(closes, pd.Series):
+        return None
+    closes = pd.to_numeric(closes, errors="coerce")
+    closes = closes[closes.index.notna() & np.isfinite(closes) & (closes > 0)]
+    closes = closes.sort_index(kind="stable")
+    closes = closes.groupby(closes.index.normalize()).last()
+    if closes.empty:
+        return None
+    value = float(closes.iloc[-1])
+    change = percentage = None
+    if len(closes) > 1:
+        previous = float(closes.iloc[-2])
+        points = value - previous
+        percent = (points / previous) * 100
+        if isfinite(percent):
+            change, percentage = points, percent
+    return value, change, percentage, closes.index[-1].date()
+
+
+def _render_market_overview():
+    st.subheader("台美市場概況")
+    st.caption("來源 Yahoo Finance 日線。依各市場交易日顯示，可能延遲；變動相較前一筆可用資料。")
+    indexes = (
+        ("台灣加權", "^TWII", "追蹤台灣證券交易所上市股票的整體表現。"),
+        ("標普 500", "^GSPC", "追蹤美國大型上市公司的整體股價表現。"),
+        ("道瓊工業", "^DJI", "由 30 家美國大型企業組成的價格加權指數。"),
+        ("那斯達克綜合", "^IXIC", "追蹤在那斯達克掛牌的股票。"),
+    )
+    snapshots = {}
+    for column, (label, symbol, description) in zip(st.columns(4), indexes):
+        with column:
+            snapshot = _market_index_snapshot(symbol)
+            if snapshot is None:
+                st.metric(f"{label} ({symbol})", "資料暫缺", help=description)
+                continue
+            snapshots[label] = snapshot
+            value, change, percentage, trading_day = snapshot
+            delta = f"{change:+.2f} ({percentage:+.2f}%)" if change is not None else None
+            st.metric(f"{label} ({symbol})", f"{value:,.2f}", delta, help=description)
+            st.caption(f"資料日 {trading_day:%Y-%m-%d}" + (" · 缺前期資料" if change is None else ""))
+    return snapshots
+
+
+def _workbench_position_total(positions):
+    values = []
+    for row in positions:
+        quantity, price, fx = (row[field] for field in ("quantity", "price", "fx_to_twd"))
+        if (not all(type(number) in (int, float) and isfinite(number)
+                    for number in (quantity, price, fx))
+                or quantity <= 0 or price < 0 or fx <= 0):
+            raise ValueError("Invalid position valuation input")
+        values.append(quantity * price * fx)
+    total = fsum(values)
+    if not isfinite(total):
+        raise ValueError("Invalid portfolio total")
+    return total
+
+
+def _render_workbench_portfolio_summary(account, cloud):
+    st.subheader("個人資產摘要")
+    st.caption("資料來源為雲端投資組合。" if cloud else "資料來源為原有投資組合。")
+    try:
+        if cloud:
+            positions = _read_portfolio_pilot(account)["positions"]
+        else:
+            uri = Path(DB_FILE).resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as conn:
+                conn.row_factory = sqlite3.Row
+                positions = _read_legacy_positions(conn, int(account["id"]))
+    except (KeyError, ValueError, OverflowError, RuntimeError, sqlite3.Error, requests.RequestException):
+        st.warning("暫時無法讀取投資組合。")
+        return
+    if not positions:
+        st.info("目前尚無持倉。")
+        return
+    st.metric("持倉筆數", len(positions))
+    try:
+        total = _workbench_position_total(positions)
+    except (KeyError, ValueError, OverflowError):
+        st.warning("持倉價格、數量或匯率資料缺失或異常，暫無法估算總市值。")
+        return
+    st.metric("組合估算市值（台幣）", f"NT${total:,.0f}")
+    st.caption("依帳本保存的持倉數量、價格與匯率估算。")
+
+
+def _render_workbench_recent_trades(account):
+    st.subheader("最近買賣成交")
+    try:
+        rows = _read_pilot_trade_entries(account)
+    except (RuntimeError, ValueError, TypeError, requests.RequestException):
+        st.warning("暫時無法讀取最近成交。")
+        return
+    if not rows:
+        st.info("尚無買賣成交紀錄。")
+        return
+
+    columns = ("成交日", "方向", "標的", "原幣", "成交數量", "成交單價")
+    display_rows = [_pilot_trade_display(row) for row in rows[:5]]
+    st.dataframe([{column: row[column] for column in columns} for row in display_rows],
+                 hide_index=True, width="stretch")
+    st.caption("依成交日由新到舊，最多顯示 5 筆。完整歷史可在雲端投資組合查閱。")
+
+
+def _render_workbench_shortcuts(cloud):
+    portfolio, radar, research = st.columns(3)
+    with portfolio.container(border=True, height="stretch", key="workbench_card_portfolio"):
+        st.subheader("投資組合")
+        st.button("開啟雲端投資組合" if cloud else "開啟投資組合",
+                  key="workbench_portfolio", on_click=_open_workbench_module,
+                  args=("🧭 投資組合理財", cloud), width="stretch")
+    with radar.container(border=True, height="stretch", key="workbench_card_radar"):
+        st.subheader("智慧選股")
+        st.button("開啟三雷達", key="workbench_radar", on_click=_open_workbench_module,
+                  args=("🚀 華爾街機構級三核心策略雷達",), width="stretch")
+    with research.container(border=True, height="stretch", key="workbench_card_strategies"):
+        st.subheader("策略研究")
+        st.button("開啟策略比較", key="workbench_compare", on_click=_open_workbench_module,
+                  args=("⚖️ 網格／持有／定期定額比較",), width="stretch")
+        st.button("開啟雙策略網格", key="workbench_grid", on_click=_open_workbench_module,
+                  args=("🧠 智慧型雙策略網格系統",), width="stretch")
+
+
+def _render_workbench_research():
+    st.subheader("最近回測")
+    history = st.session_state.get("trader_backtest_history", [])
+    if history:
+        st.dataframe([
+            {"標的": row["ticker"], "條件": row["condition"], "週期": row["timeframe"],
+             "資料期間": row["period"], "評估": row["status"]}
+            for row in reversed(history[-3:])
+        ], hide_index=True, width="stretch")
+        st.caption("顯示本次登入手動執行的最近 3 項回測條件。")
+    else:
+        st.info("本次登入尚無回測紀錄。")
+    st.button("開啟技術指標回測", key="workbench_backtest",
+              on_click=_open_workbench_module, args=("🧪 技術指標自訂策略回測",))
+
+
+def _render_investment_workbench(account, explanation_style):
+    st.markdown("""
+        <style>
+        .stApp:has(.st-key-zhengxu_workbench) { background: #eff6f1 !important; }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] { background: #eff6f1; }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] :is(button, a) {
+            color: #173b2c !important;
+        }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stSidebar"] {
+            background: #153a2c !important;
+        }
+        .st-key-zhengxu_workbench { color: #173b2c; }
+        .st-key-zhengxu_workbench :is(h1, h2, h3, h4) { color: #173b2c !important; }
+        .st-key-zhengxu_workbench [data-testid="stCaptionContainer"] :is(p, span) {
+            color: #486657 !important;
+        }
+        .st-key-zhengxu_workbench [class*="st-key-workbench_card_"],
+        .st-key-zhengxu_workbench [data-testid="stMetric"] {
+            background: #fff !important; border: 1px solid #cadcd1 !important;
+            box-shadow: none !important; border-radius: 12px !important;
+        }
+        .st-key-zhengxu_workbench :is([data-testid="stMetricLabel"], [data-testid="stMetricValue"],
+                                      [data-testid="stWidgetLabel"]) {
+            color: #173b2c !important;
+        }
+        .st-key-zhengxu_workbench [data-testid="stButton"] button {
+            background: #236647 !important; color: #fff !important; box-shadow: none !important;
+        }
+        .st-key-zhengxu_workbench [data-testid="stButton"] button:focus-visible {
+            outline: 3px solid #3f8c64; outline-offset: 3px;
+        }
+        @media (max-width: 768px) {
+            .st-key-workbench_personal [data-testid="stHorizontalBlock"] >
+            :is([data-testid="column"], [data-testid="stColumn"]) {
+                flex-basis: 100% !important; width: 100% !important; min-width: 100% !important;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    cloud = _is_portfolio_pilot(account)
+    with st.container(key="zhengxu_workbench"):
+        st.title("投資工作台")
+        _render_workbench_shortcuts(cloud)
+        with st.container(border=True, key="workbench_card_market"):
+            _render_market_overview()
+        with st.container(key="workbench_personal"):
+            assets, watchlist = st.columns([1, 1])
+            with assets.container(border=True, key="workbench_card_assets"):
+                _render_workbench_portfolio_summary(account, cloud)
+                if explanation_style.startswith("生動童趣"):
+                    st.caption("像用帳本上的標價盤點家當。市值會隨價格與匯率變動。")
+            with watchlist.container(border=True, key="workbench_card_watchlist"):
+                _render_workbench_watchlist()
+        if cloud and os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
+            with st.container(border=True, key="workbench_card_trades"):
+                _render_workbench_recent_trades(account)
+        with st.container(border=True, key="workbench_card_research"):
+            _render_workbench_research()
 
 
 st.sidebar.markdown("### 🔒 操盤手帳號")
@@ -6845,6 +7107,7 @@ else:
     st.stop()
 
 if auth_user:
+    navigation = st.sidebar.container()
     with st.sidebar.expander("設定／更新備援 Email"):
         with st.form("recovery_email_request_form"):
             recovery_email = st.text_input("備援 Email", key="recovery_email_input").strip().lower()
@@ -6883,7 +7146,7 @@ if auth_user:
     if os.environ.get("GVI_DUAL_GRID_ACCESS") == "1":
         management = _dual_grid_management_context(auth_user)
         if st.session_state.get("module_access_open"):
-            if st.sidebar.button("返回策略模組", key="module_access_close"):
+            if navigation.button("返回策略模組", key="module_access_close"):
                 st.session_state.pop("module_access_open", None)
                 st.rerun()
             if management is None:
@@ -6891,26 +7154,20 @@ if auth_user:
             else:
                 _render_dual_grid_management(auth_user, management)
             st.stop()
-        if management and st.sidebar.button("雙策略網格管理", key="module_access_open_button"):
+        if management and navigation.button("雙策略網格管理", key="module_access_open_button"):
             st.session_state["module_access_open"] = True
             st.rerun()
 
-    st.sidebar.markdown("### 🧭 核心策略模組導航")
-    MODULE_LIST = [
-        "📊 彩色 K 線圖與成交量",
-        "📦 籌碼流向參考",
-        "🤖 網格自動生成器",
-        "⚖️ 網格／持有／定期定額比較",
-        "🧪 技術指標自訂策略回測",
-        "💸 配息複利策略",
-        "🚀 華爾街機構級三核心策略雷達",
-        "🏦 台股三大法人獨立選股策略",
-        "📊 當日全市場三大法人佔股本比 Top 10",
-        "🧭 投資組合理財",
-        "🧠 智慧型雙策略網格系統",
-    ]
-    # Keep the original option values stable for existing session state and
-    # module dispatch conditions; show a category prefix only in the menu.
+    navigation.markdown("### 🧭 核心策略模組導航")
+    workbench_open = st.session_state.get("workbench_open", not st.session_state.get("sidebar_strategy_selector"))
+    if navigation.button("返回分析面板" if workbench_open else "投資工作台",
+                         key="workbench_toggle", width="stretch"):
+        st.session_state["workbench_open"] = not workbench_open
+        if workbench_open and not st.session_state.get("sidebar_strategy_selector"):
+            st.session_state["sidebar_strategy_selector"] = "📊 彩色 K 線圖與成交量"
+        st.rerun()
+    # Entries with the same category stay together while preserving the
+    # module names used by session state and page dispatch.
     MODULE_GROUPS = {
         "📊 彩色 K 線圖與成交量": "📈 圖表與籌碼",
         "📦 籌碼流向參考": "📈 圖表與籌碼",
@@ -6918,38 +7175,39 @@ if auth_user:
         "⚖️ 網格／持有／定期定額比較": "⚖️ 策略與回測",
         "🧪 技術指標自訂策略回測": "⚖️ 策略與回測",
         "💸 配息複利策略": "⚖️ 策略與回測",
+        "🧠 智慧型雙策略網格系統": "⚖️ 策略與回測",
         "🚀 華爾街機構級三核心策略雷達": "🏦 選股與市場掃描",
         "🏦 台股三大法人獨立選股策略": "🏦 選股與市場掃描",
         "📊 當日全市場三大法人佔股本比 Top 10": "🏦 選股與市場掃描",
         "🧭 投資組合理財": "🧭 投資組合",
-        "🧠 智慧型雙策略網格系統": "⚖️ 策略與回測",
     }
-    selected_module = st.sidebar.selectbox(
+    selected_module = navigation.selectbox(
         "選擇要檢視的分析面板：",
-        options=MODULE_LIST,
-        index=0,
+        options=list(MODULE_GROUPS),
+        index=None,
+        placeholder="選擇分析面板",
         format_func=lambda module: f"{MODULE_GROUPS[module]}｜{module}",
         key="sidebar_strategy_selector",
+        on_change=_close_workbench_on_module_change,
     )
-    if selected_module == "🧠 智慧型雙策略網格系統":
-        _require_dual_grid_access(auth_user)
-    st.sidebar.markdown("### 🗣️ 解說風格與版面")
-    explanation_style = st.sidebar.radio(
+    navigation.markdown("### 🗣️ 解說風格與版面")
+    explanation_style = navigation.radio(
         "選擇顯示方式",
         options=["一般白話｜專業易讀", "生動童趣｜生活比喻"],
         key="explanation_style_selector",
         help="切換說明用詞、提示卡片和 AI 報告風格；不會改動行情資料、指標公式或策略門檻。",
     )
-    st.sidebar.caption("童趣版用比喻幫助理解，仍保留虧損風險、資料限制與非買賣指令提醒。")
-
-    def _jump_to_stock_diagnosis(ticker):
-        st.session_state["selected_stock_input"] = str(ticker).strip().upper()
-        st.session_state["sidebar_strategy_selector"] = "📊 彩色 K 線圖與成交量"
+    navigation.caption("童趣版用比喻幫助理解，仍保留虧損風險、資料限制與非買賣指令提醒。")
+    if workbench_open:
+        _render_investment_workbench(auth_user, explanation_style)
+        st.stop()
+    if selected_module == "🧠 智慧型雙策略網格系統":
+        _require_dual_grid_access(auth_user)
 
     def _queue_observer_ticker(ticker, notice_key):
         ticker = str(ticker).strip().upper()
-        defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
-        existing = [str(code).strip().upper() for code in st.session_state.get("trader_watchlist_values", defaults)]
+        existing = [str(code).strip().upper()
+                    for code in st.session_state.get("trader_watchlist_values", TRADER_WATCHLIST_DEFAULTS)]
         if ticker in existing:
             st.session_state[notice_key] = f"{ticker} 已在操盤手自訂觀察名單中。"
             return
@@ -7012,33 +7270,7 @@ if auth_user:
         </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### 🌐 全球大盤即時看板")
-    col1, col2, col3, col4 = st.columns(4)
-
-    def get_market_index(ticker):
-        try:
-            df = yf.Ticker(ticker).history(period="5d")
-            if not df.empty and len(df) >= 2:
-                if isinstance(df.columns, pd.MultiIndex): 
-                    df.columns = df.columns.get_level_values(0)
-                close_series = df['Close'].dropna().to_numpy().flatten()
-                if len(close_series) >= 2:
-                    close_today = float(close_series[-1])
-                    change = close_today - float(close_series[-2])
-                    return close_today, change, (change / float(close_series[-2])) * 100
-        except Exception: 
-            pass
-        return None, None, None
-
-    tw_val, tw_chg, tw_pct = get_market_index("^TWII")
-    sp_val, sp_chg, sp_pct = get_market_index("^GSPC")
-    dj_val, dj_chg, dj_pct = get_market_index("^DJI")
-    nas_val, nas_chg, nas_pct = get_market_index("^IXIC")
-
-    with col1: st.metric(label="🇹🇼 台灣加權指數 (^TWII)", value=f"{tw_val:,.2f}" if tw_val else "更新中...", delta=f"{tw_chg:+.2f} ({tw_pct:+.2f}%)" if tw_val else "--", help="顯示指數最新可取得點位；下方變化為相較前一筆資料的點數與百分比差異。")
-    with col2: st.metric(label="🇺🇸 標普 500 指數 (^GSPC)", value=f"{sp_val:,.2f}" if sp_val else "載入中...", delta=f"{sp_chg:+.2f} ({sp_pct:+.2f}%)" if sp_val else "--", help="追蹤美國大型企業整體股價表現的指數；變化為相較前一筆資料。")
-    with col3: st.metric(label="🇺🇸 道瓊工業指數 (^DJI)", value=f"{dj_val:,.2f}" if dj_val else "載入中...", delta=f"{dj_chg:+.2f} ({dj_pct:+.2f}%)" if dj_val else "--", help="由 30 家大型美國企業組成的價格加權指數；變化為相較前一筆資料。")
-    with col4: st.metric(label="🇺🇸 那斯達克指數 (^IXIC)", value=f"{nas_val:,.2f}" if nas_val else "載入中...", delta=f"{nas_chg:+.2f} ({nas_pct:+.2f}%)" if nas_val else "--", help="以那斯達克掛牌公司為主的綜合指數；變化為相較前一筆資料。")
+    market_indexes = _render_market_overview()
 
     _render_metric_glossary(st)
 
@@ -7631,17 +7863,11 @@ if auth_user:
                                     )
                                     ai_backtest = run_ai_candidate_backtests(daily_history, is_tw_stock)
                                     market_snapshot = []
-                                    for label, value, index_change_pct in (
-                                        ("台灣加權指數", tw_val, tw_pct),
-                                        ("標普500", sp_val, sp_pct),
-                                        ("道瓊", dj_val, dj_pct),
-                                        ("那斯達克", nas_val, nas_pct),
-                                    ):
-                                        if value is not None:
-                                            market_snapshot.append(
-                                                f"{label} {value:,.2f}，當次畫面漲跌 {index_change_pct:+.2f}%" if index_change_pct is not None
-                                                else f"{label} {value:,.2f}"
-                                            )
+                                    for label, (value, _, index_change_pct, trading_day) in market_indexes.items():
+                                        detail = f"{label} {value:,.2f}，日線資料日 {trading_day:%Y-%m-%d}"
+                                        if index_change_pct is not None:
+                                            detail += f"，較前一筆可用資料 {index_change_pct:+.2f}%"
+                                        market_snapshot.append(detail)
                                     company_context = collect_stock_research_context(
                                         stock_obj_main, info_obj_main, market_snapshot
                                     )
@@ -10070,7 +10296,7 @@ if auth_user:
 
         st.markdown("#### ✍️ 操盤手自訂觀察代碼掃描區")
         st.caption("每個欄位輸入一檔股票代碼。台股上市請加 .TW、上櫃請加 .TWO；美股輸入代碼即可。下方掃描結果沿用台股／美股核心池的明細欄位與策略評分方式。")
-        watch_defaults = ["2330.TW", "3293.TWO", "8069.TWO", "NVDA", "AAPL"] + [""] * 7
+        watch_defaults = TRADER_WATCHLIST_DEFAULTS
         saved_watch_codes = list(st.session_state.get("trader_watchlist_values", watch_defaults))
         sync_watch_widgets = bool(st.session_state.pop("trader_watchlist_sync_needed", False))
         for watch_index in range(12):
@@ -10522,7 +10748,10 @@ if auth_user:
             cloud_label = ("雲端投資組合試行" if portfolio_enabled
                            else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
                            else "雲端唯讀試行")
-            source = st.radio("投資組合來源", ("原有投資組合", cloud_label), horizontal=True)
+            source = st.radio(
+                "投資組合來源", ("原有投資組合", cloud_label), horizontal=True,
+                index=int(st.session_state.get("portfolio_workbench_cloud", False)),
+            )
             if source == cloud_label:
                 _render_portfolio_pilot(auth_user)
                 st.stop()
