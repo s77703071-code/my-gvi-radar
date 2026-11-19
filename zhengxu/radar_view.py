@@ -6,6 +6,7 @@ import sqlite3
 import streamlit as st
 import yfinance as yf
 
+from .radar_risk import evaluate_radar_risk, risk_status
 from .radars import (
     calculate_fcf_yield,
     calculate_gvi,
@@ -33,6 +34,7 @@ from .market_data import (
     signature_save_to_db,
 )
 from .storage import (
+    CACHE_TTL,
     DB_FILE,
 )
 
@@ -166,6 +168,8 @@ def render_radar(_render_stock_actions, cfg, explanation_style, selected_tf):
         else:
             st.caption("GVI、動能、自由現金流與成長估值是研究用估算；策略評分只表示本次股票池中的相對排序，不是勝率或預期報酬。股票池或勾選條件改變時會重新排名，不宜跨次比較。GVI 假設目前 ROE 未來五年不變，尚未證明能穩定改善績效。價格接近高位可能吸引順勢買盤，也可能增加追價風險；價量動能不是實際籌碼或法人資料。")
         st.caption("點選明細表中的股票列，再選擇個股即時診斷或加入操盤手自訂觀察代碼。")
+        if "風險狀態" in result_view:
+            st.caption("共用風險關卡顯示查核原因與來源。原有篩選與排名依勾選的雷達條件計算。")
         table_event = st.dataframe(
             result_view,
             use_container_width=True,
@@ -221,6 +225,7 @@ def render_radar(_render_stock_actions, cfg, explanation_style, selected_tf):
                 df_hist = yf.download(t, period=cfg["p"], interval=cfg["i"], progress=False)
                 if isinstance(df_hist.columns, pd.MultiIndex): df_hist.columns = df_hist.columns.get_level_values(0)
                 if df_hist.index.tz is not None: df_hist.index = df_hist.index.tz_localize(None)
+                risk_history = df_hist.copy(deep=False)
                 df_hist = df_hist.dropna(subset=['Close', 'Volume']).copy()
                 L = len(df_hist)
 
@@ -239,12 +244,19 @@ def render_radar(_render_stock_actions, cfg, explanation_style, selected_tf):
                 info_obj = stock_obj.info if hasattr(stock_obj, 'info') and stock_obj.info else {}
 
                 fcf = _finite_number(info_obj.get('freeCashflow'))
+                fcf_basis = "yfinance 公司資料欄位"
                 if fcf is None:
-                    fcf, _fcf_basis = _free_cash_flow_from_statements(stock_obj)
+                    fcf, fcf_basis = _free_cash_flow_from_statements(stock_obj)
                 mcap = _finite_number(info_obj.get('marketCap')) or _finite_number(row.get('mcap'))
                 fcf_yield = calculate_fcf_yield(fcf, mcap)
 
                 peg_val, _peg_basis = _peg_from_company_data(info_obj)
+                risk_findings = evaluate_radar_risk(
+                    risk_history, timeframe=selected_tf, cache_updated=row.get("updated_at"),
+                    cache_ttl=CACHE_TTL, roe=roe_val, roe_source=row.get("roe_source") or "",
+                    free_cash_flow=fcf, fcf_source=fcf_basis, gvi=gvi_live,
+                    momentum=momentum_value, fcf_yield=fcf_yield, peg=peg_val,
+                )
 
                 df_hist, chip_status_text, _ = calculate_chip_and_backtest(t, df_hist, selected_tf)
 
@@ -255,6 +267,9 @@ def render_radar(_render_stock_actions, cfg, explanation_style, selected_tf):
                     '自由現金流收益': fcf_yield,
                     '本益成長比(PEG)': peg_val,
                     '⚡ 價量動能估算': chip_status_text,
+                    '風險狀態': risk_status(risk_findings),
+                    '風險原因': "；".join(finding.reason for finding in risk_findings),
+                    '查核來源': "；".join(dict.fromkeys(finding.source for finding in risk_findings)),
                     'gvi_raw': gvi_live,
                     'mo_raw': momentum_value,
                     'fcf_raw': fcf_yield
@@ -289,7 +304,7 @@ def render_radar(_render_stock_actions, cfg, explanation_style, selected_tf):
             if strat_qarp: cols.extend(['自由現金流收益率', '本益成長比(PEG)'])
             if not strat_gvi and not strat_momentum and not strat_qarp:
                 cols.extend(['GVI價值指標', '動能(創高距離)', '自由現金流收益率', '本益成長比(PEG)'])
-            cols.append('⚡ 價量動能估算')
+            cols.extend(('⚡ 價量動能估算', '風險狀態', '風險原因', '查核來源'))
 
             df_final_view = df_res[cols]
             st.session_state["stock_screen_result"] = {

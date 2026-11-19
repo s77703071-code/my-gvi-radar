@@ -9,6 +9,7 @@ import streamlit as st
 import time
 import yfinance as yf
 
+from .radar_risk import evaluate_radar_risk, risk_status
 from .radars import (
     calculate_fcf_yield,
     calculate_gvi,
@@ -49,8 +50,17 @@ from .research_ai import (
     send_gmail_report,
 )
 from .storage import (
+    CACHE_TTL,
     DB_FILE,
 )
+
+
+def _render_radar_risk(findings):
+    with st.expander(f"共用風險關卡｜{risk_status(findings)}", expanded=bool(findings)):
+        for finding in findings:
+            st.write(f"{finding.category}｜{finding.reason}")
+            st.caption(f"查核來源 {finding.source}")
+        st.caption("這些提示與雷達分數分開。快取更新時間用於檢查快取，財報公告日需另外查核。")
 
 
 def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input, openai_model_input, selected_stock, selected_tf):
@@ -88,6 +98,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
             df_chart = yf.download(selected_stock, period=cfg["p"], interval=cfg["i"], progress=False)
             if len(df_chart) > 0:
                 if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
+                risk_history = df_chart.copy(deep=False)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
 
                 # 📅 日期格式適應性調整
@@ -185,6 +196,13 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                 fcf_yield_main = calculate_fcf_yield(fcf_main, mcap_main)
 
                 peg_val_main, peg_basis_main = _peg_from_company_data(info_obj_main)
+                risk_findings = evaluate_radar_risk(
+                    risk_history, timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,
+                    cache_ttl=CACHE_TTL, roe=roe_val, roe_source=roe_src,
+                    free_cash_flow=fcf_main, fcf_source=fcf_basis_main, gvi=gvi_val,
+                    momentum=momentum_score, fcf_yield=fcf_yield_main, peg=peg_val_main,
+                )
+                _render_radar_risk(risk_findings)
 
                 scores = {}
                 reasons = {}
@@ -684,6 +702,11 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                     except Exception as mail_error:
                                         st.error(f"寄信失敗：{mail_error}")
                 st.markdown("---")
+            else:
+                _render_radar_risk(evaluate_radar_risk(
+                    pd.DataFrame(), timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,
+                    cache_ttl=CACHE_TTL,
+                ))
         except Exception as e:
             st.error(f"數據載入異常：{e}")
     return df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock
