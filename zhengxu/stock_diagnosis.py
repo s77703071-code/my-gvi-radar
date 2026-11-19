@@ -49,6 +49,7 @@ from .research_ai import (
     get_gmail_secret_values,
     send_gmail_report,
 )
+from .research_quality import RadarEvidence, build_research_evidence, compose_research_report
 from .storage import (
     CACHE_TTL,
     DB_FILE,
@@ -235,6 +236,14 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                     "動能突破雷達": "動能趨勢面",
                     "QARP 現金流雷達": "QARP 現金流與估值面",
                 }
+                detail_sources = {
+                    "GVI 價值雷達": f"每股淨值：{bv_src}；ROE：{roe_src}；股價：Yahoo Finance 行情資料。",
+                    "動能突破雷達": f"Yahoo Finance 歷史收盤資料；比較{momentum_window_text}，至少需 50 根有效收盤資料。",
+                    "QARP 現金流雷達": (
+                        f"自由現金流依據：{fcf_basis_main}；搭配 Yahoo Finance 市值計算參考值。若使用年度財報，期間可能較近四季資料更舊。"
+                        f"PEG 依據：{peg_basis_main}；估算只採年度盈餘成長，不以單季成長替代。"
+                    ),
+                }
                 compact_psychology = {
                     "GVI 價值面": {
                         True: "可能吸引價值型關注；仍要查獲利能否延續。",
@@ -368,14 +377,6 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                         st.caption(
                             "下列條件分數只表示符合目前研究門檻的程度；門檻尚未證明具有穩定的樣本外績效。"
                         )
-                        detail_sources = {
-                            "GVI 價值雷達": f"每股淨值：{bv_src}；ROE：{roe_src}；股價：yfinance 行情資料。",
-                            "動能突破雷達": f"來源：目前股票歷史收盤資料；比較{momentum_window_text}，至少需 50 根有效收盤資料。",
-                            "QARP 現金流雷達": (
-                                f"自由現金流依據：{fcf_basis_main}；搭配 yfinance 市值計算參考值。若使用年度財報，期間可能較近四季資料更舊。"
-                                f"PEG 依據：{peg_basis_main}；估算只採年度盈餘成長，不以單季成長替代。"
-                            ),
-                        }
                         for item in factor_details:
                             strategy_name = item["strategy"]
                             psych_key = item["psych_key"]
@@ -515,11 +516,38 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                             + broker_branch_ai_interpretation,
                                         )
                                     market_psychology_brief = "\n".join(ai_psychology_lines)
+                                    quote_index = df_chart.index[-1]
+                                    quote_time = (quote_index.isoformat(sep=" ", timespec="minutes")
+                                                  if isinstance(quote_index, pd.Timestamp) and pd.notna(quote_index)
+                                                  else None)
+                                    evidence_summary = build_research_evidence(
+                                        price=price_val, quote_time=quote_time, timeframe=selected_tf,
+                                        radar_evidence=[
+                                            RadarEvidence(
+                                                strategy, ai_psychology["checks"][psychology_key_by_strategy[strategy]],
+                                                reason, detail_sources[strategy],
+                                            )
+                                            for strategy, reason in reasons.items()
+                                        ],
+                                        risk_findings=risk_findings,
+                                    )
+                                    score_summary = (
+                                        f"{best_strategy}（{best_score}/100，這是條件比對分數，不是勝率）"
+                                        if valid_scores else "資料不足，未評分"
+                                    )
+                                    change_summary = (
+                                        f"{change_pct:+.2f}%" if len(df_chart) > 1 and prev_close > 0
+                                        and _finite_number(change_pct) is not None else "資料不足"
+                                    )
+                                    price_summary = (
+                                        f"{price_val:,.2f}" if _finite_number(price_val) is not None
+                                        and price_val > 0 and quote_time else "資料不足"
+                                    )
                                     quant_summary = (
                                         f"成長價值研究分數={gvi_str}；股東權益報酬率={roe_str}；股價淨值比={pb_str}；"
-                                        f"目前研究比對分數最高的單項條件={best_strategy}（{best_score}/100，這是條件比對分數，不是勝率）；"
+                                        f"目前研究比對分數最高的單項條件={score_summary}；"
                                         f"動能比值區間={momentum_window_text}；"
-                                        f"價量動能估算={chip_status_text}；目前股價={price_val:,.2f}；最近收盤變化={change_pct:+.2f}%\n"
+                                        f"價量動能估算={chip_status_text}；研究採用價格={price_summary}；最近收盤變化={change_summary}\n"
                                         f"三核心白話心理解讀：\n{market_psychology_brief}"
                                     )
                                     if broker_branch_ai_context:
@@ -536,6 +564,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                         + "\n\n系統依樣本外門檻與最新日線整理的條件式建議：\n"
                                         + str(ai_backtest.get("advice", "回測資料不足，暫不提出策略建議。")),
                                         explanation_style=explanation_style,
+                                        evidence_summary=evidence_summary,
                                     )
                                     if provider_name == "ChatGPT":
                                         success_report, ai_sources = generate_openai_research(
@@ -544,6 +573,9 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                     else:
                                         success_report = generate_content_with_retry(ai_prompt, api_key_input)
                                         ai_sources = []
+                                    success_report = compose_research_report(
+                                        evidence_summary, provider_name, success_report, ai_sources
+                                    )
                                     if broker_branch_ai_interpretation:
                                         success_report = (
                                             str(success_report).rstrip()
@@ -567,6 +599,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                         "psychology": market_psychology_brief,
                                         "branch_context": broker_branch_ai_context,
                                         "style": explanation_style,
+                                        "evidence_version": 1,
                                     }
                                 except Exception as ai_e:
                                     st.error(f"{provider_name} 投資研究報告產生失敗：{ai_e}")
@@ -575,6 +608,8 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                     if saved_report is not None:
                         report_provider = saved_report["provider"]
                         st.success(f"📋 {report_provider}【{c_name}】市場與策略研究報告")
+                        if not saved_report.get("evidence_version"):
+                            st.caption("這份報告早於查核摘要功能。重新產生即可套用目前的資料與來源標示。")
                         report_style = saved_report["style"]
                         if report_style != explanation_style:
                             st.caption(
