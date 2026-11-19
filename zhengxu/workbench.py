@@ -64,6 +64,7 @@ def _logout_account():
             "password_reset_", "reset_", "finmind_user_token_",
             "finmind_token_ack_", "finmind_shared_ack_", "branch_data_source_", "broker_branch_ai_",
             "account_ai_report:", "ai_report_", "ai_provider_", "send_ai_report_email_",
+            "stock_screen_",
             "workbench_", "trader_watchlist_", "trader_watch_ticker_", "observer_action_notice_",
         )):
             st.session_state.pop(key, None)
