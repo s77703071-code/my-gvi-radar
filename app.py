@@ -6760,21 +6760,25 @@ def _render_workbench_watchlist():
               on_click=_open_workbench_module, args=("🚀 華爾街機構級三核心策略雷達",))
 
 
-def _market_index_snapshot(symbol):
+def _market_index_history(symbol, period="5d"):
     try:
-        history = yf.Ticker(symbol).history(period="5d", interval="1d", auto_adjust=False)
+        history = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
     except Exception:
         return None
     if not isinstance(history, pd.DataFrame):
         return None
     if isinstance(history.columns, pd.MultiIndex):
         history = history.droplevel(list(range(1, history.columns.nlevels)), axis="columns")
-    if "Close" not in history or not isinstance(history.index, pd.DatetimeIndex):
+    if "Close" not in history or not isinstance(history.index, pd.DatetimeIndex) or not history.columns.is_unique:
         return None
-    closes = history["Close"]
-    if not isinstance(closes, pd.Series):
+    return history
+
+
+def _market_index_snapshot(symbol):
+    history = _market_index_history(symbol)
+    if history is None:
         return None
-    closes = pd.to_numeric(closes, errors="coerce")
+    closes = pd.to_numeric(history["Close"], errors="coerce")
     closes = closes[closes.index.notna() & np.isfinite(closes) & (closes > 0)]
     closes = closes.sort_index(kind="stable")
     closes = closes.groupby(closes.index.normalize()).last()
@@ -6791,28 +6795,105 @@ def _market_index_snapshot(symbol):
     return value, change, percentage, closes.index[-1].date()
 
 
-def _render_market_overview():
-    st.subheader("台美市場概況")
-    st.caption("來源 Yahoo Finance 日線。依各市場交易日顯示，可能延遲；變動相較前一筆可用資料。")
-    indexes = (
-        ("台灣加權", "^TWII", "追蹤台灣證券交易所上市股票的整體表現。"),
-        ("標普 500", "^GSPC", "追蹤美國大型上市公司的整體股價表現。"),
-        ("道瓊工業", "^DJI", "由 30 家美國大型企業組成的價格加權指數。"),
-        ("那斯達克綜合", "^IXIC", "追蹤在那斯達克掛牌的股票。"),
-    )
+WORKBENCH_INDEXES = (
+    ("台灣加權", "^TWII", "追蹤台灣證券交易所上市股票的整體表現。"),
+    ("標普 500", "^GSPC", "追蹤美國大型上市公司的整體股價表現。"),
+    ("道瓊工業", "^DJI", "由 30 家美國大型企業組成的價格加權指數。"),
+    ("那斯達克綜合", "^IXIC", "追蹤在那斯達克掛牌的股票。"),
+)
+
+
+def _render_market_overview(compact=False):
+    if not compact:
+        st.subheader("台美市場概況")
+        st.caption("來源 Yahoo Finance 日線。依各市場交易日顯示，可能延遲；變動相較前一筆可用資料。")
     snapshots = {}
-    for column, (label, symbol, description) in zip(st.columns(4), indexes):
+    for column, (label, symbol, description) in zip(st.columns(4), WORKBENCH_INDEXES):
         with column:
             snapshot = _market_index_snapshot(symbol)
             if snapshot is None:
-                st.metric(f"{label} ({symbol})", "資料暫缺", help=description)
+                st.metric(label if compact else f"{label} ({symbol})", "資料暫缺", help=description)
                 continue
             snapshots[label] = snapshot
             value, change, percentage, trading_day = snapshot
             delta = f"{change:+.2f} ({percentage:+.2f}%)" if change is not None else None
-            st.metric(f"{label} ({symbol})", f"{value:,.2f}", delta, help=description)
+            st.metric(label if compact else f"{label} ({symbol})", f"{value:,.2f}", delta, help=description)
             st.caption(f"資料日 {trading_day:%Y-%m-%d}" + (" · 缺前期資料" if change is None else ""))
     return snapshots
+
+
+def _submit_workbench_search():
+    ticker = st.session_state.get("workbench_search_input", "").strip().upper()
+    if re.fullmatch(r"\^?[A-Z0-9][A-Z0-9.=^\-]{0,23}", ticker):
+        _jump_to_stock_diagnosis(ticker)
+        st.session_state.pop("workbench_search_error", None)
+    else:
+        st.session_state["workbench_search_error"] = True
+
+
+def _render_workbench_header():
+    with st.container(key="workbench_topbar"):
+        search, quotes = st.columns([1, 3], vertical_alignment="center")
+        with search:
+            with st.form("workbench_search", border=False):
+                field, action = st.columns([2.7, 1.1], gap="small")
+                with field:
+                    st.text_input("搜尋股票代碼", placeholder="股票代碼",
+                                  key="workbench_search_input", label_visibility="collapsed")
+                with action:
+                    st.form_submit_button("搜尋", on_click=_submit_workbench_search, width="stretch")
+            if st.session_state.get("workbench_search_error"):
+                st.warning("請輸入股票代碼，例如 2330.TW 或 NVDA。")
+        with quotes:
+            _render_market_overview(compact=True)
+
+
+def _render_workbench_market_trend():
+    st.subheader("大盤走勢分析")
+    symbols = {name: ticker for name, ticker, _ in WORKBENCH_INDEXES}
+    label = st.radio("選擇市場指數", list(symbols), horizontal=True, key="workbench_index",
+                     label_visibility="collapsed")
+    history = _market_index_history(symbols[label], "1mo")
+    if history is None:
+        st.info("大盤走勢資料暫缺。")
+        return
+    closes = pd.to_numeric(history["Close"], errors="coerce").sort_index()
+    closes = closes[closes.index.notna() & np.isfinite(closes) & (closes > 0)]
+    if closes.empty:
+        st.info("大盤走勢資料暫缺。")
+        return
+
+    ohlc = ("Open", "High", "Low", "Close")
+    volume = pd.to_numeric(history["Volume"], errors="coerce") if "Volume" in history else None
+    if volume is not None:
+        volume = volume[volume.index.notna() & np.isfinite(volume) & (volume >= 0)].sort_index()
+    has_volume = volume is not None and not volume.empty and (volume > 0).any()
+    plot = (make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.04, row_heights=[.78, .22])
+            if has_volume else go.Figure())
+    if set(ohlc).issubset(history.columns):
+        candles = history.loc[:, list(ohlc)].apply(pd.to_numeric, errors="coerce").sort_index()
+        candles = candles[candles.index.notna() & (np.isfinite(candles) & (candles > 0)).all(axis=1)]
+        candles = candles[(candles["High"] >= candles[["Open", "Close", "Low"]].max(axis=1))
+                          & (candles["Low"] <= candles[["Open", "Close"]].min(axis=1))]
+        if not candles.empty:
+            plot.add_trace(go.Candlestick(x=candles.index, open=candles["Open"], high=candles["High"],
+                                          low=candles["Low"], close=candles["Close"], name=label,
+                                          increasing_line_color="#d14a42", decreasing_line_color="#177957"))
+    if not plot.data:
+        plot.add_trace(go.Scatter(x=closes.index, y=closes, name=label, mode="lines+markers",
+                                  line={"color": "#177957", "width": 2}))
+    for period, color in ((5, "#d99431"), (10, "#5879bf")):
+        if len(closes) >= period:
+            plot.add_trace(go.Scatter(x=closes.index, y=closes.rolling(period).mean(), mode="lines",
+                                      name=f"MA{period}", line={"color": color, "width": 1.2}))
+    if has_volume:
+        plot.add_trace(go.Bar(x=volume.index, y=volume, name="成交量", marker_color="#82b8a2",
+                              showlegend=False), row=2, col=1)
+    plot.update_layout(height=300, margin=dict(l=5, r=8, t=10, b=12), template="plotly_white",
+                       showlegend=len(closes) >= 5, legend=dict(orientation="h", y=1.12),
+                       xaxis_rangeslider_visible=False, dragmode=False)
+    st.plotly_chart(plot, theme=None, config={"displayModeBar": False}, width="stretch", key="workbench_trend_chart")
+    st.caption(f"Yahoo Finance 日線 · 最新可用交易日 {closes.index[-1].date():%Y-%m-%d} · 資料可能延遲")
 
 
 def _workbench_position_total(positions):
@@ -6847,13 +6928,18 @@ def _render_workbench_portfolio_summary(account, cloud):
     if not positions:
         st.info("目前尚無持倉。")
         return
-    st.metric("持倉筆數", len(positions))
+    total_card, count_card, stock_card, cash_card = st.columns(4)
+    count_card.metric("持倉筆數", len(positions))
     try:
         total = _workbench_position_total(positions)
     except (KeyError, ValueError, OverflowError):
         st.warning("持倉價格、數量或匯率資料缺失或異常，暫無法估算總市值。")
         return
-    st.metric("組合估算市值（台幣）", f"NT${total:,.0f}")
+    total_card.metric("組合估算市值（台幣）", f"NT${total:,.0f}")
+    if total > 0:
+        for column, kind in ((stock_card, "股票"), (cash_card, "現金")):
+            subtotal = _workbench_position_total(row for row in positions if row.get("asset_type") == kind)
+            column.metric(f"{kind}市值占比", f"{subtotal / total:.1%}")
     st.caption("依帳本保存的持倉數量、價格與匯率估算。")
 
 
@@ -6876,22 +6962,18 @@ def _render_workbench_recent_trades(account):
 
 
 def _render_workbench_shortcuts(cloud):
-    portfolio, radar, research = st.columns(3)
-    with portfolio.container(border=True, height="stretch", key="workbench_card_portfolio"):
-        st.subheader("投資組合")
-        st.button("開啟雲端投資組合" if cloud else "開啟投資組合",
-                  key="workbench_portfolio", on_click=_open_workbench_module,
-                  args=("🧭 投資組合理財", cloud), width="stretch")
-    with radar.container(border=True, height="stretch", key="workbench_card_radar"):
-        st.subheader("智慧選股")
-        st.button("開啟三雷達", key="workbench_radar", on_click=_open_workbench_module,
-                  args=("🚀 華爾街機構級三核心策略雷達",), width="stretch")
-    with research.container(border=True, height="stretch", key="workbench_card_strategies"):
-        st.subheader("策略研究")
-        st.button("開啟策略比較", key="workbench_compare", on_click=_open_workbench_module,
-                  args=("⚖️ 網格／持有／定期定額比較",), width="stretch")
-        st.button("開啟雙策略網格", key="workbench_grid", on_click=_open_workbench_module,
-                  args=("🧠 智慧型雙策略網格系統",), width="stretch")
+    st.subheader("研究與策略")
+    st.button("個股診斷與 AI 報告", key="workbench_ai", on_click=_open_workbench_module,
+              args=("📊 彩色 K 線圖與成交量",), width="stretch")
+    st.button("開啟三雷達", key="workbench_radar", on_click=_open_workbench_module,
+              args=("🚀 華爾街機構級三核心策略雷達",), width="stretch")
+    st.button("開啟策略比較", key="workbench_compare", on_click=_open_workbench_module,
+              args=("⚖️ 網格／持有／定期定額比較",), width="stretch")
+    st.button("開啟雙策略網格", key="workbench_grid", on_click=_open_workbench_module,
+              args=("🧠 智慧型雙策略網格系統",), width="stretch")
+    st.button("開啟雲端投資組合" if cloud else "開啟投資組合",
+              key="workbench_portfolio", on_click=_open_workbench_module,
+              args=("🧭 投資組合理財", cloud), width="stretch")
 
 
 def _render_workbench_research():
@@ -6911,20 +6993,68 @@ def _render_workbench_research():
 
 
 def _render_investment_workbench(account, explanation_style):
+    backdrop = Path(__file__).resolve().parent / "assets" / "workbench-dawn.webp"
+    if backdrop.is_file():
+        hero_image = b64encode(backdrop.read_bytes()).decode("ascii")
+        st.markdown(
+            '<style>.st-key-workbench_hero {'
+            'background-image: linear-gradient(90deg,#0a2d22e8,#0a2d2245),'
+            f'url("data:image/webp;base64,{hero_image}") !important;'
+            '}</style>',
+            unsafe_allow_html=True,
+        )
     st.markdown("""
         <style>
-        .stApp:has(.st-key-zhengxu_workbench) { background: #eff6f1 !important; }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] { background: #eff6f1; }
-        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] :is(button, a) {
-            color: #173b2c !important;
+        .stApp:has(.st-key-zhengxu_workbench) { background: #eff4f1 !important; }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"] {
+            background: transparent !important; border: 0 !important;
+            box-shadow: none !important; pointer-events: none;
+        }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stExpandSidebarButton"] {
+            color: #173b2c !important; pointer-events: auto;
+        }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stHeader"]
+        :is([data-testid="stAppDeployButton"], [data-testid="stMainMenu"]),
+        .st-key-zhengxu_workbench [data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
+            display: none !important;
         }
         .stApp:has(.st-key-zhengxu_workbench) [data-testid="stSidebar"] {
-            background: #153a2c !important;
+            background: linear-gradient(155deg,#172f29,#0f4434) !important;
         }
-        .st-key-zhengxu_workbench { color: #173b2c; }
+        .stApp:has(.st-key-zhengxu_workbench) [data-testid="stMainBlockContainer"]
+        > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:has(style) {
+            display: none;
+        }
+        @media (min-width: 1024px) {
+            .stApp:has(.st-key-zhengxu_workbench) [data-testid="stSidebar"][data-collapsed="false"] {
+                width: 230px !important; min-width: 230px !important; max-width: 230px !important;
+            }
+        }
+        .stApp:has(.st-key-zhengxu_workbench) .st-key-sidebar_strategy_selector { display: none; }
+        .st-key-workbench_navigation [data-testid="stExpander"] {
+            background: rgba(255,255,255,.045) !important; border-color: #3d6657 !important;
+        }
+        .st-key-workbench_navigation [data-testid="stButton"] button {
+            background: #1b4e3d !important; box-shadow: none !important; text-align: left;
+        }
+        .st-key-zhengxu_workbench { color: #173b2c; gap: .7rem !important; }
+        .stApp:has([data-testid="stSidebar"][data-collapsed="true"]) .st-key-zhengxu_workbench {
+            padding-top: 2.1rem;
+        }
         .st-key-zhengxu_workbench :is(h1, h2, h3, h4) { color: #173b2c !important; }
+        .st-key-zhengxu_workbench h3 { font-size: 1.15rem !important; padding: 0 0 .2rem; }
+        .st-key-workbench_hero {
+            min-height: 114px; justify-content: center; border-radius: 13px;
+            background-color: #123e2c; background-size: cover; background-position: center 47%;
+            padding: .65rem 1.6rem; gap: .4rem !important;
+        }
+        .st-key-zhengxu_workbench .st-key-workbench_hero :is(h1, p, span) { color: #fff !important; }
+        .st-key-workbench_hero h1 { font-size: 2rem !important; padding: 0 !important; line-height: 1.15; }
         .st-key-zhengxu_workbench [data-testid="stCaptionContainer"] :is(p, span) {
             color: #486657 !important;
+        }
+        .st-key-zhengxu_workbench .st-key-workbench_hero [data-testid="stCaptionContainer"] :is(p, span) {
+            color: #f3f8ee !important;
         }
         .st-key-zhengxu_workbench [class*="st-key-workbench_card_"],
         .st-key-zhengxu_workbench [data-testid="stMetric"] {
@@ -6941,36 +7071,66 @@ def _render_investment_workbench(account, explanation_style):
         .st-key-zhengxu_workbench [data-testid="stButton"] button:focus-visible {
             outline: 3px solid #3f8c64; outline-offset: 3px;
         }
+        .st-key-workbench_card_assets { padding: .55rem .85rem !important; gap: .3rem !important; }
+        .st-key-workbench_card_assets [data-testid="stMetric"] { padding: .4rem .65rem !important; }
+        .st-key-workbench_card_assets [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+        .st-key-workbench_card_market [data-testid="stRadio"] label p { color: #294837 !important; }
+        .st-key-workbench_topbar [data-testid="stVerticalBlock"] { gap: .25rem !important; }
+        .st-key-workbench_topbar [data-testid="stMetric"] {
+            background: transparent !important; border: 0 !important;
+            padding: 0 .3rem !important; min-width: 0;
+        }
+        .st-key-workbench_topbar [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+        .st-key-workbench_topbar [data-testid="stMetricDelta"] { font-size: .72rem !important; }
+        .st-key-workbench_topbar [data-testid="stCaptionContainer"] p { font-size: .69rem; }
+        .st-key-workbench_topbar [data-testid="stForm"] { padding: 0 !important; }
+        .st-key-workbench_topbar [data-testid="stFormSubmitButton"] button {
+            background: #236647 !important; box-shadow: none !important;
+            padding: .22rem .42rem !important; font-size: .8rem !important;
+        }
+        .st-key-workbench_topbar [data-testid="stTextInput"] input {
+            background: #fff !important; color: #173b2c !important; border-color: #cadcd1 !important;
+        }
+        .st-key-workbench_topbar [data-testid="stTextInput"] input::placeholder { color: #516c60 !important; }
         @media (max-width: 768px) {
-            .st-key-workbench_personal [data-testid="stHorizontalBlock"] >
+            :is(.st-key-workbench_personal,.st-key-workbench_middle) [data-testid="stHorizontalBlock"] >
             :is([data-testid="column"], [data-testid="stColumn"]) {
                 flex-basis: 100% !important; width: 100% !important; min-width: 100% !important;
+            }
+            .st-key-workbench_topbar > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                flex-basis: 100% !important; width: 100% !important;
             }
         }
         </style>
     """, unsafe_allow_html=True)
     cloud = _is_portfolio_pilot(account)
     with st.container(key="zhengxu_workbench"):
-        st.title("投資工作台")
-        _render_workbench_shortcuts(cloud)
-        with st.container(border=True, key="workbench_card_market"):
-            _render_market_overview()
+        _render_workbench_header()
+        with st.container(key="workbench_hero"):
+            st.title("投資工作台")
+            st.caption("正序 · 投資，從理解開始")
+        with st.container(border=True, key="workbench_card_assets"):
+            _render_workbench_portfolio_summary(account, cloud)
+            if explanation_style.startswith("生動童趣"):
+                st.caption("像用帳本上的標價盤點家當。市值會隨價格與匯率變動。")
+        with st.container(key="workbench_middle"):
+            market, research_tools = st.columns([2.15, 1])
+            with market.container(border=True, key="workbench_card_market", height="stretch"):
+                _render_workbench_market_trend()
+            with research_tools.container(border=True, key="workbench_card_tools", height="stretch"):
+                _render_workbench_shortcuts(cloud)
         with st.container(key="workbench_personal"):
-            assets, watchlist = st.columns([1, 1])
-            with assets.container(border=True, key="workbench_card_assets"):
-                _render_workbench_portfolio_summary(account, cloud)
-                if explanation_style.startswith("生動童趣"):
-                    st.caption("像用帳本上的標價盤點家當。市值會隨價格與匯率變動。")
+            watchlist, research = st.columns(2)
             with watchlist.container(border=True, key="workbench_card_watchlist"):
                 _render_workbench_watchlist()
+            with research.container(border=True, key="workbench_card_research"):
+                _render_workbench_research()
         if cloud and os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
             with st.container(border=True, key="workbench_card_trades"):
                 _render_workbench_recent_trades(account)
-        with st.container(border=True, key="workbench_card_research"):
-            _render_workbench_research()
 
 
-st.sidebar.markdown("### 🔒 操盤手帳號")
+st.sidebar.markdown("### 正序")
 auth_user = st.session_state.get("auth_user")
 if auth_user:
     st.sidebar.success(f"已登入：{auth_user['username']}")
@@ -7190,6 +7350,14 @@ if auth_user:
         key="sidebar_strategy_selector",
         on_change=_close_workbench_on_module_change,
     )
+    if workbench_open:
+        with navigation.container(key="workbench_navigation"):
+            for group in dict.fromkeys(MODULE_GROUPS.values()):
+                with st.expander(group):
+                    for index, (module, category) in enumerate(MODULE_GROUPS.items()):
+                        if category == group:
+                            st.button(module, key=f"workbench_menu_{index}", width="stretch",
+                                      on_click=_open_workbench_module, args=(module,))
     navigation.markdown("### 🗣️ 解說風格與版面")
     explanation_style = navigation.radio(
         "選擇顯示方式",
