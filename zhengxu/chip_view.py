@@ -6,6 +6,7 @@ import streamlit as st
 from .dividend import (
     _finite_number,
 )
+from .futures_positions import render_taifex_positions
 from .market_data import (
     TDCC_DISTRIBUTION_URL,
     _normalize_chip_trade_date,
@@ -152,6 +153,8 @@ def render_chip_flow(auth_user, df_chart, selected_stock, selected_tf):
         st.info("資料累積中：成功取得每日官方資料後會依股票與交易日保存，足夠筆數前不顯示 5／20 筆合計。")
     else:
         st.info("法人累積觀察僅適用台股。")
+
+    render_taifex_positions()
 
     st.markdown("#### 👥 集保持股級距變化（週資料）")
     st.caption("以持股級距觀察小額與大額持有比例變化。這是持有分布，不代表買賣方向，也無法直接判定持有人是散戶或主力。")
