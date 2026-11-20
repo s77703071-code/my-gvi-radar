@@ -69,14 +69,16 @@ def _render_radar_risk(findings):
 
 def render_stock_diagnosis(
     api_key_input, auth_user, cfg, explanation_style, market_indexes,
-    openai_api_key_input, openai_model_input, selected_stock, selected_tf, *, show_tactical_panel=True,
+    openai_api_key_input, openai_model_input, selected_stock, selected_tf, *,
+    show_tactical_panel=True, show_official_close=True, show_radar_comparison=True,
 ):
     c_name = change_pct = date_strings = vol_ratio = price_val = is_tw_stock = None
     tabs_created = False
     grid_advice_metrics = None
     df_chart = None
     if selected_stock:
-        render_official_close(selected_stock)
+        if show_official_close:
+            render_official_close(selected_stock)
         try:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
@@ -217,7 +219,8 @@ def render_stock_diagnosis(
                     free_cash_flow=fcf_main, fcf_source=fcf_basis_main, gvi=gvi_val,
                     momentum=momentum_score, fcf_yield=fcf_yield_main, peg=peg_val_main,
                 )
-                _render_radar_risk(risk_findings)
+                if show_radar_comparison:
+                    _render_radar_risk(risk_findings)
 
                 scores = {}
                 reasons = {}
@@ -376,74 +379,75 @@ def render_stock_diagnosis(
                     "</div>"
                 )
 
-                # ======= 視覺化圖表整合 (Radar Chart) =======
-                diag_c1, diag_c2 = st.columns([1.5, 1])
-                with diag_c1:
-                    st.markdown(compact_core_html, unsafe_allow_html=True)
-                    st.caption("研究比對分數不是勝率、報酬預測或買賣建議。")
-                    with st.expander("🖍️ 查看三核心詳細條件與畫線重點", expanded=False):
-                        st.markdown(
-                            f"**目前比對分數最高：** {best_strategy}（{best_score} 分）  \n"
-                            f"**每股淨值與 ROE 資料來源：** {fin_src_display}"
-                        )
-                        if was_missing_in_db:
-                            st.info("財報快取原先沒有可用資料，系統已啟動備援來源補齊。")
-                        st.caption(
-                            "下列條件分數只表示符合目前研究門檻的程度；門檻尚未證明具有穩定的樣本外績效。"
-                        )
-                        for item in factor_details:
-                            strategy_name = item["strategy"]
-                            psych_key = item["psych_key"]
-                            check = three_core_psychology["checks"].get(psych_key)
-                            status_label, status_color = status_style[check]
-                            detail_text = three_core_psychology["notes"].get(psych_key, "資料不足。")
-                            score_value = scores.get(strategy_name)
-                            score_text = f"{score_value} 分" if score_value is not None else "未評分"
-                            highlight_text = html.escape(item["highlight"])
+                if show_radar_comparison:
+                    # ======= 視覺化圖表整合 (Radar Chart) =======
+                    diag_c1, diag_c2 = st.columns([1.5, 1])
+                    with diag_c1:
+                        st.markdown(compact_core_html, unsafe_allow_html=True)
+                        st.caption("研究比對分數不是勝率、報酬預測或買賣建議。")
+                        with st.expander("🖍️ 查看三核心詳細條件與畫線重點", expanded=False):
                             st.markdown(
-                                "<div style=\"margin:9px 0;padding:11px 13px;border:1px solid rgba(148,163,184,.25);"
-                                "border-radius:9px;background:#FFFFFF;\">"
-                                f"<div style=\"font-weight:750;color:#173B2C;\">{html.escape(strategy_name)} "
-                                f"<span style=\"color:{status_color};font-size:.88rem;\">{status_label}｜比對 {score_text}</span></div>"
-                                f"<div style=\"margin:7px 0;color:#173B2C;line-height:1.65;\">"
-                                f"<span style=\"text-decoration:underline;text-decoration-color:#FBBF24;"
-                                f"text-decoration-thickness:3px;text-underline-offset:3px;\">🖍️ 畫線重點：{highlight_text}</span></div>"
-                                f"<div style=\"font-size:.9rem;color:#486657;line-height:1.6;\"><b>門檻：</b>{html.escape(item['threshold'])}<br>"
-                                f"<b>數據比對：</b>{html.escape(reasons[strategy_name])}<br>"
-                                f"<b>市場心理：</b>{html.escape(detail_text)}<br>"
-                                f"<b>資料來源：</b>{html.escape(detail_sources[strategy_name])}</div>"
-                                "</div>",
-                                unsafe_allow_html=True,
+                                f"**目前比對分數最高：** {best_strategy}（{best_score} 分）  \n"
+                                f"**每股淨值與 ROE 資料來源：** {fin_src_display}"
                             )
-                        st.markdown(
-                            "**🧭 三核心合併解讀**：" + compact_overall + "  \n"
-                            "**解讀限制**：可能的市場行為線索，不是投資人心理的直接測量；分數不代表績效優勢或部位建議。"
-                        )
-                with diag_c2:
-                    categories = ['GVI 價值雷達', '動能突破雷達', 'QARP 現金流雷達']
-                    radar_scores = [scores['GVI 價值雷達'], scores['動能突破雷達'], scores['QARP 現金流雷達']]
+                            if was_missing_in_db:
+                                st.info("財報快取原先沒有可用資料，系統已啟動備援來源補齊。")
+                            st.caption(
+                                "下列條件分數只表示符合目前研究門檻的程度；門檻尚未證明具有穩定的樣本外績效。"
+                            )
+                            for item in factor_details:
+                                strategy_name = item["strategy"]
+                                psych_key = item["psych_key"]
+                                check = three_core_psychology["checks"].get(psych_key)
+                                status_label, status_color = status_style[check]
+                                detail_text = three_core_psychology["notes"].get(psych_key, "資料不足。")
+                                score_value = scores.get(strategy_name)
+                                score_text = f"{score_value} 分" if score_value is not None else "未評分"
+                                highlight_text = html.escape(item["highlight"])
+                                st.markdown(
+                                    "<div style=\"margin:9px 0;padding:11px 13px;border:1px solid rgba(148,163,184,.25);"
+                                    "border-radius:9px;background:#FFFFFF;\">"
+                                    f"<div style=\"font-weight:750;color:#173B2C;\">{html.escape(strategy_name)} "
+                                    f"<span style=\"color:{status_color};font-size:.88rem;\">{status_label}｜比對 {score_text}</span></div>"
+                                    f"<div style=\"margin:7px 0;color:#173B2C;line-height:1.65;\">"
+                                    f"<span style=\"text-decoration:underline;text-decoration-color:#FBBF24;"
+                                    f"text-decoration-thickness:3px;text-underline-offset:3px;\">🖍️ 畫線重點：{highlight_text}</span></div>"
+                                    f"<div style=\"font-size:.9rem;color:#486657;line-height:1.6;\"><b>門檻：</b>{html.escape(item['threshold'])}<br>"
+                                    f"<b>數據比對：</b>{html.escape(reasons[strategy_name])}<br>"
+                                    f"<b>市場心理：</b>{html.escape(detail_text)}<br>"
+                                    f"<b>資料來源：</b>{html.escape(detail_sources[strategy_name])}</div>"
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            st.markdown(
+                                "**🧭 三核心合併解讀**：" + compact_overall + "  \n"
+                                "**解讀限制**：可能的市場行為線索，不是投資人心理的直接測量；分數不代表績效優勢或部位建議。"
+                            )
+                    with diag_c2:
+                        categories = ['GVI 價值雷達', '動能突破雷達', 'QARP 現金流雷達']
+                        radar_scores = [scores['GVI 價值雷達'], scores['動能突破雷達'], scores['QARP 現金流雷達']]
 
-                    fig_radar = go.Figure()
-                    fig_radar.add_trace(go.Scatterpolar(
-                        r=radar_scores,
-                        theta=categories,
-                        fill='toself',
-                        name=c_name,
-                        line_color=valuation_color,
-                        fillcolor=valuation_color.replace(')', ', 0.2)').replace('rgb', 'rgba') if 'rgb' in valuation_color else f"{valuation_color}33"
-                    ))
-                    fig_radar.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=True, range=[0, 100], gridcolor="rgba(128,128,128,0.2)"),
-                            angularaxis=dict(gridcolor="rgba(128,128,128,0.2)")
-                        ),
-                        showlegend=False,
-                        margin=dict(l=30, r=30, t=30, b=30),
-                        height=360,
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
-                    )
-                    st.plotly_chart(fig_radar, use_container_width=True, config={"responsive": True})
+                        fig_radar = go.Figure()
+                        fig_radar.add_trace(go.Scatterpolar(
+                            r=radar_scores,
+                            theta=categories,
+                            fill='toself',
+                            name=c_name,
+                            line_color=valuation_color,
+                            fillcolor=valuation_color.replace(')', ', 0.2)').replace('rgb', 'rgba') if 'rgb' in valuation_color else f"{valuation_color}33"
+                        ))
+                        fig_radar.update_layout(
+                            polar=dict(
+                                radialaxis=dict(visible=True, range=[0, 100], gridcolor="rgba(128,128,128,0.2)"),
+                                angularaxis=dict(gridcolor="rgba(128,128,128,0.2)")
+                            ),
+                            showlegend=False,
+                            margin=dict(l=30, r=30, t=30, b=30),
+                            height=360,
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)'
+                        )
+                        st.plotly_chart(fig_radar, use_container_width=True, config={"responsive": True})
 
                 st.info(f"🔮 【{c_name}】{selected_tf} 價量動能估算：{chip_status_text}")
 
@@ -756,10 +760,11 @@ def render_stock_diagnosis(
                 st.markdown("---")
             else:
                 st.warning("Yahoo Finance 行情資料暫缺，這個標的與週期目前沒有可顯示的資料。")
-                _render_radar_risk(evaluate_radar_risk(
-                    pd.DataFrame(), timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,
-                    cache_ttl=CACHE_TTL,
-                ))
+                if show_radar_comparison:
+                    _render_radar_risk(evaluate_radar_risk(
+                        pd.DataFrame(), timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,
+                        cache_ttl=CACHE_TTL,
+                    ))
         except Exception as e:
             st.error(f"數據載入異常：{e}")
     return df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock
