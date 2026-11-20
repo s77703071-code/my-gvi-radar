@@ -106,11 +106,9 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     )
 
     chart_page = selected_module == "📊 彩色 K 線圖與成交量"
-    market_modules = {
-        "📦 籌碼流向參考",
-        "🚀 華爾街機構級三核心策略雷達",
-    }
-    market_indexes = _render_market_overview() if chart_page or selected_module in market_modules else None
+    radar_page = selected_module == "🚀 華爾街機構級三核心策略雷達"
+    show_market_overview = chart_page or radar_page or selected_module == "📦 籌碼流向參考"
+    market_indexes = _render_market_overview() if show_market_overview else None
 
     _render_metric_glossary(st)
 
@@ -195,6 +193,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(
         api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input,
         openai_model_input, selected_stock, selected_tf, show_tactical_panel=chart_page,
+        show_official_close=chart_page, show_radar_comparison=chart_page or radar_page,
     )
 
     try:
