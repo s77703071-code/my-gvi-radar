@@ -1,9 +1,16 @@
 """Interactive price charts, overlays and drawing tools."""
 
 from plotly.subplots import make_subplots
+from plotly.offline import get_plotlyjs
+from functools import lru_cache
+from hashlib import sha256
+from pathlib import Path
 import html
+import json
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from .backtest import (
     compute_kline_indicator_frame,
@@ -19,41 +26,21 @@ from .explanations import (
 )
 
 
-def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio):
-    ma_header_values = []
-    for ma in personal_ma_configs:
-        p, c = ma["period"], ma["color"]
-        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
-        if not ma_series.empty:
-            latest_ma_val = ma_series.to_numpy().flatten()[-1]
-            ma_header_values.append((int(p), str(c), float(latest_ma_val)))
-    chart_top_margin = 72
-    st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量")
-    selected_indicator_text = ", ".join(selected_chart_indicators) if selected_chart_indicators else "未選擇"
-    selected_overlay_text = ", ".join(selected_chart_overlays) if selected_chart_overlays else "未選擇"
-    st.caption(
-        f"目前 K 線時間軸：{selected_tf}；副圖：{selected_indicator_text}；"
-        f"圖上疊加：{selected_overlay_text}。各指標週期依目前 K 線級別計算。"
-    )
-    st.info("🧠 市場行為觀察：" + build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf))
+@lru_cache(maxsize=1)
+def _workspace_template():
+    return Path(__file__).with_name("chart_workspace.html").read_text(encoding="utf-8")
 
-    chart_window_options = {"最近 60 根": 60, "最近 120 根": 120, "最近 240 根": 240, "全部資料": None}
-    chart_window_key = f"chart_window_{auth_user['id']}_{selected_stock}_{selected_tf}"
-    chart_window_label = st.selectbox(
-        "圖表顯示範圍",
-        options=list(chart_window_options),
-        index=1,
-        key=chart_window_key,
-        help="只調整畫面顯示範圍，不會刪除歷史資料、均線計算或標線。",
-    )
-    requested_bars = chart_window_options[chart_window_label]
-    visible_bars = min(len(df_chart), requested_bars) if requested_bars else len(df_chart)
-    chart_x_range = [len(df_chart) - visible_bars - 0.5, len(df_chart) - 0.5]
-    st.caption(
-        f"目前顯示最近 {visible_bars} 根 K 棒；均線仍用完整資料計算。"
-        "縮放／移動用滑鼠或觸控操作；畫線在圖表右上角，刪除請用圖表下方的標線按鈕。"
-    )
 
+def _research_workspace_html(fig, user_id, ticker):
+    scope = sha256(json.dumps([user_id, ticker], default=str).encode()).hexdigest()
+    payload = json.dumps({"figure": json.loads(fig.to_json()),
+                          "storageKey": f"zhengxu-chart-workspace:{scope}"},
+                         ensure_ascii=False).replace("<", "\\u003c")
+    template = _workspace_template().replace("/*CHART_PAYLOAD*/", payload, 1)
+    return template.replace("/*PLOTLY_BUNDLE*/", get_plotlyjs(), 1)
+
+
+def _render_legacy_marking_controls(auth_user, selected_stock, selected_tf):
     with st.expander("🧭 K 線圖快速操作指南", expanded=False):
         st.markdown(
             "- **縮放與移動：**電腦用滑鼠滾輪縮放、按住拖曳平移；手機用雙指縮放、單指拖曳。\n"
@@ -119,6 +106,64 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
         st.session_state[clear_key] = int(st.session_state.get(clear_key, 0)) + 1
         chart_notes.clear()
         st.session_state[user_chart_notes_key] = chart_notes
+    return draw_color, draw_line_width, chart_notes
+
+
+def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio):
+    ma_header_values = []
+    for ma in personal_ma_configs:
+        p, c = ma["period"], ma["color"]
+        ma_series = df_chart['Close'].rolling(window=p).mean().dropna()
+        if not ma_series.empty:
+            latest_ma_val = ma_series.to_numpy().flatten()[-1]
+            ma_header_values.append((int(p), str(c), float(latest_ma_val)))
+    chart_top_margin = 72
+    st.markdown(f"### 📊 【{c_name}】專業 K 線圖與成交量")
+    legacy_chart = st.checkbox("原有圖表與舊標記", key="show_legacy_chart", help="切回原本介面查看先前的畫線與文字標記。")
+    if df_chart.attrs.get("quote_caption"):
+        st.caption(df_chart.attrs["quote_caption"])
+    selected_indicator_text = ", ".join(selected_chart_indicators) if selected_chart_indicators else "未選擇"
+    selected_overlay_text = ", ".join(selected_chart_overlays) if selected_chart_overlays else "未選擇"
+    st.caption(
+        f"目前 K 線時間軸：{selected_tf}；副圖：{selected_indicator_text}；"
+        f"圖上疊加：{selected_overlay_text}。各指標週期依目前 K 線級別計算。"
+    )
+    st.info("🧠 市場行為觀察：" + build_price_volume_market_psychology(change_pct, vol_ratio, selected_tf))
+
+    chart_window_options = {"最近 60 根": 60, "最近 120 根": 120, "最近 240 根": 240, "全部資料": None}
+    chart_window_key = f"chart_window_{auth_user['id']}_{selected_stock}_{selected_tf}"
+    chart_window_label = st.selectbox(
+        "圖表顯示範圍",
+        options=list(chart_window_options),
+        index=1,
+        key=chart_window_key,
+        help="只調整畫面顯示範圍，不會刪除歷史資料、均線計算或標線。",
+    )
+    requested_bars = chart_window_options[chart_window_label]
+    visible_bars = min(len(df_chart), requested_bars) if requested_bars else len(df_chart)
+    if legacy_chart:
+        chart_x_range = [len(df_chart) - visible_bars - 0.5, len(df_chart) - 0.5]
+    else:
+        dates = df_chart.index
+        if dates.tz is not None and "分鐘" in selected_tf:
+            if selected_stock.endswith((".TW", ".TWO")):
+                dates = dates.tz_convert("Asia/Taipei")
+            elif selected_stock.isascii() and selected_stock.isalpha():
+                dates = dates.tz_convert("America/New_York")
+        dates = dates.tz_localize(None)
+        date_strings = dates.strftime("%Y-%m-%d %H:%M:%S").tolist()
+        pad = (dates[-1] - dates[-2]) / 2 if len(dates) > 1 else pd.Timedelta(hours=12)
+        chart_x_range = [(dates[-visible_bars] - pad).isoformat(), (dates[-1] + pad).isoformat()]
+    st.caption(
+        f"目前顯示最近 {visible_bars} 根 K 棒；均線仍用完整資料計算。"
+    )
+
+    if legacy_chart:
+        draw_color, draw_line_width, chart_notes = _render_legacy_marking_controls(
+            auth_user, selected_stock, selected_tf
+        )
+    else:
+        draw_color, draw_line_width, chart_notes = "#d04d38", 2, []
 
     # 主圖、成交量與使用者選擇的技術指標各自使用獨立面板。
     chart_rows = 2 + len(selected_chart_indicators)
@@ -128,10 +173,10 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
             [390 / row_weight_total, 110 / row_weight_total]
             + [145 / row_weight_total] * len(selected_chart_indicators)
         )
-        chart_height = 520 + 145 * len(selected_chart_indicators)
+        chart_height = (520 if legacy_chart else 640) + 145 * len(selected_chart_indicators)
     else:
         chart_row_heights = [0.75, 0.25]
-        chart_height = 520
+        chart_height = (520 if legacy_chart else 640)
 
     fig = make_subplots(
         rows=chart_rows, cols=1,
@@ -343,7 +388,10 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
     for axis_index in range(1, chart_rows + 1):
         axis_name = "xaxis" if axis_index == 1 else f"xaxis{axis_index}"
         chart_x_axes[axis_name] = dict(
-            type='category',
+            type='category' if legacy_chart else 'date',
+            spikemode='across',
+            spikesnap='cursor',
+            hoverformat="%Y-%m-%d %H:%M" if "分鐘" in selected_tf else "%Y-%m-%d",
             range=chart_x_range,
             showgrid=True,
             gridcolor="rgba(128,128,128,0.2)",
@@ -370,7 +418,8 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
             margin=dict(l=12, r=12, t=chart_top_margin, b=54),
         dragmode='pan',
         showlegend=False,
-        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="股價（元）"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="股價",
+                   spikemode="across", spikesnap="cursor"),
         yaxis2=dict(showgrid=True, gridcolor="rgba(128,128,128,0.2)", side="right", title="成交量"),
         newshape=dict(
             line=dict(color=draw_color, width=draw_line_width),
@@ -423,6 +472,10 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
             f"{ma_header_html}</div>",
             unsafe_allow_html=True,
         )
+    if not legacy_chart:
+        components.html(_research_workspace_html(fig, auth_user["id"], selected_stock),
+                        height=chart_height + 165, scrolling=True)
+        return
     st.plotly_chart(
         fig,
         use_container_width=True,
