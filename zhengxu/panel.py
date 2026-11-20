@@ -110,7 +110,11 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     show_market_overview = chart_page or radar_page or selected_module == "📦 籌碼流向參考"
     market_indexes = _render_market_overview() if show_market_overview else None
 
-    _render_metric_glossary(st)
+    if chart_page or radar_page or selected_module in {
+        "🧪 技術指標自訂策略回測",
+        "💸 配息複利策略",
+    }:
+        _render_metric_glossary(st)
 
     st.markdown("---")
 
