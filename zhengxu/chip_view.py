@@ -10,6 +10,7 @@ from .market_data import (
     TDCC_DISTRIBUTION_URL,
     _normalize_chip_trade_date,
     _render_tdcc_concentration,
+    _broker_branch_ai_state_key,
     build_broker_branch_price_breadth_reading,
     build_chip_flow_summary,
     fetch_finmind_broker_branch,
@@ -380,6 +381,11 @@ def render_chip_flow(auth_user, df_chart, selected_stock, selected_tf):
                 source_label = ""
 
             if branch_source == "手動上傳 CSV":
+                st.markdown(
+                    "[證交所上市分點 CSV](https://bsr.twse.com.tw/bshtm/bsWelcome.aspx) · "
+                    "[櫃買中心上櫃分點 CSV](https://www.tpex.org.tw/zh-tw/mainboard/trading/info/brokerBS.html)"
+                )
+                st.caption("請在官方網站完成驗證並下載 CSV，再匯入正序。")
                 st.info(
                     f"目前分析標的是 {stock_code}。分點 CSV 僅用來分析該檔股票；如要分析其他股票，"
                     "請先在左側更換股票代碼，再匯入該股票的 CSV。"
@@ -389,14 +395,32 @@ def render_chip_flow(auth_user, df_chart, selected_stock, selected_tf):
                     type=["csv"],
                     key=f"chip_branch_upload_{account_id}_{selected_stock}",
                 )
+                csv_key = f"chip_branch_csv_last_{account_id}_{stock_code}"
+                last_import = st.session_state.get(csv_key)
+                import_error = None
                 if branch_file is not None:
-                    branch_summary = summarize_broker_branch_csv(branch_file, stock_code)
-                    saved_branch_context = save_broker_branch_ai_summary(
-                        st.session_state, account_id, stock_code, branch_summary, "使用者上傳 CSV"
-                    )
-                    if saved_branch_context:
-                        st.caption("已把這檔股票的分點摘要暫存於目前登入工作階段；啟動 AI 報告時會一併使用摘要，不傳送完整分點明細。")
-                    _render_branch_summary(branch_summary, "依上傳檔案所含資料期間彙總")
+                    file_id = getattr(branch_file, "file_id", None)
+                    if last_import is None or file_id is None or last_import["file_id"] != file_id:
+                        summary = summarize_broker_branch_csv(branch_file, stock_code)
+                        import_error = summary.get("error")
+                        if not import_error:
+                            snapshot = save_broker_branch_ai_summary(
+                                st.session_state, account_id, stock_code, summary, "使用者上傳 CSV"
+                            )
+                            last_import = {"file_id": file_id, "summary": summary, "ai": snapshot}
+                            st.session_state[csv_key] = last_import
+                if import_error:
+                    st.warning(import_error)
+                if last_import is not None:
+                    if import_error or branch_file is None:
+                        st.info("以下顯示這檔股票在本次登入期間最後一次成功匯入的資料。")
+                    summary = last_import["summary"]
+                    period = summary.get("trade_period")
+                    st.session_state[_broker_branch_ai_state_key(account_id, stock_code)] = last_import["ai"]
+                    if not period:
+                        st.warning("CSV 交易日期不明，請勿與特定交易日的股價直接比對。")
+                    st.caption("AI 報告會使用本次登入所保留的分點摘要。")
+                    _render_branch_summary(summary, f"CSV 交易日期 {period or '不明'}")
             elif active_finmind_token and active_finmind_ack:
                 from datetime import datetime as _datetime
                 from zoneinfo import ZoneInfo as _ZoneInfo
