@@ -273,8 +273,15 @@ def calculate_money_weighted_return(cash_flows):
     return float((low + high) / 2.0)
 
 
-def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0, exit_cost_rate=0.0):
-    """Buy at the first available price each month and report cash-flow-aware returns."""
+def simulate_monthly_dca(
+    price_series, monthly_contribution, commission_rate=0.0, exit_cost_rate=0.0,
+    *, deduct_cost_from_contribution=False,
+):
+    """Buy monthly and report cash-flow-aware returns.
+
+    Comparison pages deduct an estimated buy cost from the allocated cash,
+    matching the buy-and-hold and grid cash-budget convention.
+    """
     if isinstance(price_series, pd.DataFrame):
         if "Close" not in price_series.columns:
             raise ValueError("定期定額需要收盤價資料。")
@@ -291,6 +298,10 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
     if prices.empty or monthly_contribution <= 0:
         raise ValueError("請提供有效股價與大於零的每月投入金額。")
 
+    allocation_factor = (
+        max(0.0, 1.0 - commission_rate)
+        if deduct_cost_from_contribution else 1.0 / (1.0 + commission_rate)
+    )
     first_sessions = set(prices.groupby(prices.index.to_period("M"), sort=True).head(1).index)
     shares = 0.0
     total_contributed = 0.0
@@ -302,7 +313,7 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
     for day, price in prices.items():
         contribution = monthly_contribution if day in first_sessions else 0.0
         if contribution > 0:
-            added_shares = contribution / (float(price) * (1.0 + commission_rate))
+            added_shares = contribution * allocation_factor / float(price)
             shares += added_shares
             total_contributed += contribution
             total_fees += contribution - added_shares * float(price)
@@ -328,7 +339,8 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
     ending_value = float(history["portfolio_value"].iloc[-1])
     cash_flows.append((history.index[-1], ending_value))
     money_weighted_return = calculate_money_weighted_return(cash_flows)
-    twr_curve = history["time_weighted_growth"]
+    twr_curve = history["time_weighted_growth"].copy()
+    twr_curve.iloc[-1] *= 1.0 - exit_cost_rate
     drawdown = twr_curve / twr_curve.cummax() - 1.0
     return {
         "history": history,
@@ -336,6 +348,7 @@ def simulate_monthly_dca(price_series, monthly_contribution, commission_rate=0.0
             "contribution_count": len(first_sessions),
             "total_contributed": total_contributed,
             "ending_value": ending_value,
+            "ending_value_before_exit_cost": ending_value_before_exit_cost,
             "profit_loss": ending_value - total_contributed,
             "money_weighted_return": money_weighted_return,
             "mdd": float(drawdown.min()),
