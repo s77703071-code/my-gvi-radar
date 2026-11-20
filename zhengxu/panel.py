@@ -194,6 +194,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input,
         openai_model_input, selected_stock, selected_tf, show_tactical_panel=chart_page,
         show_official_close=chart_page, show_radar_comparison=chart_page or radar_page,
+        show_stock_research=chart_page,
     )
 
     try:
