@@ -646,8 +646,13 @@ def compute_kline_indicator_frame(df, **indicator_kwargs):
     return frame
 
 def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
-                         risk_reward_ratio=None):
+                         risk_reward_ratio=None, *, next_open=False):
+    if next_open and any(exit_conds.get(key, 0) for key in (
+        "stop_loss_pct", "trailing_stop_pct", "atr_stop_multiple",
+    )):
+        raise ValueError("次日開盤比較僅適用收盤確認的指標訊號。")
     trades = []
+    unfilled_signal = None
     position = False
     entry_price = 0.0
     entry_date = ""
@@ -724,7 +729,16 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                 return False
         return True
 
+    def execution_price(index):
+        if not next_open:
+            return float(closes[index])
+        opening = _finite_number(opens[index]) if "Open" in df_calc.columns else None
+        if opening is None or opening <= 0:
+            raise ValueError(f"{date_chinese_list[index]} 缺少有效開盤價，無法完成次日開盤比較。")
+        return opening
+
     for i in range(1, len(df_calc)):
+        fill_index = i + int(next_open)
         if not position:
             buy_checks = []
 
@@ -800,10 +814,13 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                 )
 
             if buy_checks and (all(buy_checks) if entry_conds['match_mode'] == 'ALL' else any(buy_checks)):
+                if fill_index >= len(df_calc):
+                    unfilled_signal = "買進"
+                    break
                 position = True
-                entry_price = float(closes[i])
-                entry_date = date_chinese_list[i]
-                entry_index = i
+                entry_price = execution_price(fill_index)
+                entry_date = date_chinese_list[fill_index]
+                entry_index = fill_index
                 # The entry is modeled at the close, so earlier highs from
                 # that same candle are not part of the position's trailing peak.
                 highest_price = entry_price
@@ -954,8 +971,10 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                     f"達成風險報酬停利目標（1:{risk_ratio:g}）"
                 ]
             elif exit_reasons:
-                # Indicator exits retain the existing close-based execution.
-                exit_price = float(closes[i])
+                if fill_index >= len(df_calc):
+                    unfilled_signal = "賣出"
+                    break
+                exit_price = execution_price(fill_index)
             else:
                 # Update the trailing peak only after this bar's exit checks;
                 # daily OHLC data does not reveal whether its high came first.
@@ -965,7 +984,7 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             if stop_hits and target_hit:
                 exit_reasons.append("同根資料也觸及停利目標，依保守方式先計停損")
             if stop_hits or target_hit or exit_reasons:
-                exit_date = date_chinese_list[i]
+                exit_date = date_chinese_list[fill_index]
                 pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
                 trades.append({
                     '買進日期': entry_date,
@@ -977,9 +996,9 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
                     '賣出價格 (元)': round(exit_price, 2),
                     '平倉報酬率 (%)': round(pnl_pct, 2),
                     '離場觸發原因': " | ".join(exit_reasons),
-                    '持有K棒數': max(0, i - entry_index),
+                    '持有K棒數': max(0, fill_index - entry_index),
                     '_entry_index': entry_index,
-                    '_exit_index': i,
+                    '_exit_index': fill_index,
                     '_entry_fill_price': entry_price,
                     '_exit_fill_price': exit_price,
                 })
@@ -1008,7 +1027,32 @@ def run_strategy_backtest(df_calc, entry_conds, exit_conds, date_chinese_list,
             '_exit_fill_price': exit_price,
         })
 
-    return pd.DataFrame(trades)
+    ledger = pd.DataFrame(trades)
+    if next_open:
+        ledger.attrs["unfilled_signal"] = unfilled_signal
+    return ledger
+
+
+def compare_ma_execution_timing(history, cost_settings, is_taiwan_stock):
+    """Compare the same close-confirmed MA5/20 signals under two execution rules."""
+    if len(history) < 21:
+        raise ValueError("比較需要至少 21 筆日線。")
+    pair = [(5, 20)]
+    disabled = {key: "停用" for key in ("ma_mode", "kd_mode", "macd_mode", "vol_mode", "rsi_mode", "bb_mode")}
+    entry = dict(disabled, ma_cross_pairs=pair, match_mode="ALL")
+    exit_rules = dict(disabled, ma_cross_pairs=pair, stop_loss_pct=0, trailing_stop_pct=0)
+    indicators = compute_kline_indicator_frame(
+        history, entry_ma_cross_pairs=pair, exit_ma_cross_pairs=pair,
+    )
+    dates = indicators.index.strftime("%Y-%m-%d").tolist()
+    results = []
+    for label, next_open in (("同日收盤", False), ("次日開盤", True)):
+        trades = run_strategy_backtest(indicators, entry, exit_rules, dates, next_open=next_open)
+        outcome = analyze_indicator_backtest(indicators, trades, *cost_settings, "1日", is_taiwan_stock)
+        if outcome is None:
+            raise ValueError("收盤價有缺漏，無法完成兩種成交方式的比較。")
+        results.append((label, trades, outcome["strategy_metrics"]))
+    return results
 
 
 def _annualization_bars(timeframe_name, is_taiwan_stock):
@@ -1063,7 +1107,10 @@ def analyze_indicator_backtest(df_calc, trades, initial_capital, commission_pct,
             for i in range(entry_i + 1, exit_i):
                 strategy_factors[i] *= price[i] / price[i - 1]
             if exit_i > entry_i:
+                strategy_factors[entry_i] *= price[entry_i] / entry_fill
                 strategy_factors[exit_i] *= exit_fill / price[exit_i - 1]
+            else:
+                strategy_factors[exit_i] *= exit_fill / entry_fill
             strategy_factors[exit_i] *= exit_fee_factor
             in_market[entry_i:exit_i + 1] = True
             gross_ratio = exit_fill / entry_fill
