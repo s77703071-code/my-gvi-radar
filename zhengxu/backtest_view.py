@@ -13,6 +13,7 @@ from .backtest import (
     _slice_history_for_date_range,
     analyze_indicator_backtest,
     build_backtest_coach_advice,
+    compare_ma_execution_timing,
     compute_kline_indicator_frame,
     describe_backtest_conditions,
     run_strategy_backtest,
@@ -327,6 +328,12 @@ def render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metric
                                               key="bt_slippage_pct")
         st.caption("成本按每次買進／賣出分別估算；台股預設值可依券商折扣、標的與交易方式調整。")
 
+    compare_execution = False
+    if selected_tf == "1日":
+        compare_execution = st.checkbox("附加比較 MA5／MA20 的同日收盤與次日開盤成交", value=False)
+        if compare_execution:
+            st.caption("使用相同日線、本金及費用。固定以 MA5／MA20 交叉進出，不套用自訂停損或停利。")
+
     if st.button(f"🚀 開始執行【{c_name}】全指標量化回測", type="primary", use_container_width=True, key="run_bt_btn"):
         chart_start = pd.Timestamp(df_chart.index[0]).date()
         chart_end = pd.Timestamp(df_chart.index[-1]).date()
@@ -428,6 +435,31 @@ def render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metric
         analysis = analyze_indicator_backtest(
             df_calc, df_trades, float(bt_initial_capital), float(bt_commission_pct),
             float(bt_sell_tax_pct), float(bt_slippage_pct), selected_tf, is_tw_stock)
+
+        if compare_execution:
+            st.markdown("#### MA5／MA20 成交時點比較")
+            try:
+                comparison = compare_ma_execution_timing(
+                    df_backtest, (bt_initial_capital, bt_commission_pct, bt_sell_tax_pct, bt_slippage_pct), is_tw_stock,
+                )
+            except ValueError as error:
+                st.info(str(error))
+            else:
+                rows = []
+                for label, trades, metrics in comparison:
+                    open_position = (
+                        not trades.empty and str(trades["離場觸發原因"].iloc[-1]).startswith("期末未平倉")
+                    )
+                    rows.append({
+                        "成交時點": label,
+                        "已平倉筆數": len(trades) - int(open_position),
+                        "成本後累積報酬": f"{metrics['cumulative_return']:+.2%}",
+                        "最大回撤": f"{metrics['mdd']:.2%}",
+                        "期末資產": f"{metrics['ending_value']:,.2f}",
+                        "最後一日待成交": trades.attrs.get("unfilled_signal") or "—",
+                    })
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                st.caption("期末仍持有的部位按末日收盤估值，並估算賣出成本。末日訊號缺少下一根開盤時不成交。")
 
         if df_trades.empty:
             st.info("這段期間沒有買賣訊號；下方仍會顯示策略資金變化，以及直接買進後持有的參考結果。")
