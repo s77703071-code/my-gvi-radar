@@ -71,6 +71,7 @@ def render_stock_diagnosis(
     api_key_input, auth_user, cfg, explanation_style, market_indexes,
     openai_api_key_input, openai_model_input, selected_stock, selected_tf, *,
     show_tactical_panel=True, show_official_close=True, show_radar_comparison=True,
+    show_stock_research=True,
 ):
     c_name = change_pct = date_strings = vol_ratio = price_val = is_tw_stock = None
     tabs_created = False
@@ -448,6 +449,12 @@ def render_stock_diagnosis(
                             plot_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_radar, use_container_width=True, config={"responsive": True})
+
+                if not show_stock_research:
+                    return (
+                        df_chart, c_name, change_pct, date_strings, vol_ratio, price_val,
+                        grid_advice_metrics, is_tw_stock,
+                    )
 
                 st.info(f"🔮 【{c_name}】{selected_tf} 價量動能估算：{chip_status_text}")
 
