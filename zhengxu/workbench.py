@@ -15,6 +15,7 @@ import requests
 import sqlite3
 import streamlit as st
 
+from .chart_view import render_chart_workspace
 from .market_data import (
     WORKBENCH_INDEXES,
     _market_index_history,
@@ -141,12 +142,13 @@ def _render_workbench_header():
             _render_market_overview(compact=True)
 
 
-def _render_workbench_market_trend():
+def _render_workbench_market_trend(account):
     st.subheader("大盤走勢分析")
     symbols = {name: ticker for name, ticker, _ in WORKBENCH_INDEXES}
     label = st.radio("選擇市場指數", list(symbols), horizontal=True, key="workbench_index",
                      label_visibility="collapsed")
-    history = _market_index_history(symbols[label], "1mo")
+    symbol = symbols[label]
+    history = _market_index_history(symbol, "1mo")
     if history is None:
         st.info("大盤走勢資料暫缺。")
         return
@@ -182,12 +184,17 @@ def _render_workbench_market_trend():
     if has_volume:
         plot.add_trace(go.Bar(x=volume.index, y=volume, name="成交量", marker_color="#82b8a2",
                               showlegend=False), row=2, col=1)
-    plot.update_layout(height=300, margin=dict(l=5, r=8, t=10, b=12), template="plotly_white",
-                       showlegend=len(closes) >= 5, legend=dict(orientation="h", y=1.12),
-                       xaxis_rangeslider_visible=False, dragmode=False)
-    st.plotly_chart(plot, theme=None, config={"displayModeBar": False}, width="stretch", key="workbench_trend_chart")
+    span = [(closes.index[0].date() - pd.Timedelta(days=1)).isoformat(),
+            (closes.index[-1].date() + pd.Timedelta(days=1)).isoformat()]
+    plot.update_xaxes(type="date", range=span, rangeslider_visible=False,
+                      hoverformat="%Y-%m-%d", spikemode="across", spikesnap="cursor")
+    plot.update_yaxes(side="right", spikemode="across", spikesnap="cursor")
+    plot.update_layout(height=465, margin=dict(l=8, r=12, t=35, b=36), template="plotly_white",
+                       showlegend=len(closes) >= 5, legend=dict(orientation="h", y=1.13),
+                       dragmode="pan", newshape=dict(line=dict(color="#d04d38", width=2)))
     freshness = "未更新，沿用最後有效資料" if history.attrs.get("quote_stale") else "資料可能延遲"
     st.caption(f"Yahoo Finance 日線 · 最新可用交易日 {closes.index[-1].date():%Y-%m-%d} · {freshness}")
+    render_chart_workspace(plot, account["id"], f"index:{symbol}", f"{label} K 線與技術指標")
 
 
 def _workbench_position_total(positions):
@@ -382,7 +389,7 @@ def _render_investment_workbench(account, explanation_style):
         with st.container(key="workbench_middle"):
             market, research_tools = st.columns([2.15, 1])
             with market.container(border=True, key="workbench_card_market", height="stretch"):
-                _render_workbench_market_trend()
+                _render_workbench_market_trend(account)
             with research_tools.container(border=True, key="workbench_card_tools", height="stretch"):
                 _render_workbench_shortcuts(cloud)
         with st.container(key="workbench_personal"):
