@@ -208,7 +208,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             if selected_module == '🤖 網格自動生成器':
                 render_grid(price_val, selected_stock)
             if selected_module == '⚖️ 網格／持有／定期定額比較':
-                render_comparison(c_name, date_strings, df_chart, selected_tf)
+                render_comparison(c_name, date_strings, df_chart, selected_tf, is_tw_stock=is_tw_stock)
             if selected_module == '🧪 技術指標自訂策略回測':
                 render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metrics, is_tw_stock, selected_stock, selected_tf)
     except Exception as ex_tab:
