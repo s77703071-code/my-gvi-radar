@@ -1582,14 +1582,24 @@ WORKBENCH_INDEXES = (
 )
 
 
+def _market_overview_snapshots(*, include_status=False):
+    snapshots = {}
+    for label, symbol, _ in WORKBENCH_INDEXES:
+        snapshot = _market_index_snapshot(symbol, include_status=include_status)
+        if snapshot is not None:
+            snapshots[label] = snapshot
+    return snapshots
+
+
 def _render_market_overview(compact=False):
     if not compact:
         st.subheader("台美市場概況")
         st.caption("來源 Yahoo Finance 日線。依各市場交易日顯示，可能延遲；變動相較前一筆可用資料。")
+    index_data = _market_overview_snapshots(include_status=True)
     snapshots = {}
     for column, (label, symbol, description) in zip(st.columns(4), WORKBENCH_INDEXES):
         with column:
-            snapshot = _market_index_snapshot(symbol, include_status=True)
+            snapshot = index_data.get(label)
             if snapshot is None:
                 st.metric(label if compact else f"{label} ({symbol})", "資料暫缺", help=description)
                 continue

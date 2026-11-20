@@ -105,7 +105,12 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         unsafe_allow_html=True,
     )
 
-    market_indexes = _render_market_overview()
+    chart_page = selected_module == "📊 彩色 K 線圖與成交量"
+    market_modules = {
+        "📦 籌碼流向參考",
+        "🚀 華爾街機構級三核心策略雷達",
+    }
+    market_indexes = _render_market_overview() if chart_page or selected_module in market_modules else None
 
     _render_metric_glossary(st)
 
@@ -138,7 +143,6 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     ).strip() or "gpt-5.5"
     st.sidebar.caption("ChatGPT API 使用量依 OpenAI API 帳戶計費；ChatGPT 訂閱不包含 API 額度。")
 
-    chart_page = selected_module == "📊 彩色 K 線圖與成交量"
     chart_controls = st.container() if chart_page else st.sidebar
     chart_controls.markdown("### 🎛️ 看盤資料設定")
     selected_tf = chart_controls.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4, key="research_chart_timeframe")
@@ -188,7 +192,10 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
     chart_area = st.container() if chart_page else None
-    df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input, openai_model_input, selected_stock, selected_tf)
+    df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(
+        api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input,
+        openai_model_input, selected_stock, selected_tf, show_tactical_panel=chart_page,
+    )
 
     try:
         _render_market_psychology_guide(st, selected_module, explanation_style)

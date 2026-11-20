@@ -32,6 +32,7 @@ from .explanations import (
     build_three_core_market_psychology_notes,
 )
 from .market_data import (
+    _market_overview_snapshots,
     STOCK_NAME_MAP,
     _broker_branch_ai_state_key,
     build_broker_branch_ai_interpretation,
@@ -66,7 +67,10 @@ def _render_radar_risk(findings):
         st.caption("這些提示與雷達分數分開。快取更新時間用於檢查快取，財報公告日需另外查核。")
 
 
-def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input, openai_model_input, selected_stock, selected_tf):
+def render_stock_diagnosis(
+    api_key_input, auth_user, cfg, explanation_style, market_indexes,
+    openai_api_key_input, openai_model_input, selected_stock, selected_tf, *, show_tactical_panel=True,
+):
     c_name = change_pct = date_strings = vol_ratio = price_val = is_tw_stock = None
     tabs_created = False
     grid_advice_metrics = None
@@ -136,9 +140,6 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                 roe_src = db_row[5] if (db_row and db_row[5]) else "無數據"
                 cache_time_str = time.strftime('%Y-%m-%d %H:%M', time.localtime(db_row[6])) if (db_row and db_row[6]) else "未設定"
 
-                st.markdown("### 🎛️ 戰術面板模式切換")
-                panel_mode = st.radio("選擇看盤模式：", ["📈 操盤/動能模式 (專注量價與短線動能)", "🏦 存股/價值模式 (專注基本面與估值)"], horizontal=True, label_visibility="collapsed")
-
                 # 計算動能指標 (安全防呆)
                 prev_close = float(df_chart['Close'].iloc[-2]) if len(df_chart) > 1 else price_val
                 change = price_val - prev_close
@@ -170,26 +171,30 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                     bv_str = "資料不足"
                     pb_str = "資料不足"
 
-                if "價值" in panel_mode:
-                    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1:
-                        st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="以所選週期最後一根可用 K 棒為準，盤中數值可能變動。")
-                        st.caption(f"基本面快取更新 {cache_time_str}")
+                if show_tactical_panel:
+                    st.markdown("### 🎛️ 戰術面板模式切換")
+                    panel_mode = st.radio("選擇看盤模式：", ["📈 操盤/動能模式 (專注量價與短線動能)", "🏦 存股/價值模式 (專注基本面與估值)"], horizontal=True, label_visibility="collapsed")
 
-                    if bv_val is not None:
-                        with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；公式假設目前 ROE 未來五年維持不變，這不是預測，且尚未證明能穩定改善績效。"); st.caption("📢 最新重算")
-                        with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str, help="公司以股東權益創造盈餘的比率；需搭配產業特性及財報期間判讀。"); st.caption(f"📢 {roe_src}")
-                        with gc4: st.metric(label="📖 每股淨值", value=bv_str, help="公司帳面資產扣除負債後，平均分配到每一股的金額；不等於股票的市場價格。"); st.caption(f"📢 {bv_src}")
-                        with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="顯示目前股價相對每股帳面價值的倍數；產業間差異大，跨產業比較要小心。"); st.caption("📢 溢價程度")
+                    if "價值" in panel_mode:
+                        gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                        with gc1:
+                            st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="以所選週期最後一根可用 K 棒為準，盤中數值可能變動。")
+                            st.caption(f"基本面快取更新 {cache_time_str}")
+
+                        if bv_val is not None:
+                            with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；公式假設目前 ROE 未來五年維持不變，這不是預測，且尚未證明能穩定改善績效。"); st.caption("📢 最新重算")
+                            with gc3: st.metric(label="📊 ROE 股東權益報酬率", value=roe_str, help="公司以股東權益創造盈餘的比率；需搭配產業特性及財報期間判讀。"); st.caption(f"📢 {roe_src}")
+                            with gc4: st.metric(label="📖 每股淨值", value=bv_str, help="公司帳面資產扣除負債後，平均分配到每一股的金額；不等於股票的市場價格。"); st.caption(f"📢 {bv_src}")
+                            with gc5: st.metric(label="⚖️ 股價淨值比 (PB)", value=pb_str, help="顯示目前股價相對每股帳面價值的倍數；產業間差異大，跨產業比較要小心。"); st.caption("📢 溢價程度")
+                        else:
+                            with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
                     else:
-                        with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
-                else:
-                    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)" if len(df_chart) > 1 else None, help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
-                    with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比將最近一根 K 棒的成交量和近 5 根平均量比較；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
-                    with gc3: st.metric(label="🎯 5根均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off", help="最新收盤價相對近 5 根收盤均價的百分比差距；用來觀察短期偏離，不是反轉訊號。")
-                    with gc4: st.metric(label="🔺 最近一根 K 棒最高價", value=f"{high_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最高價。")
-                    with gc5: st.metric(label="🔻 最近一根 K 棒最低價", value=f"{low_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最低價。")
+                        gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                        with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)" if len(df_chart) > 1 else None, help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
+                        with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比將最近一根 K 棒的成交量和近 5 根平均量比較；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
+                        with gc3: st.metric(label="🎯 5根均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off", help="最新收盤價相對近 5 根收盤均價的百分比差距；用來觀察短期偏離，不是反轉訊號。")
+                        with gc4: st.metric(label="🔺 最近一根 K 棒最高價", value=f"{high_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最高價。")
+                        with gc5: st.metric(label="🔻 最近一根 K 棒最低價", value=f"{low_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最低價。")
 
                 # ======= 升級：計算三大策略所需數值與交叉分析 =======
                 L = len(df_chart)
@@ -487,7 +492,10 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                     )
                                     ai_backtest = run_ai_candidate_backtests(daily_history, is_tw_stock)
                                     market_snapshot = []
-                                    for label, (value, _, index_change_pct, trading_day) in market_indexes.items():
+                                    index_data = market_indexes
+                                    if index_data is None:
+                                        index_data = _market_overview_snapshots()
+                                    for label, (value, _, index_change_pct, trading_day) in index_data.items():
                                         detail = f"{label} {value:,.2f}，日線資料日 {trading_day:%Y-%m-%d}"
                                         if index_change_pct is not None:
                                             detail += f"，較前一筆可用資料 {index_change_pct:+.2f}%"
