@@ -532,7 +532,7 @@ def render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metric
                 dca_exit_cost = (float(bt_commission_pct) + float(bt_sell_tax_pct) + float(bt_slippage_pct)) / 100.0
                 backtest_dca_result = simulate_monthly_dca(
                     dca_prices, dca_monthly_amount, commission_rate=dca_buy_cost,
-                    exit_cost_rate=dca_exit_cost,
+                    exit_cost_rate=dca_exit_cost, deduct_cost_from_contribution=True,
                 )
             except Exception as dca_compare_error:
                 st.caption(f"定期定額參考結果暫時無法計算：{dca_compare_error}")
@@ -608,7 +608,7 @@ def render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metric
             }
             st.dataframe(comparison.style.format(comparison_formatters, na_rep="—"),
                          use_container_width=True, hide_index=True)
-            st.caption("表中年化波動率是報酬起伏幅度，夏普比率是每單位起伏對應的年化報酬參考，CAGR 是整段複利換算成年報酬。策略與買進持有使用相同本金、期間和回測成本。定期定額把相同總預算分次投入，並將期末賣出成本計入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。網格報酬與最大跌幅沿用網格比較頁設定，期末資產按回測本金等比例換算；請確認期間與成本相同再比較。股息未計入。")
+            st.caption("表中年化波動率是報酬起伏幅度，夏普比率是每單位起伏對應的年化報酬參考，CAGR 是整段複利換算成年報酬。策略與買進持有使用相同本金、期間和回測成本。表中結束時資產已計入期末估算賣出成本。定期定額把相同總預算分次投入；其年化報酬按實際投入日期計算，最大跌幅扣除新增投入影響。「網格／持有／定期定額比較」頁另列扣費前市值。跨頁核對時，使用相同標的、資料期間、總預算與費用。股息未計入。")
             if selected_tf in ("1分鐘", "5分鐘", "30分鐘", "60分鐘"):
                 st.info("目前資料是短線週期，涵蓋時間不足以代表長期月扣款；定期定額只在資料涵蓋月份的第一筆價格投入。")
             elif selected_tf in ("1季", "半年", "1年"):
