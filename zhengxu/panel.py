@@ -138,9 +138,11 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     ).strip() or "gpt-5.5"
     st.sidebar.caption("ChatGPT API 使用量依 OpenAI API 帳戶計費；ChatGPT 訂閱不包含 API 額度。")
 
-    st.sidebar.markdown("### 🎛️ 看盤資料設定")
-    selected_tf = st.sidebar.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4)
-    st.sidebar.caption(f"目前圖表週期：{selected_tf}")
+    chart_page = selected_module == "📊 彩色 K 線圖與成交量"
+    chart_controls = st.container() if chart_page else st.sidebar
+    chart_controls.markdown("### 🎛️ 看盤資料設定")
+    selected_tf = chart_controls.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4, key="research_chart_timeframe")
+    chart_controls.caption(f"目前圖表週期：{selected_tf}")
     tf_mapping = {
         "1分鐘": {"p": "7d", "i": "1m"}, "5分鐘": {"p": "7d", "i": "5m"}, "30分鐘": {"p": "30d", "i": "30m"}, "60分鐘": {"p": "60d", "i": "60m"},
         "1日": {"p": "2y", "i": "1d"}, "1週": {"p": "5y", "i": "1wk"}, "1個月": {"p": "max", "i": "1mo"},
@@ -148,7 +150,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     }
     cfg = tf_mapping[selected_tf]
 
-    with st.sidebar.expander("📈 K 線常用技術指標", expanded=False):
+    with chart_controls.expander("📈 K 線常用技術指標", expanded=False):
         selected_chart_indicators = st.multiselect(
             "顯示在 K 線圖下方",
             options=[
@@ -171,7 +173,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             "ATR 看波動大小；OBV 看量價累積；ADX 看趨勢強弱。週期依目前 K 線級別計算，指標不是單獨買賣訊號。"
         )
 
-    with st.sidebar.expander("🛠️ 均線指標快速視窗設定", expanded=False):
+    with chart_controls.expander("🛠️ 均線指標快速視窗設定", expanded=False):
         preset_ma = st.selectbox("📊 選擇均線快捷套組", options=["標準視窗 (5日 / 10日 / 20日)", "極短線 (3日 / 5日 / 10日)", "波段趨勢 (20日 / 60日 / 120日)", "自訂均線配置"], index=0)
         default_days = [5, 10, 20, 60, 240] if preset_ma == "標準視窗 (5日 / 10日 / 20日)" else ([3, 5, 10, 20, 60] if preset_ma == "極短線 (3日 / 5日 / 10日)" else [20, 60, 120, 240, 500])
         default_actives = [True, True, True, False, False]
@@ -185,6 +187,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             with col_c: ma_c = str(st.color_picker(f"C{i}", value=default_colors[i-1], label_visibility="collapsed", key=f"personal_ma_c_{i}"))
             if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
+    chart_area = st.container() if chart_page else None
     df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input, openai_model_input, selected_stock, selected_tf)
 
     try:
@@ -193,8 +196,9 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
                 st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
         else:
-            if selected_module == '📊 彩色 K 線圖與成交量':
-                render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
+            if chart_area is not None:
+                with chart_area:
+                    render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
             if selected_module == '💸 配息複利策略':
                 render_dividend_tab(st, default_ticker=selected_stock)
             if selected_module == '📦 籌碼流向參考':

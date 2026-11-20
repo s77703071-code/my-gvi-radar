@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8">
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #f2f7f3; color: #173b2c; }
+  #workspace { display: grid; grid-template-columns: max-content minmax(0, 1fr); border: 1px solid #c5dbcd; border-radius: 12px; overflow: hidden; }
+  #tools { display: grid; align-content: start; gap: 5px; padding: 8px; background: #e1efe6; }
+  #chart { width: 100%; min-width: 0; background: white; }
+  #settings { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; }
+  button, select, input { min-height: 34px; border: 1px solid #aac6b5; background: white; color: #173b2c; border-radius: 6px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button[aria-pressed="true"] { background: #165537; color: white; border-color: #165537; }
+  button:disabled { opacity: .55; cursor: default; }
+  input[type=color] { width: 42px; }
+  input[type=number] { width: 52px; }
+  #status { flex-basis: 100%; color: #315342; }
+  @media (max-width: 590px) {
+    #workspace { grid-template-columns: minmax(0, 1fr); }
+    #tools { display: flex; overflow-x: auto; }
+    #tools button { white-space: nowrap; min-height: 40px; }
+  }
+</style></head>
+<body>
+<div id="workspace">
+  <div id="tools" role="group" aria-label="畫線工具">
+    <button type="button" data-tool="pan" aria-pressed="true">平移</button>
+    <button type="button" data-tool="crosshair" aria-pressed="false">十字游標</button>
+    <button type="button" data-tool="zoom" aria-pressed="false">框選縮放</button>
+    <button type="button" data-tool="drawline" aria-pressed="false">趨勢線</button>
+    <button type="button" data-tool="horizontal" aria-pressed="false">水平線</button>
+    <button type="button" data-tool="drawrect" aria-pressed="false">矩形</button>
+    <button type="button" data-tool="drawcircle" aria-pressed="false">橢圓</button>
+    <button type="button" data-tool="drawopenpath" aria-pressed="false">畫筆</button>
+    <button type="button" data-tool="note" aria-pressed="false">文字</button>
+  </div>
+  <div id="chart" role="region" aria-label="個股 K 線與技術指標"></div>
+  <div id="settings">
+    <label>標記 <select id="selection"><option value="">選擇標記</option></select></label>
+    <label>顏色 <input id="color" type="color" value="#d04d38"></label>
+    <label>粗細 <input id="width" type="number" min="1" max="8" step="1" value="2"></label>
+    <label>文字 <input id="note" type="text" maxlength="80" placeholder="輸入文字後點圖"></label>
+    <button id="apply" type="button" disabled>套用樣式</button>
+    <button id="remove" type="button" disabled>刪除標記</button>
+    <button id="reset" type="button">還原圖表視野</button>
+    <div id="status" role="status">正在載入圖表</div>
+  </div>
+</div>
+<script>/*PLOTLY_BUNDLE*/</script>
+<script>
+(async () => {
+  const { figure, storageKey } = /*CHART_PAYLOAD*/;
+  const graph = document.querySelector("#chart");
+  const status = document.querySelector("#status");
+  const picker = document.querySelector("#selection");
+  const color = document.querySelector("#color");
+  const width = document.querySelector("#width");
+  const noteInput = document.querySelector("#note");
+  const apply = document.querySelector("#apply");
+  const remove = document.querySelector("#remove");
+  const tools = [...document.querySelectorAll("[data-tool]")];
+  const baseShapes = figure.layout.shapes || [];
+  const baseNotes = figure.layout.annotations || [];
+  const originalRanges = Object.fromEntries(Object.entries(figure.layout)
+    .filter(([key, value]) => /^[xy]axis\d*$/.test(key) && value.range)
+    .map(([key, value]) => [key + ".range", value.range]));
+  let mode = "pan";
+  let saveFailed = false;
+  let message = "";
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(storageKey) || "{}") || {};
+  } catch (_) { saveFailed = true; }
+
+  const userShapes = Array.isArray(saved.shapes) ? saved.shapes : [];
+  const userNotes = Array.isArray(saved.notes) ? saved.notes : [];
+  figure.layout.shapes = [...baseShapes, ...userShapes];
+  figure.layout.annotations = [...baseNotes, ...userNotes];
+
+  function drawings() {
+    return {
+      shapes: (graph.layout.shapes || []).slice(baseShapes.length),
+      notes: (graph.layout.annotations || []).slice(baseNotes.length)
+    };
+  }
+
+  function tell() {
+    const { shapes, notes } = drawings();
+    const context = saveFailed ? "瀏覽器無法保存標記。" : "標記保存在這個瀏覽器，依帳號與股票區分。";
+    status.textContent = [message, `標記 ${shapes.length + notes.length} 筆。`, context].filter(Boolean).join(" ");
+  }
+
+  function showSelection() {
+    const active = picker.value;
+    const { shapes, notes } = drawings();
+    picker.replaceChildren(new Option("選擇標記", ""));
+    shapes.forEach((shape, index) => {
+      const labels = {line: "線條", rect: "矩形", circle: "橢圓", path: "畫筆"};
+      picker.add(new Option(`${index + 1} · ${labels[shape.type] || "標線"}`, "shape:" + index));
+    });
+    notes.forEach((_, index) => picker.add(new Option(`文字 ${index + 1}`, "note:" + index)));
+    if ([...picker.options].some(option => option.value === active)) picker.value = active;
+    apply.disabled = remove.disabled = !picker.value;
+    tell();
+  }
+
+  function persist() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(drawings()));
+    } catch (_) { saveFailed = true; }
+    showSelection();
+  }
+
+  const lineStyle = () => ({ color: color.value, width: Math.max(1, Math.min(8, Number(width.value) || 2)) });
+  const escapeText = value => value.replace(/[&<>]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char]);
+
+  async function setMode(tool) {
+    mode = tool;
+    tools.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.tool === tool)));
+    const custom = tool === "horizontal" || tool === "note" || tool === "crosshair";
+    await Plotly.relayout(graph, {
+      dragmode: custom ? "pan" : tool,
+      "xaxis.showspikes": tool === "crosshair",
+      "yaxis.showspikes": tool === "crosshair",
+      "newshape.line": lineStyle()
+    });
+    message = tool === "horizontal" ? "點主圖選擇價位。" : tool === "note" ? "輸入文字後點主圖放置。" : "";
+    tell();
+  }
+
+  try {
+    await Plotly.newPlot(graph, figure.data, figure.layout, {
+      displaylogo: false, responsive: true, scrollZoom: true,
+      modeBarButtons: [["toImage"]], edits: {annotationPosition: true}
+    });
+  } catch (_) {
+    status.textContent = "圖表無法載入，請切換至原有圖表。";
+    return;
+  }
+
+  graph.on("plotly_relayout", event => {
+    if (Object.keys(event).some(key => /^(shapes|annotations)(\[|$)/.test(key))) persist();
+  });
+  tools.forEach(button => button.addEventListener("click", () => setMode(button.dataset.tool)));
+  [color, width].forEach(input => input.addEventListener("change", () =>
+    Plotly.relayout(graph, {"newshape.line": lineStyle()})));
+  picker.addEventListener("change", () => {
+    apply.disabled = remove.disabled = !picker.value;
+  });
+
+  graph.addEventListener("click", async event => {
+    if (mode !== "horizontal" && mode !== "note") return;
+    const bounds = graph.getBoundingClientRect();
+    const xAxis = graph._fullLayout.xaxis, yAxis = graph._fullLayout.yaxis;
+    const xPixel = event.clientX - bounds.left - xAxis._offset;
+    const yPixel = event.clientY - bounds.top - yAxis._offset;
+    if (xPixel < 0 || yPixel < 0 || xPixel > xAxis._length || yPixel > yAxis._length) return;
+    const x = xAxis.p2d(xPixel), y = yAxis.p2d(yPixel);
+    if (!Number.isFinite(y)) return;
+
+    if (mode === "horizontal") {
+      const shape = {type: "line", xref: "x domain", x0: 0, x1: 1, yref: "y",
+                     y0: y, y1: y, line: lineStyle(), editable: true};
+      await Plotly.relayout(graph, {shapes: [...(graph.layout.shapes || []), shape]});
+    } else {
+      const text = noteInput.value.trim();
+      if (!text) {
+        message = "請先輸入文字。";
+        tell();
+        return;
+      }
+      const note = {x, y, xref: "x", yref: "y", text: escapeText(text),
+                    showarrow: false, font: {color: color.value, size: 14}, bgcolor: "white"};
+      await Plotly.relayout(graph, {annotations: [...(graph.layout.annotations || []), note]});
+      noteInput.value = "";
+    }
+    await setMode("pan");
+  });
+
+  function editSelected(deleteItem) {
+    if (!picker.value) return;
+    const [kind, value] = picker.value.split(":");
+    const isShape = kind === "shape";
+    const key = isShape ? "shapes" : "annotations";
+    const index = Number(value) + (isShape ? baseShapes.length : baseNotes.length);
+    const items = (graph.layout[key] || []).slice();
+    if (!items[index]) return;
+    if (deleteItem) {
+      items.splice(index, 1);
+      picker.value = "";
+    } else {
+      const item = items[index];
+      items[index] = isShape
+        ? {...item, line: {...item.line, ...lineStyle()}}
+        : {...item, font: {...item.font, color: color.value}};
+    }
+    return Plotly.relayout(graph, {[key]: items});
+  }
+
+  apply.addEventListener("click", () => editSelected(false));
+  remove.addEventListener("click", () => editSelected(true));
+  document.querySelector("#reset").addEventListener("click", () => {
+    const reset = {...originalRanges};
+    Object.keys(graph.layout).filter(key => /^yaxis\d*$/.test(key) && !reset[key + ".range"])
+      .forEach(key => { reset[key + ".autorange"] = true; });
+    return Plotly.relayout(graph, reset);
+  });
+  showSelection();
+})();
+</script>
+</body></html>

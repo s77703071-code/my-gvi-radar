@@ -51,6 +51,7 @@ from .research_ai import (
 )
 from .research_quality import RadarEvidence, build_research_evidence, compose_research_report
 from .official_close import render_official_close
+from .chart_quotes import chart_time_label, load_chart_quote
 from .storage import (
     CACHE_TTL,
     DB_FILE,
@@ -98,11 +99,15 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                 db_row = c.fetchone()
                 conn.close()
 
-            df_chart = yf.download(selected_stock, period=cfg["p"], interval=cfg["i"], progress=False)
-            if len(df_chart) > 0:
-                if isinstance(df_chart.columns, pd.MultiIndex): df_chart.columns = df_chart.columns.get_level_values(0)
+            df_chart, quote_failed = load_chart_quote(selected_stock, cfg)
+            if df_chart is not None:
+                if quote_failed:
+                    st.warning("Yahoo Finance 行情未更新，以下沿用此標的與週期最後有效資料。")
+                quote_caption = "Yahoo Finance · " + chart_time_label(df_chart.index[-1], cfg["i"], selected_stock)
+                st.caption(quote_caption)
                 risk_history = df_chart.copy(deep=False)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
+                df_chart.attrs["quote_caption"] = quote_caption + (" · 未更新，沿用最後有效資料" if quote_failed else "")
 
                 # 📅 日期格式適應性調整
                 if "分鐘" in selected_tf:
@@ -121,7 +126,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                     or info_obj_main.get('shortName')
                     or selected_stock
                 )
-                current_price_label = f"當前現價 ({c_name} {selected_stock})"
+                current_price_label = f"最新 K 棒價格 ({c_name} {selected_stock})"
                 price_val = float(df_chart['Close'].to_numpy().flatten()[-1])
                 is_tw_stock = ".TW" in selected_stock or ".TWO" in selected_stock
 
@@ -167,7 +172,9 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
 
                 if "價值" in panel_mode:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="資料來源最近更新的價格；可能不是即時成交價，請留意下方資料時間。"); st.caption(f"📢 即時報價 ({cache_time_str})")
+                    with gc1:
+                        st.metric(label=f"💰 {current_price_label}", value=f"{price_val:,.2f} 元" if is_tw_stock else f"${price_val:,.2f}", help="以所選週期最後一根可用 K 棒為準，盤中數值可能變動。")
+                        st.caption(f"基本面快取更新 {cache_time_str}")
 
                     if bv_val is not None:
                         with gc2: st.metric(label="👑 GVI 成長價值", value=gvi_str, help="把帳面價值、目前股價與獲利能力放在一起估算的研究指標；公式假設目前 ROE 未來五年維持不變，這不是預測，且尚未證明能穩定改善績效。"); st.caption("📢 最新重算")
@@ -178,7 +185,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                         with gc2: st.info("⚠️ 缺乏財報淨值數據，系統自動隱藏 PB 與相關估值欄位。建議切換至「操盤/動能模式」觀看。")
                 else:
                     gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)", help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
+                    with gc1: st.metric(label=f"⚡ {current_price_label}", value=f"{price_val:,.2f}", delta=f"{change:+.2f} ({change_pct:+.2f}%)" if len(df_chart) > 1 else None, help="價格與漲跌以圖表目前選取的週期為準，最新一筆資料可能有延遲。")
                     with gc2: st.metric(label="🌊 最近一根 K 棒成交量", value=f"{vol_today:,.0f}", delta=f"量比: {vol_ratio:.2f}x", delta_color="normal" if vol_ratio >= 1 else "off", help="量比將最近一根 K 棒的成交量和近 5 根平均量比較；高於 1 表示比近期平均活躍，無法單獨辨別買賣方向。")
                     with gc3: st.metric(label="🎯 5根均線乖離率", value=f"{bias5:+.2f}%", delta="偏離大留意回檔" if abs(bias5) > 5 else "乖離正常", delta_color="inverse" if abs(bias5) > 5 else "off", help="最新收盤價相對近 5 根收盤均價的百分比差距；用來觀察短期偏離，不是反轉訊號。")
                     with gc4: st.metric(label="🔺 最近一根 K 棒最高價", value=f"{high_today:,.2f}", help="所選圖表週期中最新一根 K 棒的最高價。")
@@ -740,6 +747,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
                                         st.error(f"寄信失敗：{mail_error}")
                 st.markdown("---")
             else:
+                st.warning("Yahoo Finance 行情資料暫缺，這個標的與週期目前沒有可顯示的資料。")
                 _render_radar_risk(evaluate_radar_risk(
                     pd.DataFrame(), timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,
                     cache_ttl=CACHE_TTL,

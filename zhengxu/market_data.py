@@ -1462,7 +1462,7 @@ def signature_save_to_db(t):
         st.error(f"❌ 數據寫入資料庫失敗 [{t}]: {e}")
 
 
-def _market_index_history(symbol, period="5d"):
+def _fetch_market_index_history(symbol, period):
     try:
         history = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
     except Exception:
@@ -1473,10 +1473,29 @@ def _market_index_history(symbol, period="5d"):
         history = history.droplevel(list(range(1, history.columns.nlevels)), axis="columns")
     if "Close" not in history or not isinstance(history.index, pd.DatetimeIndex) or not history.columns.is_unique:
         return None
-    return history
+    closes = pd.to_numeric(history["Close"], errors="coerce")
+    valid = history.index.notna() & np.isfinite(closes) & (closes > 0)
+    return history.loc[valid].sort_index(kind="stable") if valid.any() else None
 
 
-def _market_index_snapshot(symbol):
+def _market_index_history(symbol, period="5d"):
+    key = (symbol, period)
+    cache = st.session_state.setdefault("public_market_index_cache", {})
+    previous = cache.get(key)
+    history = _fetch_market_index_history(symbol, period)
+    stale = history is None or (previous is not None and history.index[-1].value < previous.index[-1].value)
+    if stale:
+        history = previous
+    else:
+        cache[key] = history
+    if history is None:
+        return None
+    displayed = history.copy()
+    displayed.attrs["quote_stale"] = stale
+    return displayed
+
+
+def _market_index_snapshot(symbol, *, include_status=False):
     history = _market_index_history(symbol)
     if history is None:
         return None
@@ -1494,7 +1513,8 @@ def _market_index_snapshot(symbol):
         percent = (points / previous) * 100
         if isfinite(percent):
             change, percentage = points, percent
-    return value, change, percentage, closes.index[-1].date()
+    snapshot = value, change, percentage, closes.index[-1].date()
+    return (*snapshot, history.attrs.get("quote_stale", False)) if include_status else snapshot
 
 
 WORKBENCH_INDEXES = (
@@ -1512,15 +1532,16 @@ def _render_market_overview(compact=False):
     snapshots = {}
     for column, (label, symbol, description) in zip(st.columns(4), WORKBENCH_INDEXES):
         with column:
-            snapshot = _market_index_snapshot(symbol)
+            snapshot = _market_index_snapshot(symbol, include_status=True)
             if snapshot is None:
                 st.metric(label if compact else f"{label} ({symbol})", "資料暫缺", help=description)
                 continue
-            snapshots[label] = snapshot
-            value, change, percentage, trading_day = snapshot
+            value, change, percentage, trading_day, stale = snapshot
+            snapshots[label] = value, change, percentage, trading_day
             delta = f"{change:+.2f} ({percentage:+.2f}%)" if change is not None else None
             st.metric(label if compact else f"{label} ({symbol})", f"{value:,.2f}", delta, help=description)
-            st.caption(f"資料日 {trading_day:%Y-%m-%d}" + (" · 缺前期資料" if change is None else ""))
+            st.caption(f"資料日 {trading_day:%Y-%m-%d}" + (" · 未更新，沿用前值" if stale else "")
+                       + (" · 缺前期資料" if change is None else ""))
     return snapshots
 
 

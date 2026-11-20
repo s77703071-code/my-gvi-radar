@@ -186,7 +186,8 @@ def _render_workbench_market_trend():
                        showlegend=len(closes) >= 5, legend=dict(orientation="h", y=1.12),
                        xaxis_rangeslider_visible=False, dragmode=False)
     st.plotly_chart(plot, theme=None, config={"displayModeBar": False}, width="stretch", key="workbench_trend_chart")
-    st.caption(f"Yahoo Finance 日線 · 最新可用交易日 {closes.index[-1].date():%Y-%m-%d} · 資料可能延遲")
+    freshness = "未更新，沿用最後有效資料" if history.attrs.get("quote_stale") else "資料可能延遲"
+    st.caption(f"Yahoo Finance 日線 · 最新可用交易日 {closes.index[-1].date():%Y-%m-%d} · {freshness}")
 
 
 def _workbench_position_total(positions):
