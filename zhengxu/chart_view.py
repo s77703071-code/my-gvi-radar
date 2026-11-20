@@ -31,13 +31,18 @@ def _workspace_template():
     return Path(__file__).with_name("chart_workspace.html").read_text(encoding="utf-8")
 
 
-def _research_workspace_html(fig, user_id, ticker):
+def _research_workspace_html(fig, user_id, ticker, label="個股 K 線與技術指標"):
     scope = sha256(json.dumps([user_id, ticker], default=str).encode()).hexdigest()
     payload = json.dumps({"figure": json.loads(fig.to_json()),
-                          "storageKey": f"zhengxu-chart-workspace:{scope}"},
+                          "storageKey": f"zhengxu-chart-workspace:{scope}", "chartLabel": label},
                          ensure_ascii=False).replace("<", "\\u003c")
     template = _workspace_template().replace("/*CHART_PAYLOAD*/", payload, 1)
     return template.replace("/*PLOTLY_BUNDLE*/", get_plotlyjs(), 1)
+
+
+def render_chart_workspace(fig, user_id, ticker, label="個股 K 線與技術指標"):
+    components.html(_research_workspace_html(fig, user_id, ticker, label),
+                    height=fig.layout.height + 165, scrolling=True)
 
 
 def _render_legacy_marking_controls(auth_user, selected_stock, selected_tf):
@@ -473,8 +478,7 @@ def render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal
             unsafe_allow_html=True,
         )
     if not legacy_chart:
-        components.html(_research_workspace_html(fig, auth_user["id"], selected_stock),
-                        height=chart_height + 165, scrolling=True)
+        render_chart_workspace(fig, auth_user["id"], selected_stock)
         return
     st.plotly_chart(
         fig,

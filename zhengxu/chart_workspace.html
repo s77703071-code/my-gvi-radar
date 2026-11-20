@@ -48,8 +48,9 @@
 <script>/*PLOTLY_BUNDLE*/</script>
 <script>
 (async () => {
-  const { figure, storageKey } = /*CHART_PAYLOAD*/;
+  const { figure, storageKey, chartLabel } = /*CHART_PAYLOAD*/;
   const graph = document.querySelector("#chart");
+  graph.setAttribute("aria-label", chartLabel);
   const status = document.querySelector("#status");
   const picker = document.querySelector("#selection");
   const color = document.querySelector("#color");
