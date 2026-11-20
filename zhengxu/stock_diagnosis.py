@@ -50,6 +50,7 @@ from .research_ai import (
     send_gmail_report,
 )
 from .research_quality import RadarEvidence, build_research_evidence, compose_research_report
+from .official_close import render_official_close
 from .storage import (
     CACHE_TTL,
     DB_FILE,
@@ -70,6 +71,7 @@ def render_stock_diagnosis(api_key_input, auth_user, cfg, explanation_style, mar
     grid_advice_metrics = None
     df_chart = None
     if selected_stock:
+        render_official_close(selected_stock)
         try:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
