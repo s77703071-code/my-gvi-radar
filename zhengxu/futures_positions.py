@@ -11,6 +11,10 @@ import streamlit as st
 
 TAIFEX_HISTORY_URL = "https://www.taifex.com.tw/cht/3/futContractsDateView"
 TAIFEX_CSV_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
+TAIFEX_DAILY_URL = (
+    "https://openapi.taifex.com.tw/v1/"
+    "MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate"
+)
 INVESTORS = ("外資及陸資", "投信", "自營商")
 PRIORITY_CONTRACTS = ("臺股期貨", "小型臺指期貨", "微型臺指期貨")
 POSITION_COLUMNS = {
@@ -35,7 +39,8 @@ def parse_taifex_positions(payload):
     frame = frame[required].rename(columns={"身份別": "法人"})
     for column in frame:
         frame[column] = frame[column].str.strip()
-    frame["日期"] = pd.to_datetime(frame["日期"], format="%Y/%m/%d", errors="coerce")
+    date_text = frame["日期"].str.replace("/", "", regex=False)
+    frame["日期"] = pd.to_datetime(date_text, format="%Y%m%d", errors="coerce")
     frame["法人"] = frame["法人"].replace({"外資": "外資及陸資"})
     frame = frame.loc[frame["日期"].notna() & frame["商品名稱"].ne("") & frame["法人"].isin(INVESTORS)].copy()
     for column in POSITION_COLUMNS:
@@ -56,22 +61,33 @@ def parse_taifex_positions(payload):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_taifex_positions(end_date):
-    start_date = end_date - timedelta(days=14)
-    response = requests.get(
-        TAIFEX_CSV_URL,
-        params={
-            "queryStartDate": start_date.strftime("%Y/%m/%d"),
-            "queryEndDate": end_date.strftime("%Y/%m/%d"),
-            "commodityId": "",
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    frame = parse_taifex_positions(response.content)
-    frame = frame.loc[frame["日期"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
-    if frame.dropna(subset=list(POSITION_COLUMNS), how="all").empty:
-        raise ValueError("TAIFEX did not provide valid positions for the requested dates")
-    return frame
+    # The historical download rejects weekend end dates.
+    history_end = end_date - timedelta(days=max(0, end_date.weekday() - 4))
+    start_date = history_end - timedelta(days=14)
+    try:
+        response = requests.get(
+            TAIFEX_CSV_URL,
+            params={
+                "queryStartDate": start_date.strftime("%Y/%m/%d"),
+                "queryEndDate": history_end.strftime("%Y/%m/%d"),
+                "commodityId": "",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        frame = parse_taifex_positions(response.content)
+        frame = frame.loc[frame["日期"].between(pd.Timestamp(start_date), pd.Timestamp(history_end))]
+        if frame.dropna(subset=list(POSITION_COLUMNS), how="all").empty:
+            raise ValueError("TAIFEX did not provide valid positions for the requested dates")
+        return frame
+    except (requests.RequestException, ValueError):
+        response = requests.get(TAIFEX_DAILY_URL, timeout=8)
+        response.raise_for_status()
+        frame = parse_taifex_positions(response.content)
+        frame = frame.loc[frame["日期"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
+        if frame.dropna(subset=list(POSITION_COLUMNS), how="all").empty:
+            raise ValueError("TAIFEX open data did not provide a recent valid position snapshot")
+        return frame
 
 
 def summarize_taifex_contract(frame, contract):
