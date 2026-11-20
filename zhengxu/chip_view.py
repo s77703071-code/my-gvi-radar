@@ -382,7 +382,7 @@ def render_chip_flow(auth_user, df_chart, selected_stock, selected_tf):
 
             if branch_source == "手動上傳 CSV":
                 st.markdown(
-                    "[證交所上市分點 CSV](https://bsr.twse.com.tw/bshtm/bsWelcome.aspx) · "
+                    "[證交所上市分點 CSV](https://bsr.twse.com.tw/bshtm/) · "
                     "[櫃買中心上櫃分點 CSV](https://www.tpex.org.tw/zh-tw/mainboard/trading/info/brokerBS.html)"
                 )
                 st.caption("請在官方網站完成驗證並下載 CSV，再匯入正序。")
