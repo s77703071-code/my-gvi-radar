@@ -817,6 +817,8 @@ def _broker_branch_csv_column_kind(column):
     """Identify required branch CSV columns across common Chinese and API headers."""
     name = str(column).replace("\ufeff", "").strip().strip("\"'")
     compact = re.sub(r"\s+", "", name).lower()
+    if compact in {"date", "trade_date", "trading_date", "資料日期", "交易日期", "成交日期", "日期"}:
+        return "date"
     if compact in {"stock_id", "data_id", "stock_code", "ticker", "symbol", "股票代碼", "證券代號"}:
         return "code"
     if "代號" in compact or "代碼" in compact:
@@ -915,6 +917,7 @@ def _combine_broker_branch_csv_tables(frame, header_fields):
         "branch": "securities_trader",
         "buy": "buy_shares",
         "sell": "sell_shares",
+        "date": "trade_date",
     }
     normalized_frames = []
     for indices in groups:
@@ -935,7 +938,7 @@ def _combine_broker_branch_csv_tables(frame, header_fields):
     return pd.concat(normalized_frames, ignore_index=True, sort=False)
 
 
-def summarize_broker_branch_frame(frame, stock_code):
+def summarize_broker_branch_frame(frame, stock_code, *, strict_shares=False):
     """Aggregate price-level branch rows into one buy/sell total per broker branch."""
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {"error": "沒有可分析的分點資料。"}
@@ -957,6 +960,15 @@ def summarize_broker_branch_frame(frame, stock_code):
     group_cols = [column for column in (branch_id_col, branch_name_col) if column]
     selected["_buy"] = pd.to_numeric(selected[buy_col].astype(str).str.replace(',', ''), errors='coerce')
     selected["_sell"] = pd.to_numeric(selected[sell_col].astype(str).str.replace(',', ''), errors='coerce')
+    if strict_shares:
+        amounts = selected[["_buy", "_sell"]]
+        valid = np.isfinite(amounts) & (amounts >= 0) & (amounts % 1 == 0)
+        formatted = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.0+)?"
+        valid["_buy"] &= selected[buy_col].astype(str).str.strip().str.fullmatch(formatted)
+        valid["_sell"] &= selected[sell_col].astype(str).str.strip().str.fullmatch(formatted)
+        bad = int((~valid.all(axis=1)).sum())
+        if bad:
+            return {"error": f"有 {bad} 列的買進或賣出股數缺漏或無效。請確認兩欄都是大於或等於零的整數。"}
     selected = selected.dropna(subset=["_buy", "_sell"])
     if selected.empty:
         return {"error": "買進或賣出欄位沒有可讀取的數值。"}
@@ -1008,6 +1020,7 @@ def save_broker_branch_ai_summary(session_state, user_id, stock_code, branch_sum
     snapshot = {
         "stock_code": _normalize_broker_stock_code(stock_code),
         "source_label": str(source_label or "使用者提供的分點資料"),
+        "trade_period": branch_summary.get("trade_period"),
         "net_shares": _finite_number(branch_summary.get("net_shares")),
         "buyers": int(branch_summary.get("buyers", 0) or 0),
         "sellers": int(branch_summary.get("sellers", 0) or 0),
@@ -1037,9 +1050,11 @@ def format_broker_branch_ai_context(snapshot, stock_code):
     buy_share_text = f"前15個淨買超{unit}占全部淨買超約 {buy_share:.1f}%" if buy_share is not None else "淨買超集中度資料不足"
     sell_share_text = f"前15個淨賣超{unit}占全部淨賣超約 {sell_share:.1f}%" if sell_share is not None else "淨賣超集中度資料不足"
     saved_at = str(snapshot.get("saved_at") or "")
+    period = snapshot.get("trade_period")
     return "\n".join([
         f"【分點資料摘要｜{target_code}】",
-        f"資料來源：{snapshot.get('source_label', '使用者提供的分點資料')}；載入時間：{saved_at or '未提供'}。",
+        f"資料來源：{snapshot.get('source_label', '使用者提供的分點資料')}；載入時間：{saved_at or '未提供'}。"
+        + (f" 交易日期：{period}。" if period else ""),
         f"分點淨額合計：{net_text}；淨買超{unit}：{int(snapshot.get('buyers', 0) or 0)}；淨賣超{unit}：{int(snapshot.get('sellers', 0) or 0)}。",
         f"淨流向集中度：{buy_share_text}；{sell_share_text}。",
         "資料限制：CSV 若未標示交易日期，不能假設分點統計與目前股價是同日或同期間；淨額合計接近零通常是買賣相抵，不是方向訊號。",
@@ -1107,12 +1122,47 @@ def build_broker_branch_ai_interpretation(snapshot, price_history, timeframe_nam
 
     source_label = str(snapshot.get("source_label") or "使用者提供的分點資料")
     source_date_match = re.search(r"(20\d{2}-\d{2}-\d{2})", source_label)
-    if source_date_match:
+    if snapshot.get("trade_period"):
+        date_note = f"分點交易日期為 {snapshot['trade_period']}；近 20 筆價格為另一觀察期間，請核對兩者是否對齊。"
+    elif source_date_match:
         date_note = f"分點資料標示日期為 {source_date_match.group(1)}；近 20 筆價格涵蓋的期間較長，不能把兩者當成完全相同期間。"
     else:
         date_note = "這份分點資料沒有可確認的交易日期；無法確認它與近 20 筆價格期間對齊，因此只能作方向參考。"
     lines.append("資料限制：" + date_note + "分點家數不是投資人數，資料也無法辨認主力或散戶身分；淨額接近零可能只是買賣相抵，不代表沒有資金流動。")
     return "\n".join(f"- {line}" for line in lines)
+
+
+def _broker_csv_trade_period(frame, target_code, metadata_rows):
+    date_column = next((c for c in frame.columns if _broker_branch_csv_column_kind(c) == "date"), None)
+    if date_column is not None:
+        code_column = next(c for c in frame.columns if _broker_branch_csv_column_kind(c) == "code")
+        values = frame.loc[frame[code_column].map(_normalize_broker_stock_code) == target_code, date_column]
+    else:
+        values = []
+        for row in metadata_rows:
+            if not row:
+                continue
+            cells = re.split("[：:]", row[0], maxsplit=1)
+            if _broker_branch_csv_column_kind(cells[0]) == "date":
+                values.extend(value for value in cells[1:] + row[1:] if value.strip())
+
+    dates = []
+    for value in values:
+        text = str(value).strip().strip('"')
+        parts = re.fullmatch(r"([0-9]{3,4})[-/]([0-9]{1,2})[-/]([0-9]{1,2})"
+                             r"|([0-9]{3,4})([0-9]{2})([0-9]{2})", text)
+        if parts is None:
+            return None
+        year, month, day = parts.groups()[:3] if parts[1] else parts.groups()[3:]
+        date_text = f"{int(year) + (1911 if len(year) == 3 else 0):04d}-{int(month):02d}-{int(day):02d}"
+        parsed = pd.to_datetime(date_text, format="%Y-%m-%d", errors="coerce")
+        if pd.isna(parsed):
+            return None
+        dates.append(parsed.date().isoformat())
+    if not dates or (date_column is None and len(set(dates)) != 1):
+        return None
+    first, last = min(dates), max(dates)
+    return first if first == last else f"{first} 至 {last}"
 
 
 def summarize_broker_branch_csv(uploaded_file, stock_code):
@@ -1173,7 +1223,7 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
             except Exception as exc:
                 last_parse_error = str(exc)
                 continue
-            frame = _combine_broker_branch_csv_tables(frame, header_fields or list(frame.columns))
+            frame = _combine_broker_branch_csv_tables(frame, header_fields or list(frame.columns)).dropna(how="all")
             code_col = next((column for column in frame.columns if _broker_branch_csv_column_kind(column) == "code"), None)
             if code_col is None:
                 metadata_code = _broker_csv_metadata_stock_code(text, delimiter, header_line)
@@ -1189,7 +1239,14 @@ def summarize_broker_branch_csv(uploaded_file, stock_code):
                     shown_codes = ", ".join(csv_codes[:5])
                     more_codes = " 等" if len(csv_codes) > 5 else ""
                     return {"error": f"這份 CSV 包含 {shown_codes}{more_codes}；目前分析標的是 {target_code}。請切換至 CSV 所屬股票，或匯入 {target_code} 的分點 CSV。"}
-            return summarize_broker_branch_frame(frame, stock_code)
+            result = summarize_broker_branch_frame(frame, stock_code, strict_shares=True)
+            if "error" not in result:
+                metadata_rows = csv.reader(io.StringIO("\n".join(text.splitlines()[:header_line])),
+                                           delimiter=delimiter)
+                result["trade_period"] = _broker_csv_trade_period(
+                    frame, _normalize_broker_stock_code(stock_code), metadata_rows
+                )
+            return result
 
     if last_parse_error:
         return {
