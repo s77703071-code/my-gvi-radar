@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from .foundation import failure_message
+
 
 DEMO_TRADES = (
     {"operation_id": "demo-buy", "executed_on": "2026-01-05", "side": "buy", "symbol": "AAPL",
@@ -116,8 +118,8 @@ def render_cash_activity(load_entries, *, scope):
     try:
         trades, income = (DEMO_TRADES, DEMO_INCOME) if demo else load_entries()
         summary, details = summarize_cash_activity(trades, income, start=start, end=end)
-    except (KeyError, TypeError, ValueError, ArithmeticError, RuntimeError):
-        st.error("暫時無法核對完整的成交與收入紀錄。請稍後再試。")
+    except (KeyError, TypeError, ValueError, ArithmeticError, RuntimeError) as error:
+        st.error(failure_message(error, "暫時無法核對完整的成交與收入紀錄。請稍後再試。"))
         return
 
     st.caption("各幣別分開加總。紀錄淨流量為賣出與實收收入，扣除買入、手續費及交易稅。"

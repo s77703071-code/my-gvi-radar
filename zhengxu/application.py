@@ -1,7 +1,7 @@
 """Streamlit startup, navigation and authenticated routing."""
 
 from pathlib import Path
-import os
+import logging
 import re
 import streamlit as st
 
@@ -18,7 +18,8 @@ from .administration import (
     _require_dual_grid_access,
 )
 from .dividend import reset_dividend_source_cache
-from .module_registry import MODULE_GROUPS
+from .foundation import AccountScope, failure_message, record_module_event, feature_enabled
+from .module_registry import DUAL_GRID_MODULE, MODULE_GROUPS
 from .panel import (
     render_analysis,
 )
@@ -32,6 +33,17 @@ from .workbench import (
 )
 
 
+def _render_platform_view(scope, target, render, *args):
+    try:
+        render(*args)
+    except Exception as error:
+        logging.getLogger(__name__).error("View failed: %s (%s)", target, type(error).__name__)
+        record_module_event(st.session_state, scope, target, "暫時無法完成")
+        st.error(failure_message(error, "目前無法開啟這個畫面。可從左側切換到其他模組。"))
+    else:
+        record_module_event(st.session_state, scope, target)
+
+
 def run():
     st.set_page_config(page_title="正序｜投資研究與管理", layout="wide", page_icon="📈")
     reset_dividend_source_cache()
@@ -43,6 +55,11 @@ def run():
         )
     init_db()
     auth_user = render_account_gate()
+    try:
+        scope = AccountScope.from_session(auth_user)
+    except ValueError:
+        st.error("登入狀態無法驗證。請登出後重新登入。")
+        st.stop()
     navigation = st.sidebar.container()
     with st.sidebar.expander("設定／更新備援 Email"):
         with st.form("recovery_email_request_form"):
@@ -79,7 +96,7 @@ def run():
     ).strip().upper()
 
     st.sidebar.markdown("---")
-    if os.environ.get("GVI_DUAL_GRID_ACCESS") == "1":
+    if feature_enabled("GVI_DUAL_GRID_ACCESS"):
         management = _dual_grid_management_context(auth_user)
         if st.session_state.get("module_access_open"):
             if navigation.button("返回策略模組", key="module_access_close"):
@@ -128,8 +145,10 @@ def run():
     )
     navigation.caption("童趣版用比喻幫助理解，仍保留虧損風險、資料限制與非買賣指令提醒。")
     if workbench_open:
-        _render_investment_workbench(auth_user, explanation_style)
+        _render_platform_view(scope, "投資工作台", _render_investment_workbench, auth_user, explanation_style)
         st.stop()
-    if selected_module == "🧠 智慧型雙策略網格系統":
+    if selected_module == DUAL_GRID_MODULE:
         _require_dual_grid_access(auth_user)
-    render_analysis(auth_user, selected_stock, selected_module, explanation_style)
+    if selected_module in MODULE_GROUPS:
+        _render_platform_view(scope, selected_module, render_analysis,
+                              auth_user, selected_stock, selected_module, explanation_style)
