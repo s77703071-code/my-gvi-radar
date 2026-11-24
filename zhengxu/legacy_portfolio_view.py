@@ -144,6 +144,7 @@ def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
     research_rows = positions.rename(columns={
         "代碼": "symbol", "名稱": "name", "資產類型": "asset_type", "幣別": "currency",
         "數量": "quantity", "最新價格": "price", "換算台幣匯率": "fx_to_twd",
+        "台幣成本": "cost_basis_twd",
     }).to_dict("records")
     render_portfolio_research(research_rows, scope=f"local_{portfolio_user_id}",
                               source="原有投資組合", open_chart=open_chart)
