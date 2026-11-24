@@ -19,6 +19,7 @@ from .accounts import (
     _dual_grid_public_api_key,
     _supabase_auth_config,
 )
+from .cash_reconciliation import render_cash_activity
 from .portfolio_research import render_portfolio_research
 from .storage import (
     _encode_portfolio_export,
@@ -528,6 +529,13 @@ def _validate_pilot_income_rows(rows):
         raise ValueError("Invalid income history")
 
 
+def _read_pilot_income_entries(account):
+    response = _portfolio_pilot_request(account, "read_income_entries")
+    rows = response.json() if response.status_code == 200 else None
+    _validate_pilot_income_rows(rows)
+    return rows
+
+
 def _pilot_activity_mode(account, kind, correction_enabled):
     options = ("明細", "新增", "更正") if correction_enabled else ("明細", "新增")
     return st.radio("操作", options, horizontal=True,
@@ -554,9 +562,7 @@ def _render_pilot_income(account):
         return
     if history is None:
         try:
-            response = _portfolio_pilot_request(account, "read_income_entries")
-            rows = response.json() if response.status_code == 200 else None
-            _validate_pilot_income_rows(rows)
+            rows = _read_pilot_income_entries(account)
         except (RuntimeError, ValueError, TypeError, requests.RequestException):
             st.error("暫時無法讀取投資收入明細。請稍後再試。")
             return
@@ -914,6 +920,21 @@ def _render_pilot_trade_form(account):
             _submit_pilot_trade(account, state)
 
 
+def _read_pilot_cash_activity(account):
+    try:
+        if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1":
+            trades, _ = _read_pilot_correction_history(account, "trade", _validate_pilot_trade_rows)
+        else:
+            trades = _read_pilot_trade_entries(account)
+        if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1":
+            income, _ = _read_pilot_correction_history(account, "income", _validate_pilot_income_rows)
+        else:
+            income = _read_pilot_income_entries(account)
+    except requests.RequestException as error:
+        raise RuntimeError("Cash activity source unavailable") from error
+    return trades, income
+
+
 def _render_portfolio_pilot(account, *, open_chart):
     try:
         data = _read_portfolio_pilot(account)
@@ -923,10 +944,14 @@ def _render_portfolio_pilot(account, *, open_chart):
 
     scope = f"portfolio_cloud_{account['id']}"
     sections = ["持倉", "歷史快照"]
-    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1":
+    income_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1"
+    trade_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1"
+    if income_enabled:
         sections.append("股息與利息")
-    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
+    if trade_enabled:
         sections.append("買賣成交")
+    if income_enabled and trade_enabled:
+        sections.append("成交與收入對帳")
     sections.append("配置")
     section = st.radio("雲端投資組合功能", sections, horizontal=True, key=f"{scope}_section")
 
@@ -946,6 +971,8 @@ def _render_portfolio_pilot(account, *, open_chart):
         _render_pilot_income(account)
     elif section == "買賣成交":
         _render_pilot_trade(account)
+    elif section == "成交與收入對帳":
+        render_cash_activity(lambda: _read_pilot_cash_activity(account), scope=scope)
     else:
         if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
             _render_pilot_settings_form(account, data)
