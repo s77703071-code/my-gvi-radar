@@ -110,18 +110,35 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         render_legacy_portfolio(_render_stock_actions, auth_user, open_chart=_jump_to_stock_diagnosis)
         return
 
+    primary_labels = {
+        "📊 彩色 K 線圖與成交量": "K 線與指標",
+        "📦 籌碼流向參考": "籌碼分析",
+        "🤖 網格自動生成器": "網格規劃",
+        "⚖️ 網格／持有／定期定額比較": "策略比較",
+        "🧪 技術指標自訂策略回測": "回測",
+        "💸 配息複利策略": "配息策略",
+        "🧠 智慧型雙策略網格系統": "雙策略網格",
+        "🚀 華爾街機構級三核心策略雷達": "雷達選股",
+        "🏦 台股三大法人獨立選股策略": "法人篩選",
+        "📊 當日全市場三大法人佔股本比 Top 10": "法人榜單",
+    }
     chart_page = selected_module == "📊 彩色 K 線圖與成交量"
+    main_view, data_view, help_view = st.tabs((
+        primary_labels[selected_module], "個股研究與 AI" if chart_page else "行情與資料", "使用說明",
+    ))
     radar_page = selected_module == "🚀 華爾街機構級三核心策略雷達"
     show_market_overview = chart_page or radar_page or selected_module == "📦 籌碼流向參考"
-    market_indexes = _render_market_overview() if show_market_overview else None
+    with data_view:
+        market_indexes = _render_market_overview() if show_market_overview else None
 
-    if chart_page or radar_page or selected_module in {
-        "🧪 技術指標自訂策略回測",
-        "💸 配息複利策略",
-    }:
-        _render_metric_glossary(st)
+    with help_view:
+        if chart_page or radar_page or selected_module in {
+            "🧪 技術指標自訂策略回測",
+            "💸 配息複利策略",
+        }:
+            _render_metric_glossary(st)
 
-    st.markdown("---")
+        _render_market_psychology_guide(st, selected_module, explanation_style)
 
     st.sidebar.markdown("### 🧠 系統 API 金鑰設定")
     api_key_input = ""
@@ -150,7 +167,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     ).strip() or "gpt-5.5"
     st.sidebar.caption("ChatGPT API 使用量依 OpenAI API 帳戶計費；ChatGPT 訂閱不包含 API 額度。")
 
-    chart_controls = st.container() if chart_page else st.sidebar
+    chart_controls = main_view.container() if chart_page else st.sidebar
     chart_controls.markdown("### 🎛️ 看盤資料設定")
     selected_tf = chart_controls.selectbox("⏱️ 看盤 K 線時間軸級別", options=["1分鐘", "5分鐘", "30分鐘", "60分鐘", "1日", "1週", "1個月", "1季", "半年", "1年"], index=4, key="research_chart_timeframe")
     chart_controls.caption(f"目前圖表週期：{selected_tf}")
@@ -161,7 +178,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
     }
     cfg = tf_mapping[selected_tf]
 
-    with chart_controls.expander("📈 K 線常用技術指標", expanded=False):
+    with chart_controls, st.expander("📈 K 線常用技術指標", expanded=False):
         selected_chart_indicators = st.multiselect(
             "顯示在 K 線圖下方",
             options=[
@@ -184,7 +201,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             "ATR 看波動大小；OBV 看量價累積；ADX 看趨勢強弱。週期依目前 K 線級別計算，指標不是單獨買賣訊號。"
         )
 
-    with chart_controls.expander("🛠️ 均線指標快速視窗設定", expanded=False):
+    with chart_controls, st.expander("🛠️ 均線指標快速視窗設定", expanded=False):
         preset_ma = st.selectbox("📊 選擇均線快捷套組", options=["標準視窗 (5日 / 10日 / 20日)", "極短線 (3日 / 5日 / 10日)", "波段趨勢 (20日 / 60日 / 120日)", "自訂均線配置"], index=0)
         default_days = [5, 10, 20, 60, 240] if preset_ma == "標準視窗 (5日 / 10日 / 20日)" else ([3, 5, 10, 20, 60] if preset_ma == "極短線 (3日 / 5日 / 10日)" else [20, 60, 120, 240, 500])
         default_actives = [True, True, True, False, False]
@@ -198,41 +215,42 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
             with col_c: ma_c = str(st.color_picker(f"C{i}", value=default_colors[i-1], label_visibility="collapsed", key=f"personal_ma_c_{i}"))
             if is_active: personal_ma_configs.append({"period": int(ma_p), "color": ma_c})
 
-    chart_area = st.container() if chart_page else None
-    df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(
-        api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input,
-        openai_model_input, selected_stock, selected_tf, show_tactical_panel=chart_page,
-        show_official_close=chart_page, show_radar_comparison=chart_page or radar_page,
-        show_stock_research=chart_page,
-    )
+    chart_area = main_view.container() if chart_page else None
+    with data_view:
+        df_chart, c_name, change_pct, date_strings, vol_ratio, price_val, grid_advice_metrics, is_tw_stock = render_stock_diagnosis(
+            api_key_input, auth_user, cfg, explanation_style, market_indexes, openai_api_key_input,
+            openai_model_input, selected_stock, selected_tf, show_tactical_panel=chart_page,
+            show_official_close=chart_page, show_radar_comparison=chart_page or radar_page,
+            show_stock_research=chart_page,
+        )
 
-    try:
-        _render_market_psychology_guide(st, selected_module, explanation_style)
-        if df_chart is None or df_chart.empty:
-            if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
-                st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
-        else:
-            if chart_area is not None:
-                with chart_area:
-                    render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
-            if selected_module == '💸 配息複利策略':
-                render_dividend_tab(st, default_ticker=selected_stock)
-            if selected_module == '📦 籌碼流向參考':
-                render_chip_flow(auth_user, df_chart, selected_stock, selected_tf)
-            if selected_module == '🧠 智慧型雙策略網格系統':
-                render_dual_grid(auth_user, selected_stock)
-            if selected_module == '🤖 網格自動生成器':
-                render_grid(price_val, selected_stock)
-            if selected_module == '⚖️ 網格／持有／定期定額比較':
-                render_comparison(c_name, date_strings, df_chart, selected_tf, is_tw_stock=is_tw_stock)
-            if selected_module == '🧪 技術指標自訂策略回測':
-                render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metrics, is_tw_stock, selected_stock, selected_tf)
-    except Exception as ex_tab:
-        st.error(f"❌ 畫面渲染異常：{ex_tab}")
+    with main_view:
+        try:
+            if df_chart is None or df_chart.empty:
+                if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
+                    st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
+            else:
+                if chart_area is not None:
+                    with chart_area:
+                        render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
+                if selected_module == '💸 配息複利策略':
+                    render_dividend_tab(st, default_ticker=selected_stock)
+                if selected_module == '📦 籌碼流向參考':
+                    render_chip_flow(auth_user, df_chart, selected_stock, selected_tf)
+                if selected_module == '🧠 智慧型雙策略網格系統':
+                    render_dual_grid(auth_user, selected_stock)
+                if selected_module == '🤖 網格自動生成器':
+                    render_grid(price_val, selected_stock)
+                if selected_module == '⚖️ 網格／持有／定期定額比較':
+                    render_comparison(c_name, date_strings, df_chart, selected_tf, is_tw_stock=is_tw_stock)
+                if selected_module == '🧪 技術指標自訂策略回測':
+                    render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metrics, is_tw_stock, selected_stock, selected_tf)
+        except Exception as ex_tab:
+            st.error(f"❌ 畫面渲染異常：{ex_tab}")
 
-    if selected_module == '🚀 華爾街機構級三核心策略雷達':
-        render_radar(_render_stock_actions, cfg, explanation_style, selected_tf)
-    if selected_module == '🏦 台股三大法人獨立選股策略':
-        render_institutional()
-    if selected_module == '📊 當日全市場三大法人佔股本比 Top 10':
-        render_rankings(_render_stock_actions)
+        if selected_module == '🚀 華爾街機構級三核心策略雷達':
+            render_radar(_render_stock_actions, cfg, explanation_style, selected_tf)
+        if selected_module == '🏦 台股三大法人獨立選股策略':
+            render_institutional()
+        if selected_module == '📊 當日全市場三大法人佔股本比 Top 10':
+            render_rankings(_render_stock_actions)

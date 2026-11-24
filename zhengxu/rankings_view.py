@@ -42,46 +42,49 @@ def render_rankings(_render_stock_actions):
             investor_tabs = st.tabs(['外資', '投信', '自營商'])
             for investor, investor_tab in zip(('外資', '投信', '自營商'), investor_tabs):
                 with investor_tab:
-                    sort_specs = institutional_top10_sort_specs(investor)
-                    ranking_cols = st.columns(2)
-                    for index, (column, ascending, title) in enumerate(sort_specs):
-                        ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
-                        show = ranked[['股票代碼', '股票名稱', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
-                        show_display = show.copy()
-                        show_display['佔股本比(%)'] = show_display['佔股本比(%)'].apply(
-                            lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
-                        )
-                        with ranking_cols[index % 2]:
-                            st.markdown(f"**{title} Top 10**")
-                            table_key = f"inst_top10_{investor}_{index}"
-                            top_event = st.dataframe(
-                                show_display,
-                                use_container_width=True,
-                                hide_index=True,
-                                key=table_key,
-                                on_select="rerun",
-                                selection_mode="single-row",
+                    ranks_tab, streak_tab = st.tabs(("當日榜單", "連續上榜"))
+                    with ranks_tab:
+                        sort_specs = institutional_top10_sort_specs(investor)
+                        ranking_cols = st.columns(2)
+                        for index, (column, ascending, title) in enumerate(sort_specs):
+                            ranked = ranking_data.dropna(subset=[column]).sort_values(column, ascending=ascending).head(10)
+                            show = ranked[['股票代碼', '股票名稱', '市場', '資料日期', column]].rename(columns={column:'佔股本比(%)'})
+                            show_display = show.copy()
+                            show_display['佔股本比(%)'] = show_display['佔股本比(%)'].apply(
+                                lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
                             )
-                            top_rows = list(top_event.selection.rows)
-                            if top_rows:
-                                chosen = show.iloc[int(top_rows[0])]
-                                ticker_suffix = ".TWO" if str(chosen["市場"]) == "上櫃" else ".TW"
-                                selected_ticker = f"{chosen['股票代碼']}{ticker_suffix}"
-                                action_key = f"inst_action_{investor}_{index}"
-                                _render_stock_actions(selected_ticker, str(chosen["股票名稱"]), action_key)
-                    st.markdown("#### 🔁 連續出現在 Top 10 的個股")
-                    st.caption(
-                        "同一法人、同一榜單類型，連續出現在本系統已保存的不同全市場資料快照中才列出。"
-                        "只計已記錄快照，不代表每個交易日都完整記錄；本功能啟用前的日期不會補造。"
-                    )
-                    streak_rows = load_institutional_top10_consecutive_appearances(investor, top10_snapshot_date)
-                    if streak_rows.empty:
-                        st.info("目前尚無連續 2 次已記錄快照仍上榜的個股；系統會從本次及後續成功載入的完整資料逐步累積。")
-                    else:
-                        streak_display = streak_rows.copy()
-                        streak_display['佔股本比(%)'] = streak_display['佔股本比(%)'].map(
-                            lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
+                            with ranking_cols[index % 2]:
+                                st.markdown(f"**{title} Top 10**")
+                                table_key = f"inst_top10_{investor}_{index}"
+                                top_event = st.dataframe(
+                                    show_display,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    key=table_key,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                )
+                                top_rows = list(top_event.selection.rows)
+                                if top_rows:
+                                    chosen = show.iloc[int(top_rows[0])]
+                                    ticker_suffix = ".TWO" if str(chosen["市場"]) == "上櫃" else ".TW"
+                                    selected_ticker = f"{chosen['股票代碼']}{ticker_suffix}"
+                                    action_key = f"inst_action_{investor}_{index}"
+                                    _render_stock_actions(selected_ticker, str(chosen["股票名稱"]), action_key)
+                    with streak_tab:
+                        st.markdown("#### 🔁 連續出現在 Top 10 的個股")
+                        st.caption(
+                            "同一法人、同一榜單類型，連續出現在本系統已保存的不同全市場資料快照中才列出。"
+                            "只計已記錄快照，不代表每個交易日都完整記錄；本功能啟用前的日期不會補造。"
                         )
-                        st.dataframe(streak_display, use_container_width=True, hide_index=True)
+                        streak_rows = load_institutional_top10_consecutive_appearances(investor, top10_snapshot_date)
+                        if streak_rows.empty:
+                            st.info("目前尚無連續 2 次已記錄快照仍上榜的個股；系統會從本次及後續成功載入的完整資料逐步累積。")
+                        else:
+                            streak_display = streak_rows.copy()
+                            streak_display['佔股本比(%)'] = streak_display['佔股本比(%)'].map(
+                                lambda value: f"{value:+.4f}%" if pd.notna(value) else "—"
+                            )
+                            st.dataframe(streak_display, use_container_width=True, hide_index=True)
             if market_errors:
                 st.caption("部分官方來源未能連線：" + "；".join(market_errors[:2]))

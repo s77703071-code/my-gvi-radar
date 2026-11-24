@@ -1054,49 +1054,52 @@ def _render_simulation(st, snapshots: list[dict[str, Any]], controls: dict[str, 
 def render_dividend_tab(st, default_ticker: str = "2330.TW", strategy_scores: Optional[Mapping[str, Any]] = None) -> None:
     """Render an additive, independent dividend strategy panel."""
     st.markdown("### 💸 配息複利投資策略（獨立模組）")
-    st.caption("配息評分獨立計算，不讀寫原系統的 GVI、動能、QARP 或綜合評分。殖利率用近期實際股利對照目前價格，發放率則檢查盈餘被用於配息的程度；總報酬同時考慮價格變化與股息再投入。")
-    st.info("🧠 **市場心理重點｜別只追求高殖利率**\n\n現金入帳容易讓人覺得投資有回報，但股價下跌或公司削減股利，可能抵銷甚至超過股息。高殖利率也可能是股價先大跌造成；先確認盈餘、現金流與配息紀錄，再看含息後的整體資產變化。")
-    if st.session_state.get("dividend_strategy_mode") == "只使用原有策略":
-        st.session_state["dividend_strategy_mode"] = "只使用配息策略"
-    mode = st.radio("策略檢視模式", ["只使用配息策略", "比較策略"], index=0, horizontal=True, key="dividend_strategy_mode")
-    raw = st.text_input("配息策略觀察名單（最多 50 檔，逗號分隔）", value=default_ticker, key="dividend_universe")
-    tickers = list(dict.fromkeys(x.strip().upper() for x in raw.split(",") if x.strip()))[:50]
-    if not tickers:
-        st.warning("請輸入至少一個股票代碼。")
-        return
-    st.markdown("#### 配息品質條件（各項可獨立啟用）")
-    columns = st.columns(4)
-    toggles = {}
-    for i, (key, title) in enumerate((("dividend_history", "五年現金股利"), ("eps_stability", "EPS 穩定"), ("cash_flow", "營業／自由現金流"),
-                                     ("payout", "股利發放率"), ("safety", "負債與利息安全"), ("yield_valuation", "殖利率與估值"), ("anomaly", "異常高殖利率排除"))):
-        with columns[i % 4]:
-            toggles[key] = st.checkbox(title, value=bool(DEFAULT_RULES[key]), key=f"dividend_rule_{key}")
-    a, b, c = st.columns(3)
-    with a:
-        min_dividend_years = st.number_input("五年中至少配息年數", 1, 5, 5, key="dividend_min_years")
-        min_positive_eps_years = st.number_input("EPS 正值年數至少", 1, 5, 4, key="dividend_min_eps")
-    with b:
-        min_cash_years = st.number_input("現金流正值年數至少", 1, 5, 3, key="dividend_min_cash")
-        max_payout = st.number_input("最高股利發放率 (%)", 10.0, 200.0, 80.0, step=5.0, key="dividend_max_payout") / 100
-    with c:
-        max_debt = st.number_input("最高負債／權益", 0.1, 10.0, 1.5, step=0.1, key="dividend_max_debt")
-        max_yield = st.number_input("殖利率參考上限 (%)", 1.0, 50.0, 12.0, step=1.0, key="dividend_max_yield")
-    rules = {**toggles, "min_dividend_years": min_dividend_years, "min_positive_eps_years": min_positive_eps_years,
-             "min_positive_cashflow_years": min_cash_years, "max_payout_ratio": max_payout,
-             "max_debt_equity": max_debt, "max_yield_pct": max_yield}
-    snapshots = _render_screen(st, tickers, rules)
-    st.markdown("#### 股息再投入模擬與歷史績效")
-    only_passed = st.checkbox("回測只採用通過所有啟用條件的股票", value=True, key="dividend_sim_passed_only")
-    controls = _render_controls(st)
-    taiwan_flags = [symbol.endswith((".TW", ".TWO")) for symbol in tickers]
-    if any(taiwan_flags) and not all(taiwan_flags):
-        st.warning("台股與美股幣別不同，請分開執行品質篩選與回測，避免把新台幣與美元資產直接相加。")
-        return
-    all_taiwan = all(taiwan_flags)
-    all_twse_listed = all(symbol.endswith(".TW") and not symbol.endswith(".TWO") for symbol in tickers)
-    benchmark_symbol = "TWSE_TAIEX_TR" if all_twse_listed else "0050.TW" if all_taiwan else "SPY"
-    _render_simulation(st, snapshots, controls, include_benchmark=mode == "比較策略", benchmark_symbol=benchmark_symbol,
-                       only_passed=only_passed)
-    if mode == "比較策略":
-        benchmark_scope = "TWSE 上市市場官方含息報酬指數；官方資料失效時退回 0050" if benchmark_symbol == "TWSE_TAIEX_TR" else "0050 臺灣50大型股含息代理" if benchmark_symbol == "0050.TW" else "SPY S&P 500 含息代理"
-        st.info(f"比較模式以相同投入額比較配息組合與 {benchmark_symbol}（{benchmark_scope}）。舊系統未保存逐日歷史成分，故無法重建舊策略的歷史績效。")
+    quality_tab, simulate_tab = st.tabs(("配息品質", "複利回測"))
+    with quality_tab:
+        st.caption("配息評分獨立計算，不讀寫原系統的 GVI、動能、QARP 或綜合評分。殖利率用近期實際股利對照目前價格，發放率則檢查盈餘被用於配息的程度；總報酬同時考慮價格變化與股息再投入。")
+        st.info("🧠 **市場心理重點｜別只追求高殖利率**\n\n現金入帳容易讓人覺得投資有回報，但股價下跌或公司削減股利，可能抵銷甚至超過股息。高殖利率也可能是股價先大跌造成；先確認盈餘、現金流與配息紀錄，再看含息後的整體資產變化。")
+        if st.session_state.get("dividend_strategy_mode") == "只使用原有策略":
+            st.session_state["dividend_strategy_mode"] = "只使用配息策略"
+        mode = st.radio("策略檢視模式", ["只使用配息策略", "比較策略"], index=0, horizontal=True, key="dividend_strategy_mode")
+        raw = st.text_input("配息策略觀察名單（最多 50 檔，逗號分隔）", value=default_ticker, key="dividend_universe")
+        tickers = list(dict.fromkeys(x.strip().upper() for x in raw.split(",") if x.strip()))[:50]
+        if not tickers:
+            st.warning("請輸入至少一個股票代碼。")
+            return
+        st.markdown("#### 配息品質條件（各項可獨立啟用）")
+        columns = st.columns(4)
+        toggles = {}
+        for i, (key, title) in enumerate((("dividend_history", "五年現金股利"), ("eps_stability", "EPS 穩定"), ("cash_flow", "營業／自由現金流"),
+                                         ("payout", "股利發放率"), ("safety", "負債與利息安全"), ("yield_valuation", "殖利率與估值"), ("anomaly", "異常高殖利率排除"))):
+            with columns[i % 4]:
+                toggles[key] = st.checkbox(title, value=bool(DEFAULT_RULES[key]), key=f"dividend_rule_{key}")
+        a, b, c = st.columns(3)
+        with a:
+            min_dividend_years = st.number_input("五年中至少配息年數", 1, 5, 5, key="dividend_min_years")
+            min_positive_eps_years = st.number_input("EPS 正值年數至少", 1, 5, 4, key="dividend_min_eps")
+        with b:
+            min_cash_years = st.number_input("現金流正值年數至少", 1, 5, 3, key="dividend_min_cash")
+            max_payout = st.number_input("最高股利發放率 (%)", 10.0, 200.0, 80.0, step=5.0, key="dividend_max_payout") / 100
+        with c:
+            max_debt = st.number_input("最高負債／權益", 0.1, 10.0, 1.5, step=0.1, key="dividend_max_debt")
+            max_yield = st.number_input("殖利率參考上限 (%)", 1.0, 50.0, 12.0, step=1.0, key="dividend_max_yield")
+        rules = {**toggles, "min_dividend_years": min_dividend_years, "min_positive_eps_years": min_positive_eps_years,
+                 "min_positive_cashflow_years": min_cash_years, "max_payout_ratio": max_payout,
+                 "max_debt_equity": max_debt, "max_yield_pct": max_yield}
+        snapshots = _render_screen(st, tickers, rules)
+    with simulate_tab:
+        st.markdown("#### 股息再投入模擬與歷史績效")
+        only_passed = st.checkbox("回測只採用通過所有啟用條件的股票", value=True, key="dividend_sim_passed_only")
+        controls = _render_controls(st)
+        taiwan_flags = [symbol.endswith((".TW", ".TWO")) for symbol in tickers]
+        if any(taiwan_flags) and not all(taiwan_flags):
+            st.warning("台股與美股幣別不同，請分開執行品質篩選與回測，避免把新台幣與美元資產直接相加。")
+            return
+        all_taiwan = all(taiwan_flags)
+        all_twse_listed = all(symbol.endswith(".TW") and not symbol.endswith(".TWO") for symbol in tickers)
+        benchmark_symbol = "TWSE_TAIEX_TR" if all_twse_listed else "0050.TW" if all_taiwan else "SPY"
+        _render_simulation(st, snapshots, controls, include_benchmark=mode == "比較策略", benchmark_symbol=benchmark_symbol,
+                           only_passed=only_passed)
+        if mode == "比較策略":
+            benchmark_scope = "TWSE 上市市場官方含息報酬指數；官方資料失效時退回 0050" if benchmark_symbol == "TWSE_TAIEX_TR" else "0050 臺灣50大型股含息代理" if benchmark_symbol == "0050.TW" else "SPY S&P 500 含息代理"
+            st.info(f"比較模式以相同投入額比較配息組合與 {benchmark_symbol}（{benchmark_scope}）。舊系統未保存逐日歷史成分，故無法重建舊策略的歷史績效。")
