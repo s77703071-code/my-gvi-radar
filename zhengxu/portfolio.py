@@ -528,26 +528,30 @@ def _validate_pilot_income_rows(rows):
         raise ValueError("Invalid income history")
 
 
+def _pilot_activity_mode(account, kind, correction_enabled):
+    options = ("明細", "新增", "更正") if correction_enabled else ("明細", "新增")
+    return st.radio("操作", options, horizontal=True,
+                    key=f"portfolio_cloud_{account['id']}_{kind}_mode", label_visibility="collapsed")
+
+
 def _render_pilot_income(account):
     st.markdown("#### 股息與利息")
-    owner = account["supabase_user_id"]
-    state = st.session_state.get(PILOT_INCOME_STATE)
-    if state is None or state["owner"] != owner:
-        state = {"owner": owner, "form_id": uuid4().hex}
-        st.session_state[PILOT_INCOME_STATE] = state
-    if state.pop("saved", False):
-        st.success("投資收入已儲存。")
-    if "pending" in state:
-        st.warning("尚未確認收入儲存結果。請重試同一筆操作。")
-        if st.button("重試儲存投資收入"):
-            _submit_pilot_income(account, state)
+    correction_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1"
+    mode = _pilot_activity_mode(account, "income", correction_enabled)
+    if mode == "新增":
+        _render_pilot_income_form(account)
+        return
 
     history = None
-    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1":
+    if correction_enabled:
         try:
             rows, history = _read_pilot_correction_history(account, "income", _validate_pilot_income_rows)
         except (RuntimeError, ValueError, TypeError, requests.RequestException):
             st.warning("暫時無法讀取收入更正歷史。")
+    if mode == "更正":
+        if history is not None:
+            _render_pilot_correction(account, rows, history, income=True)
+        return
     if history is None:
         try:
             response = _portfolio_pilot_request(account, "read_income_entries")
@@ -574,8 +578,19 @@ def _render_pilot_income(account):
     else:
         st.info("尚無已儲存的股息或利息明細。")
 
-    if history is not None:
-        _render_pilot_correction(account, rows, history, income=True)
+
+def _render_pilot_income_form(account):
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(PILOT_INCOME_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "form_id": uuid4().hex}
+        st.session_state[PILOT_INCOME_STATE] = state
+    if state.pop("saved", False):
+        st.success("投資收入已儲存。")
+    if "pending" in state:
+        st.warning("尚未確認收入儲存結果。請重試同一筆操作。")
+        if st.button("重試儲存投資收入"):
+            _submit_pilot_income(account, state)
     if "pending" in state:
         return
     with st.form("pilot_income_" + state["form_id"], clear_on_submit=False):
@@ -839,24 +854,22 @@ def _render_pilot_correction(account, rows, history, *, income=False):
 
 def _render_pilot_trade(account):
     st.markdown("#### 買賣成交明細")
-    owner = account["supabase_user_id"]
-    state = st.session_state.get(PILOT_TRADE_STATE)
-    if state is None or state["owner"] != owner:
-        state = {"owner": owner, "form_id": uuid4().hex}
-        st.session_state[PILOT_TRADE_STATE] = state
-    if state.pop("saved", False):
-        st.success("買賣成交已儲存。")
-    if "pending" in state:
-        st.warning("尚未確認成交儲存結果。請重試同一筆操作。")
-        if st.button("重試儲存買賣成交"):
-            _submit_pilot_trade(account, state)
+    correction_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1"
+    mode = _pilot_activity_mode(account, "trade", correction_enabled)
+    if mode == "新增":
+        _render_pilot_trade_form(account)
+        return
 
     history = None
-    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1":
+    if correction_enabled:
         try:
             rows, history = _read_pilot_correction_history(account, "trade", _validate_pilot_trade_rows)
         except (RuntimeError, ValueError, TypeError, requests.RequestException):
             st.warning("暫時無法讀取成交更正歷史。")
+    if mode == "更正":
+        if history is not None:
+            _render_pilot_correction(account, rows, history)
+        return
     if history is None:
         try:
             rows = _read_pilot_trade_entries(account)
@@ -875,8 +888,19 @@ def _render_pilot_trade(account):
     else:
         st.info("尚無已儲存的買賣成交明細。")
 
-    if history is not None:
-        _render_pilot_correction(account, rows, history)
+
+def _render_pilot_trade_form(account):
+    owner = account["supabase_user_id"]
+    state = st.session_state.get(PILOT_TRADE_STATE)
+    if state is None or state["owner"] != owner:
+        state = {"owner": owner, "form_id": uuid4().hex}
+        st.session_state[PILOT_TRADE_STATE] = state
+    if state.pop("saved", False):
+        st.success("買賣成交已儲存。")
+    if "pending" in state:
+        st.warning("尚未確認成交儲存結果。請重試同一筆操作。")
+        if st.button("重試儲存買賣成交"):
+            _submit_pilot_trade(account, state)
     if "pending" in state:
         return
     st.caption("記錄已成交的買賣供查閱與對帳。目前登記後持倉、現金和快照維持原值。")
@@ -897,45 +921,71 @@ def _render_portfolio_pilot(account, *, open_chart):
         st.error("暫時無法讀取雲端投資組合。請稍後再試，或切回原有投資組合。")
         return
 
-    settings = data["settings"]
+    scope = f"portfolio_cloud_{account['id']}"
+    sections = ["持倉", "歷史快照"]
+    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1":
+        sections.append("股息與利息")
+    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
+        sections.append("買賣成交")
+    sections.append("配置")
+    section = st.radio("雲端投資組合功能", sections, horizontal=True, key=f"{scope}_section")
+
+    if section == "持倉":
+        _render_pilot_holdings(account, data, scope=scope, open_chart=open_chart)
+    elif section == "歷史快照":
+        st.markdown("#### 歷史快照")
+        if os.environ.get("GVI_PORTFOLIO_PILOT_SNAPSHOT") == "1":
+            _render_pilot_snapshot(account, data)
+        if data["snapshots"]:
+            labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
+            st.dataframe([{label: row[key] for key, label in labels.items()}
+                          for row in data["snapshots"]], hide_index=True)
+        else:
+            st.info("目前沒有歷史快照。")
+    elif section == "股息與利息":
+        _render_pilot_income(account)
+    elif section == "買賣成交":
+        _render_pilot_trade(account)
+    else:
+        if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
+            _render_pilot_settings_form(account, data)
+        elif data["settings"] is not None:
+            st.markdown("#### 配置與風險規則")
+            st.dataframe([{"設定": label, "數值": data["settings"][key]}
+                          for key, label in PILOT_SETTING_LABELS.items()], hide_index=True)
+        else:
+            st.info("目前沒有雲端配置。")
+
+
+def _render_pilot_holdings(account, data, *, scope, open_chart):
+    actions = {
+        label: renderer
+        for label, flag, renderer in (
+            ("新增持倉", "ADD", _render_pilot_position_form),
+            ("修改持倉", "EDIT", _render_pilot_position_edit),
+            ("刪除持倉", "DELETE", _render_pilot_position_delete),
+        )
+        if os.environ.get(f"GVI_PORTFOLIO_PILOT_POSITION_{flag}") == "1"
+    }
+    if actions:
+        mode = st.radio("持倉操作", ("查看持倉", *actions), horizontal=True, key=f"{scope}_holdings_mode")
+        if mode in actions:
+            actions[mode](account, data)
+            return
+
     positions = data["positions"]
-    snapshots = data["snapshots"]
     render_portfolio_research(positions, scope=f"cloud_{account['id']}",
                               source="雲端投資組合", open_chart=open_chart)
     if data["revision"] == 0:
         st.info("目前沒有雲端投資組合資料。")
-    if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
-        _render_pilot_settings_form(account, data)
-    elif settings is not None:
-        st.markdown("#### 配置與風險規則")
-        st.dataframe([{"設定": label, "數值": settings[key]} for key, label in PILOT_SETTING_LABELS.items()],
-                     hide_index=True)
-    if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_ADD") == "1":
-        _render_pilot_position_form(account, data)
     if positions:
         st.markdown("#### 持倉")
         labels = {key: label for key, label in PILOT_POSITION_COLUMNS.items() if key != "legacy_id"}
         st.dataframe([{label: row[key] for key, label in labels.items()} for row in positions], hide_index=True)
-    if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_EDIT") == "1":
-        _render_pilot_position_edit(account, data)
-    if os.environ.get("GVI_PORTFOLIO_PILOT_POSITION_DELETE") == "1":
-        _render_pilot_position_delete(account, data)
-    snapshot_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_SNAPSHOT") == "1"
-    if snapshots or snapshot_enabled:
-        st.markdown("#### 歷史快照")
-    if snapshot_enabled:
-        _render_pilot_snapshot(account, data)
-    if snapshots:
-        labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
-        st.dataframe([{label: row[key] for key, label in labels.items()} for row in snapshots], hide_index=True)
     if st.button("準備匯出我的投資組合", key="portfolio_prepare_export"):
         filename, content = _encode_portfolio_export(
-            settings or {},
+            data["settings"] or {},
             [{key: value for key, value in row.items() if key != "legacy_id"} for row in positions],
-            [{key: value for key, value in row.items() if key != "legacy_id"} for row in snapshots],
+            [{key: value for key, value in row.items() if key != "legacy_id"} for row in data["snapshots"]],
         )
         _render_portfolio_export_link(filename, content)
-    if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1":
-        _render_pilot_income(account)
-    if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
-        _render_pilot_trade(account)
