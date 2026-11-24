@@ -105,6 +105,11 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         unsafe_allow_html=True,
     )
 
+    if selected_module == "🧭 投資組合理財":
+        _render_market_psychology_guide(st, selected_module, explanation_style)
+        render_legacy_portfolio(_render_stock_actions, auth_user)
+        return
+
     chart_page = selected_module == "📊 彩色 K 線圖與成交量"
     radar_page = selected_module == "🚀 華爾街機構級三核心策略雷達"
     show_market_overview = chart_page or radar_page or selected_module == "📦 籌碼流向參考"
@@ -231,5 +236,3 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         render_institutional()
     if selected_module == '📊 當日全市場三大法人佔股本比 Top 10':
         render_rankings(_render_stock_actions)
-    if selected_module == '🧭 投資組合理財':
-        render_legacy_portfolio(_render_stock_actions, auth_user)

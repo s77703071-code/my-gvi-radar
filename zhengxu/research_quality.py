@@ -5,6 +5,8 @@ from math import isfinite
 from numbers import Real
 import re
 
+from .quote_contract import QuoteKind, QuoteStatus
+
 
 @dataclass(frozen=True)
 class RadarEvidence:
@@ -19,9 +21,18 @@ def _plain_markdown(value):
     return re.sub(r"([\\`*_{}\[\]<>#!|])", r"\\\1", " ".join(str(value).split()))
 
 
-def build_research_evidence(*, price, quote_time, timeframe, radar_evidence, risk_findings):
+def build_research_evidence(*, price, quote_time, timeframe, radar_evidence, risk_findings, quote=None):
     lines = ["### 程式可核對的研究資料"]
-    if isinstance(price, Real) and isfinite(price) and price > 0 and quote_time:
+    if quote is not None and quote.status is not QuoteStatus.UNAVAILABLE:
+        observed = quote.as_of.isoformat()
+        label = ("正式收盤價" if quote.kind is QuoteKind.OFFICIAL_CLOSE
+                 else f"{_plain_markdown(timeframe)} K 棒")
+        lines.append(f"- 研究採用價格 {_plain_markdown(f'{quote.price:,.2f}')}，來源為 "
+                     f"{_plain_markdown(quote.source)} {label}，"
+                     f"行情時間 {_plain_markdown(observed)}。")
+        if quote.status is QuoteStatus.LAST_VALID:
+            lines.append("- 本次未取得更新行情，研究沿用最後有效資料。")
+    elif quote is None and isinstance(price, Real) and isfinite(price) and price > 0 and quote_time:
         lines.append(f"- 研究採用價格 {_plain_markdown(f'{price:,.2f}')}，來源為 Yahoo Finance "
                      f"{_plain_markdown(timeframe)} K 棒，行情時間 {_plain_markdown(quote_time)}。")
     else:
