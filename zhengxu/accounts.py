@@ -17,6 +17,7 @@ from .research_ai import (
     get_gmail_secret_values,
     send_gmail_report,
 )
+from .foundation import AccountScope
 from .storage import (
     DB_FILE,
 )
@@ -182,8 +183,12 @@ def _dual_grid_public_api_key(key):
 
 
 def _dual_grid_permission_request(account, route, payload=None):
+    try:
+        scope = AccountScope.from_session(account)
+    except ValueError:
+        return 401, None
     token = account.get("access_token")
-    if not token:
+    if scope.cloud_id is None or not isinstance(token, str) or not token.strip():
         return 401, None
     try:
         url, key = _supabase_auth_config()

@@ -28,6 +28,14 @@ class MarketQuote:
     currency: str | None = None
     retrieved_at: datetime | None = None
 
+    @property
+    def market(self):
+        if self.symbol.endswith(".TW"):
+            return "TWSE"
+        if self.symbol.endswith(".TWO"):
+            return "TPEx"
+        return None
+
     def __post_init__(self):
         if self.status is QuoteStatus.UNAVAILABLE:
             if self.price is not None or self.as_of is not None or self.retrieved_at is not None:

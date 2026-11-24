@@ -18,3 +18,5 @@ MODULE_GROUPS = MappingProxyType({
     "📊 當日全市場三大法人佔股本比 Top 10": "🏦 選股與市場掃描",
     "🧭 投資組合理財": "🧭 投資組合",
 })
+
+DUAL_GRID_MODULE = "🧠 智慧型雙策略網格系統"

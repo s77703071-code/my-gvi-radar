@@ -225,28 +225,26 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
         )
 
     with main_view:
-        try:
-            if df_chart is None or df_chart.empty:
-                if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
-                    st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
-            else:
-                if chart_area is not None:
-                    with chart_area:
-                        render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
-                if selected_module == '💸 配息複利策略':
-                    render_dividend_tab(st, default_ticker=selected_stock)
-                if selected_module == '📦 籌碼流向參考':
-                    render_chip_flow(auth_user, df_chart, selected_stock, selected_tf)
-                if selected_module == '🧠 智慧型雙策略網格系統':
-                    render_dual_grid(auth_user, selected_stock)
-                if selected_module == '🤖 網格自動生成器':
-                    render_grid(price_val, selected_stock)
-                if selected_module == '⚖️ 網格／持有／定期定額比較':
-                    render_comparison(c_name, date_strings, df_chart, selected_tf, is_tw_stock=is_tw_stock)
-                if selected_module == '🧪 技術指標自訂策略回測':
-                    render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metrics, is_tw_stock, selected_stock, selected_tf)
-        except Exception as ex_tab:
-            st.error(f"❌ 畫面渲染異常：{ex_tab}")
+        if df_chart is None or df_chart.empty:
+            if selected_module in ["📊 彩色 K 線圖與成交量", "📦 籌碼流向參考", "🤖 網格自動生成器", "⚖️ 網格／持有／定期定額比較", "🧪 技術指標自訂策略回測", "💸 配息複利策略", "🧠 智慧型雙策略網格系統"]:
+                st.error(f"❌ 無此標的或無法取得數據：【{selected_stock}】，請檢查股票代碼是否正確。")
+        else:
+            if chart_area is not None:
+                with chart_area:
+                    render_chart(auth_user, c_name, change_pct, date_strings, df_chart, personal_ma_configs, selected_chart_indicators, selected_chart_overlays, selected_stock, selected_tf, vol_ratio)
+            if selected_module == '💸 配息複利策略':
+                render_dividend_tab(st, default_ticker=selected_stock)
+            if selected_module == '📦 籌碼流向參考':
+                render_chip_flow(auth_user, df_chart, selected_stock, selected_tf)
+            if selected_module == '🧠 智慧型雙策略網格系統':
+                render_dual_grid(auth_user, selected_stock)
+            if selected_module == '🤖 網格自動生成器':
+                render_grid(price_val, selected_stock)
+            if selected_module == '⚖️ 網格／持有／定期定額比較':
+                render_comparison(c_name, date_strings, df_chart, selected_tf, is_tw_stock=is_tw_stock)
+            if selected_module == '🧪 技術指標自訂策略回測':
+                render_backtest(c_name, cfg, df_chart, explanation_style, grid_advice_metrics, is_tw_stock, selected_stock, selected_tf)
+
 
         if selected_module == '🚀 華爾街機構級三核心策略雷達':
             render_radar(_render_stock_actions, cfg, explanation_style, selected_tf)

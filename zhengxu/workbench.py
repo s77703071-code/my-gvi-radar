@@ -5,7 +5,6 @@ from contextlib import closing
 from pathlib import Path
 from plotly.subplots import make_subplots
 import numpy as np
-import os
 import pandas as pd
 import plotly.graph_objects as go
 import re
@@ -15,6 +14,7 @@ import streamlit as st
 
 from .asset_state import build_asset_state
 from .chart_view import render_chart_workspace
+from .foundation import ACTIVITY_KEY, AccountScope, failure_message, module_events, feature_enabled
 from .market_data import (
     WORKBENCH_INDEXES,
     _market_index_history,
@@ -44,6 +44,7 @@ from .storage import (
 
 
 def _logout_account():
+    st.session_state.pop(ACTIVITY_KEY, None)
     st.session_state.pop(PILOT_SETTINGS_STATE, None)
     st.session_state.pop(PILOT_POSITION_STATE, None)
     st.session_state.pop(PILOT_POSITION_EDIT_STATE, None)
@@ -209,8 +210,8 @@ def _render_workbench_portfolio_summary(account, cloud):
             with closing(sqlite3.connect(uri, uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
                 positions = _read_legacy_positions(conn, int(account["id"]))
-    except (KeyError, ValueError, OverflowError, RuntimeError, sqlite3.Error, requests.RequestException):
-        st.warning("暫時無法讀取投資組合。")
+    except (KeyError, ValueError, OverflowError, RuntimeError, sqlite3.Error, requests.RequestException) as error:
+        st.warning(failure_message(error, "暫時無法讀取投資組合。"))
         return
     if not positions:
         st.info("目前尚無持倉。")
@@ -237,8 +238,8 @@ def _render_workbench_recent_trades(account):
     st.subheader("最近買賣成交")
     try:
         rows = _read_pilot_trade_entries(account)
-    except (RuntimeError, ValueError, TypeError, requests.RequestException):
-        st.warning("暫時無法讀取最近成交。")
+    except (RuntimeError, ValueError, TypeError, requests.RequestException) as error:
+        st.warning(failure_message(error, "暫時無法讀取最近成交。"))
         return
     if not rows:
         st.info("尚無買賣成交紀錄。")
@@ -280,6 +281,20 @@ def _render_workbench_research():
         st.info("本次登入尚無回測紀錄。")
     st.button("開啟技術指標回測", key="workbench_backtest",
               on_click=_open_workbench_module, args=("🧪 技術指標自訂策略回測",))
+
+
+def _render_module_activity(account):
+    events = module_events(st.session_state, AccountScope.from_session(account))
+    st.caption("本次登入的模組切換紀錄，登出後清除。")
+    if not events:
+        st.info("本次登入還沒有模組操作紀錄。")
+        return
+    st.dataframe([{
+        "時間（台北）": pd.Timestamp(item.occurred_at).tz_convert("Asia/Taipei").strftime("%H:%M:%S"),
+        "原畫面": item.source or "—",
+        "開啟畫面": item.target,
+        "狀態": item.status,
+    } for item in events], hide_index=True, width="stretch")
 
 
 def _render_investment_workbench(account, explanation_style):
@@ -371,10 +386,11 @@ def _render_investment_workbench(account, explanation_style):
         with st.container(key="workbench_hero"):
             st.title("投資工作台")
             st.caption("正序 · 投資，從理解開始")
-        show_trades = cloud and os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1"
+        show_trades = cloud and feature_enabled("GVI_PORTFOLIO_PILOT_TRADE")
         labels = ["總覽", "自選股與回測"]
         if show_trades:
             labels.append("最近成交")
+        labels.append("本次操作紀錄")
         pages = st.tabs(labels)
         with pages[0]:
             with st.container(border=True, key="workbench_card_assets"):
@@ -397,3 +413,5 @@ def _render_investment_workbench(account, explanation_style):
         if show_trades:
             with pages[2], st.container(border=True, key="workbench_card_trades"):
                 _render_workbench_recent_trades(account)
+        with pages[-1]:
+            _render_module_activity(account)

@@ -1,11 +1,11 @@
 """Legacy portfolio settings, holdings and allocation workflows."""
 
 import numpy as np
-import os
 import pandas as pd
 import sqlite3
 import streamlit as st
 
+from .foundation import feature_enabled
 from .portfolio import (
     _is_portfolio_pilot,
     _render_portfolio_export_link,
@@ -22,12 +22,12 @@ def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
     st.subheader("🧭 投資組合理財")
     st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
     if _is_portfolio_pilot(auth_user):
-        portfolio_enabled = any(os.environ.get(flag) == "1" for flag in (
+        portfolio_enabled = any(feature_enabled(flag) for flag in (
             "GVI_PORTFOLIO_PILOT_POSITION_ADD", "GVI_PORTFOLIO_PILOT_POSITION_EDIT",
             "GVI_PORTFOLIO_PILOT_POSITION_DELETE", "GVI_PORTFOLIO_PILOT_SNAPSHOT",
             "GVI_PORTFOLIO_PILOT_INCOME", "GVI_PORTFOLIO_PILOT_TRADE"))
         cloud_label = ("雲端投資組合試行" if portfolio_enabled
-                       else "雲端配置試行" if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1"
+                       else "雲端配置試行" if feature_enabled("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE")
                        else "雲端唯讀試行")
         source = st.radio(
             "投資組合來源", ("原有投資組合", cloud_label), horizontal=True,
@@ -35,7 +35,7 @@ def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
         )
         if source == cloud_label:
             _render_portfolio_pilot(auth_user, open_chart=open_chart)
-            st.stop()
+            return
 
     portfolio_user_id = int(auth_user["id"])
     holdings_view_tab, edit_tab, snapshots_tab, config_tab = st.tabs(("持倉", "新增與調整", "歷史快照", "配置"))

@@ -20,6 +20,7 @@ from .accounts import (
     _supabase_auth_config,
 )
 from .cash_reconciliation import render_cash_activity
+from .foundation import AccountScope, ServiceReadError, failure_message, feature_enabled
 from .portfolio_research import render_portfolio_research
 from .storage import (
     _encode_portfolio_export,
@@ -90,19 +91,19 @@ def _render_portfolio_export_link(filename, content, *,
 
 
 def _is_portfolio_pilot(account):
-    selected = os.environ.get("GVI_PORTFOLIO_PILOT_UID", "").strip()
-    if not selected:
-        return False
     try:
-        return UUID(selected) == UUID(account["supabase_user_id"])
-    except (KeyError, TypeError, ValueError, AttributeError):
+        scope = AccountScope.from_session(account)
+    except ValueError:
         return False
+    return scope.matches_cloud(os.environ.get("GVI_PORTFOLIO_PILOT_UID", "").strip())
 
 
 def _portfolio_pilot_request(account, route, payload=None):
     token = account.get("access_token")
-    if not token:
-        raise ValueError("Sign-in required")
+    if not isinstance(token, str) or not token.strip():
+        raise ServiceReadError(401)
+    if not _is_portfolio_pilot(account):
+        raise ServiceReadError(403)
     url, key = _supabase_auth_config()
     if url != DUAL_GRID_SUPABASE_URL or not _dual_grid_public_api_key(key):
         raise ValueError("Portfolio pilot configuration")
@@ -118,7 +119,7 @@ def _portfolio_pilot_request(account, route, payload=None):
 def _read_portfolio_pilot(account):
     response = _portfolio_pilot_request(account, "read_imported_portfolio")
     if response.status_code != 200:
-        raise RuntimeError("Portfolio pilot request failed")
+        raise ServiceReadError(response.status_code)
     data = response.json()
     if not isinstance(data, dict) or type(data.get("revision")) is not int or data["revision"] < 0:
         raise ValueError("Malformed portfolio data")
@@ -531,7 +532,9 @@ def _validate_pilot_income_rows(rows):
 
 def _read_pilot_income_entries(account):
     response = _portfolio_pilot_request(account, "read_income_entries")
-    rows = response.json() if response.status_code == 200 else None
+    if response.status_code != 200:
+        raise ServiceReadError(response.status_code)
+    rows = response.json()
     _validate_pilot_income_rows(rows)
     return rows
 
@@ -544,7 +547,7 @@ def _pilot_activity_mode(account, kind, correction_enabled):
 
 def _render_pilot_income(account):
     st.markdown("#### 股息與利息")
-    correction_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1"
+    correction_enabled = feature_enabled("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION")
     mode = _pilot_activity_mode(account, "income", correction_enabled)
     if mode == "新增":
         _render_pilot_income_form(account)
@@ -563,8 +566,8 @@ def _render_pilot_income(account):
     if history is None:
         try:
             rows = _read_pilot_income_entries(account)
-        except (RuntimeError, ValueError, TypeError, requests.RequestException):
-            st.error("暫時無法讀取投資收入明細。請稍後再試。")
+        except (RuntimeError, ValueError, TypeError, requests.RequestException) as error:
+            st.error(failure_message(error, "暫時無法讀取投資收入明細。請稍後再試。"))
             return
 
     if rows:
@@ -647,7 +650,9 @@ def _validate_pilot_trade_rows(rows):
 
 def _read_pilot_trade_entries(account):
     response = _portfolio_pilot_request(account, "read_trade_entries")
-    rows = response.json() if response.status_code == 200 else None
+    if response.status_code != 200:
+        raise ServiceReadError(response.status_code)
+    rows = response.json()
     _validate_pilot_trade_rows(rows)
     return rows
 
@@ -655,7 +660,9 @@ def _read_pilot_trade_entries(account):
 def _read_pilot_correction_history(account, kind, validate_rows):
     entries_key = f"{kind}_entries"
     response = _portfolio_pilot_request(account, f"read_{kind}_history")
-    history = response.json() if response.status_code == 200 else None
+    if response.status_code != 200:
+        raise ServiceReadError(response.status_code)
+    history = response.json()
     if not isinstance(history, dict) or history.keys() != {entries_key, "corrections"}:
         raise ValueError("Invalid version history")
     entries, corrections = history[entries_key], history["corrections"]
@@ -860,7 +867,7 @@ def _render_pilot_correction(account, rows, history, *, income=False):
 
 def _render_pilot_trade(account):
     st.markdown("#### 買賣成交明細")
-    correction_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1"
+    correction_enabled = feature_enabled("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION")
     mode = _pilot_activity_mode(account, "trade", correction_enabled)
     if mode == "新增":
         _render_pilot_trade_form(account)
@@ -879,8 +886,8 @@ def _render_pilot_trade(account):
     if history is None:
         try:
             rows = _read_pilot_trade_entries(account)
-        except (RuntimeError, ValueError, TypeError, requests.RequestException):
-            st.error("暫時無法讀取買賣成交明細。請稍後再試。")
+        except (RuntimeError, ValueError, TypeError, requests.RequestException) as error:
+            st.error(failure_message(error, "暫時無法讀取買賣成交明細。請稍後再試。"))
             return
 
     if rows:
@@ -922,11 +929,11 @@ def _render_pilot_trade_form(account):
 
 def _read_pilot_cash_activity(account):
     try:
-        if os.environ.get("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION") == "1":
+        if feature_enabled("GVI_PORTFOLIO_PILOT_TRADE_CORRECTION"):
             trades, _ = _read_pilot_correction_history(account, "trade", _validate_pilot_trade_rows)
         else:
             trades = _read_pilot_trade_entries(account)
-        if os.environ.get("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION") == "1":
+        if feature_enabled("GVI_PORTFOLIO_PILOT_INCOME_CORRECTION"):
             income, _ = _read_pilot_correction_history(account, "income", _validate_pilot_income_rows)
         else:
             income = _read_pilot_income_entries(account)
@@ -938,14 +945,14 @@ def _read_pilot_cash_activity(account):
 def _render_portfolio_pilot(account, *, open_chart):
     try:
         data = _read_portfolio_pilot(account)
-    except (KeyError, ValueError, OverflowError, RuntimeError, requests.RequestException):
-        st.error("暫時無法讀取雲端投資組合。請稍後再試，或切回原有投資組合。")
+    except (KeyError, ValueError, OverflowError, RuntimeError, requests.RequestException) as error:
+        st.error(failure_message(error, "暫時無法讀取雲端投資組合。請稍後再試，或切回原有投資組合。"))
         return
 
     scope = f"portfolio_cloud_{account['id']}"
     sections = ["持倉", "歷史快照"]
-    income_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_INCOME") == "1"
-    trade_enabled = os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1"
+    income_enabled = feature_enabled("GVI_PORTFOLIO_PILOT_INCOME")
+    trade_enabled = feature_enabled("GVI_PORTFOLIO_PILOT_TRADE")
     if income_enabled:
         sections.append("股息與利息")
     if trade_enabled:
@@ -959,7 +966,7 @@ def _render_portfolio_pilot(account, *, open_chart):
         _render_pilot_holdings(account, data, scope=scope, open_chart=open_chart)
     elif section == "歷史快照":
         st.markdown("#### 歷史快照")
-        if os.environ.get("GVI_PORTFOLIO_PILOT_SNAPSHOT") == "1":
+        if feature_enabled("GVI_PORTFOLIO_PILOT_SNAPSHOT"):
             _render_pilot_snapshot(account, data)
         if data["snapshots"]:
             labels = {**PILOT_SNAPSHOT_COLUMNS, "note": "備註"}
@@ -974,7 +981,7 @@ def _render_portfolio_pilot(account, *, open_chart):
     elif section == "成交與收入對帳":
         render_cash_activity(lambda: _read_pilot_cash_activity(account), scope=scope)
     else:
-        if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
+        if feature_enabled("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE"):
             _render_pilot_settings_form(account, data)
         elif data["settings"] is not None:
             st.markdown("#### 配置與風險規則")
@@ -992,7 +999,7 @@ def _render_pilot_holdings(account, data, *, scope, open_chart):
             ("修改持倉", "EDIT", _render_pilot_position_edit),
             ("刪除持倉", "DELETE", _render_pilot_position_delete),
         )
-        if os.environ.get(f"GVI_PORTFOLIO_PILOT_POSITION_{flag}") == "1"
+        if feature_enabled(f"GVI_PORTFOLIO_PILOT_POSITION_{flag}")
     }
     if actions:
         mode = st.radio("持倉操作", ("查看持倉", *actions), horizontal=True, key=f"{scope}_holdings_mode")

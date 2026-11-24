@@ -1,9 +1,10 @@
 """Dual-grid administration and scoped access controls."""
 
 from uuid import UUID
-import os
 import pandas as pd
 import streamlit as st
+
+from .foundation import ServiceReadError, failure_message, feature_enabled
 
 from .accounts import (
     _dual_grid_permission_request,
@@ -12,7 +13,7 @@ from .accounts import (
 
 def _require_dual_grid_access(account):
     """Stop the module before it can read data or run a strategy."""
-    if os.environ.get("GVI_DUAL_GRID_ACCESS") != "1":
+    if not feature_enabled("GVI_DUAL_GRID_ACCESS"):
         return
 
     status, access = _dual_grid_permission_request(account, "read_module_access")
@@ -29,7 +30,7 @@ def _require_dual_grid_access(account):
             message = ("雙策略網格目前暫停使用。" if not global_enabled
                        else "這個帳號目前無法使用雙策略網格。")
     elif status in (401, 403):
-        message = "登入狀態無法驗證，請重新登入後再試。"
+        message = failure_message(ServiceReadError(status), message)
 
     for key in ("dual_grid_analysis_results", "dual_grid_analysis_tickers", "dual_grid_backtest_result"):
         st.session_state.pop(key, None)
