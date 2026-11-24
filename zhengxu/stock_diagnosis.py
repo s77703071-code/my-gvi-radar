@@ -52,7 +52,8 @@ from .research_ai import (
 )
 from .research_quality import RadarEvidence, build_research_evidence, compose_research_report
 from .official_close import render_official_close
-from .chart_quotes import chart_time_label, load_chart_quote
+from .chart_quotes import chart_time_label, load_chart_market_quote
+from .quote_contract import QuoteStatus
 from .storage import (
     CACHE_TTL,
     DB_FILE,
@@ -106,11 +107,12 @@ def render_stock_diagnosis(
                 db_row = c.fetchone()
                 conn.close()
 
-            df_chart, quote_failed = load_chart_quote(selected_stock, cfg)
+            df_chart, quote = load_chart_market_quote(selected_stock, cfg)
             if df_chart is not None:
+                quote_failed = quote.status is QuoteStatus.LAST_VALID
                 if quote_failed:
-                    st.warning("Yahoo Finance 行情未更新，以下沿用此標的與週期最後有效資料。")
-                quote_caption = "Yahoo Finance · " + chart_time_label(df_chart.index[-1], cfg["i"], selected_stock)
+                    st.warning(f"{quote.source} 行情未更新，以下沿用此標的與週期最後有效資料。")
+                quote_caption = f"{quote.source} · " + chart_time_label(quote.as_of, cfg["i"], selected_stock)
                 st.caption(quote_caption)
                 risk_history = df_chart.copy(deep=False)
                 df_chart, chip_status_text, _ = calculate_chip_and_backtest(selected_stock, df_chart, selected_tf)
@@ -549,7 +551,7 @@ def render_stock_diagnosis(
                                                   if isinstance(quote_index, pd.Timestamp) and pd.notna(quote_index)
                                                   else None)
                                     evidence_summary = build_research_evidence(
-                                        price=price_val, quote_time=quote_time, timeframe=selected_tf,
+                                        price=price_val, quote_time=quote_time, timeframe=selected_tf, quote=quote,
                                         radar_evidence=[
                                             RadarEvidence(
                                                 strategy, ai_psychology["checks"][psychology_key_by_strategy[strategy]],
@@ -766,7 +768,7 @@ def render_stock_diagnosis(
                                         st.error(f"寄信失敗：{mail_error}")
                 st.markdown("---")
             else:
-                st.warning("Yahoo Finance 行情資料暫缺，這個標的與週期目前沒有可顯示的資料。")
+                st.warning(f"{quote.source} 行情資料暫缺，這個標的與週期目前沒有可顯示的資料。")
                 if show_radar_comparison:
                     _render_radar_risk(evaluate_radar_risk(
                         pd.DataFrame(), timeframe=selected_tf, cache_updated=db_row[6] if db_row else None,

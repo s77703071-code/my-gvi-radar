@@ -1,11 +1,17 @@
 """Validate chart quotes and preserve the last usable response per view."""
 
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
+from .quote_contract import MarketQuote, QuoteKind, QuoteStatus
+
+
+CHART_QUOTE_SOURCE = "Yahoo Finance"
 
 
 def _current_chart_frame(ticker, config):
@@ -42,6 +48,21 @@ def load_chart_quote(ticker, config):
     if len(cache) > 12:
         cache.pop(next(iter(cache)))
     return frame.copy(), False
+
+
+def load_chart_market_quote(ticker, config):
+    frame, failed = load_chart_quote(ticker, config)
+    currency = "TWD" if ticker.endswith((".TW", ".TWO")) else None
+    if frame is None:
+        quote = MarketQuote(ticker, CHART_QUOTE_SOURCE, QuoteKind.CHART_BAR,
+                            QuoteStatus.UNAVAILABLE, currency=currency)
+    else:
+        stamp = frame.index[-1]
+        as_of = stamp if config["i"].endswith("m") else stamp.date()
+        status = QuoteStatus.LAST_VALID if failed else QuoteStatus.AVAILABLE
+        quote = MarketQuote(ticker, CHART_QUOTE_SOURCE, QuoteKind.CHART_BAR, status,
+                            Decimal(str(frame["Close"].iloc[-1])), as_of, currency)
+    return frame, quote
 
 
 def chart_time_label(timestamp, interval, ticker):

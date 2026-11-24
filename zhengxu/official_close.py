@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 import streamlit as st
 
+from .quote_contract import MarketQuote, QuoteKind, QuoteStatus
 from .storage import BASE_DIR
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -186,6 +187,16 @@ def _refresh_official_close(ticker, previous):
     return saved, None, None
 
 
+def official_close_market_quote(ticker, close, error):
+    source = PILOT_SOURCES[ticker]
+    if close is None:
+        return MarketQuote(ticker, source, QuoteKind.OFFICIAL_CLOSE, QuoteStatus.UNAVAILABLE,
+                           currency="TWD")
+    status = QuoteStatus.LAST_VALID if error else QuoteStatus.AVAILABLE
+    return MarketQuote(ticker, source, QuoteKind.OFFICIAL_CLOSE, status,
+                       close.price, close.trading_day, "TWD", close.retrieved_at)
+
+
 def render_official_close(ticker):
     if ticker not in PILOT_SOURCES:
         return
@@ -199,14 +210,14 @@ def render_official_close(ticker):
     close, error, cache_warning = st.session_state[key]
     if cache_warning:
         st.warning(cache_warning)
-    source = PILOT_SOURCES[ticker]
-    if close is None:
-        st.info(f"正式收盤價資料暫缺 · {source} · {error or '等待發布'}")
+    quote = official_close_market_quote(ticker, close, error)
+    if quote.status is QuoteStatus.UNAVAILABLE:
+        st.info(f"正式收盤價資料暫缺 · {quote.source} · {error or '等待發布'}")
         return
-    st.metric(f"{ticker} 正式收盤價", f"NT$ {close.price:,.2f}")
-    st.caption(f"{source} · 交易日 {close.trading_day:%Y-%m-%d} · "
-               f"取得時間 {close.retrieved_at:%Y-%m-%d %H:%M:%S}（台北）")
-    if error:
+    st.metric(f"{ticker} 正式收盤價", f"NT$ {quote.price:,.2f}")
+    st.caption(f"{quote.source} · 交易日 {quote.as_of:%Y-%m-%d} · "
+               f"取得時間 {quote.retrieved_at:%Y-%m-%d %H:%M:%S}（台北）")
+    if quote.status is QuoteStatus.LAST_VALID:
         st.warning(f"{error}。顯示最後有效收盤價。")
-    elif close.trading_day < datetime.now(TAIPEI).date():
+    elif quote.as_of < datetime.now(TAIPEI).date():
         st.caption("顯示已取得的最近盤後資料，請以交易日辨識。")
