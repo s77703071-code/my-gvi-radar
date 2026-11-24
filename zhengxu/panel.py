@@ -107,7 +107,7 @@ def render_analysis(auth_user, selected_stock, selected_module, explanation_styl
 
     if selected_module == "🧭 投資組合理財":
         _render_market_psychology_guide(st, selected_module, explanation_style)
-        render_legacy_portfolio(_render_stock_actions, auth_user)
+        render_legacy_portfolio(_render_stock_actions, auth_user, open_chart=_jump_to_stock_diagnosis)
         return
 
     chart_page = selected_module == "📊 彩色 K 線圖與成交量"

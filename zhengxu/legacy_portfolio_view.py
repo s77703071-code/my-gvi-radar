@@ -11,13 +11,14 @@ from .portfolio import (
     _render_portfolio_export_link,
     _render_portfolio_pilot,
 )
+from .portfolio_research import render_portfolio_research
 from .storage import (
     DB_FILE,
     _export_portfolio,
 )
 
 
-def render_legacy_portfolio(_render_stock_actions, auth_user):
+def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
     st.subheader("🧭 投資組合理財")
     st.caption("本模組只管理投資組合，不管理個人收入／支出，也不會自動下單。初始配置僅為可修改的示範值，不代表最佳配置或回撤保證。")
     if _is_portfolio_pilot(auth_user):
@@ -33,7 +34,7 @@ def render_legacy_portfolio(_render_stock_actions, auth_user):
             index=int(st.session_state.get("portfolio_workbench_cloud", False)),
         )
         if source == cloud_label:
-            _render_portfolio_pilot(auth_user)
+            _render_portfolio_pilot(auth_user, open_chart=open_chart)
             st.stop()
 
     portfolio_user_id = int(auth_user["id"])
@@ -140,6 +141,12 @@ def render_legacy_portfolio(_render_stock_actions, auth_user):
             st.success("持倉已新增。請注意：最新價格與匯率由你輸入，需自行更新。")
 
     positions = _portfolio_positions()
+    research_rows = positions.rename(columns={
+        "代碼": "symbol", "名稱": "name", "資產類型": "asset_type", "幣別": "currency",
+        "數量": "quantity", "最新價格": "price", "換算台幣匯率": "fx_to_twd",
+    }).to_dict("records")
+    render_portfolio_research(research_rows, scope=f"local_{portfolio_user_id}",
+                              source="原有投資組合", open_chart=open_chart)
     st.markdown("#### 3. 持倉明細與配置計算")
     if positions.empty:
         st.info("目前尚無持倉。先新增股票、債券 ETF 或現金項目，即可計算組合配置。")

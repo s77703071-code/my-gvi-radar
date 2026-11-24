@@ -19,6 +19,7 @@ from .accounts import (
     _dual_grid_public_api_key,
     _supabase_auth_config,
 )
+from .portfolio_research import render_portfolio_research
 from .storage import (
     _encode_portfolio_export,
 )
@@ -871,7 +872,7 @@ def _render_pilot_trade(account):
             _submit_pilot_trade(account, state)
 
 
-def _render_portfolio_pilot(account):
+def _render_portfolio_pilot(account, *, open_chart):
     try:
         data = _read_portfolio_pilot(account)
     except (KeyError, ValueError, OverflowError, RuntimeError, requests.RequestException):
@@ -881,6 +882,8 @@ def _render_portfolio_pilot(account):
     settings = data["settings"]
     positions = data["positions"]
     snapshots = data["snapshots"]
+    render_portfolio_research(positions, scope=f"cloud_{account['id']}",
+                              source="雲端投資組合", open_chart=open_chart)
     if data["revision"] == 0:
         st.info("目前沒有雲端投資組合資料。")
     if os.environ.get("GVI_PORTFOLIO_PILOT_SETTINGS_WRITE") == "1":
