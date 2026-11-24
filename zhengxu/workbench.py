@@ -383,22 +383,29 @@ def _render_investment_workbench(account, explanation_style):
         with st.container(key="workbench_hero"):
             st.title("投資工作台")
             st.caption("正序 · 投資，從理解開始")
-        with st.container(border=True, key="workbench_card_assets"):
-            _render_workbench_portfolio_summary(account, cloud)
-            if explanation_style.startswith("生動童趣"):
-                st.caption("像用帳本上的標價盤點家當。市值會隨價格與匯率變動。")
-        with st.container(key="workbench_middle"):
-            market, research_tools = st.columns([2.15, 1])
-            with market.container(border=True, key="workbench_card_market", height="stretch"):
-                _render_workbench_market_trend(account)
-            with research_tools.container(border=True, key="workbench_card_tools", height="stretch"):
-                _render_workbench_shortcuts(cloud)
-        with st.container(key="workbench_personal"):
-            watchlist, research = st.columns(2)
-            with watchlist.container(border=True, key="workbench_card_watchlist"):
-                _render_workbench_watchlist()
-            with research.container(border=True, key="workbench_card_research"):
-                _render_workbench_research()
-        if cloud and os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1":
-            with st.container(border=True, key="workbench_card_trades"):
+        show_trades = cloud and os.environ.get("GVI_PORTFOLIO_PILOT_TRADE") == "1"
+        labels = ["總覽", "自選股與回測"]
+        if show_trades:
+            labels.append("最近成交")
+        pages = st.tabs(labels)
+        with pages[0]:
+            with st.container(border=True, key="workbench_card_assets"):
+                _render_workbench_portfolio_summary(account, cloud)
+                if explanation_style.startswith("生動童趣"):
+                    st.caption("像用帳本上的標價盤點家當。市值會隨價格與匯率變動。")
+            with st.container(key="workbench_middle"):
+                market, research_tools = st.columns([2.15, 1])
+                with market.container(border=True, key="workbench_card_market", height="stretch"):
+                    _render_workbench_market_trend(account)
+                with research_tools.container(border=True, key="workbench_card_tools", height="stretch"):
+                    _render_workbench_shortcuts(cloud)
+        with pages[1]:
+            with st.container(key="workbench_personal"):
+                watchlist, research = st.columns(2)
+                with watchlist.container(border=True, key="workbench_card_watchlist"):
+                    _render_workbench_watchlist()
+                with research.container(border=True, key="workbench_card_research"):
+                    _render_workbench_research()
+        if show_trades:
+            with pages[2], st.container(border=True, key="workbench_card_trades"):
                 _render_workbench_recent_trades(account)
