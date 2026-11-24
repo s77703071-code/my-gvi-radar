@@ -202,14 +202,20 @@ def _render_pilot_settings_form(account, data):
         st.caption("下方是表單建議值，儲存後才會寫入你的雲端配置。")
     with st.form("pilot_configuration_" + state["form_id"]):
         values = {}
-        for name, (default, minimum, maximum) in PILOT_SETTINGS_FIELDS.items():
-            value = default if stored is None else float(stored[name])
-            # Older data can lie outside today's editable bounds.
-            values[name] = st.number_input(
-                PILOT_SETTING_LABELS[name], min_value=min(minimum, value),
-                max_value=max(maximum, value) if maximum is not None else None,
-                value=value, key=f"{state['form_id']}_{name}",
-            )
+        for fields in (
+            ("target_stock_pct", "target_bond_pct", "target_cash_pct"),
+            ("rebalance_threshold_pct", "minimum_cash_twd"),
+            ("drawdown_warning_pct", "drawdown_review_pct", "drawdown_limit_pct"),
+        ):
+            for column, name in zip(st.columns(len(fields)), fields):
+                default, minimum, maximum = PILOT_SETTINGS_FIELDS[name]
+                value = default if stored is None else float(stored[name])
+                # Older data can lie outside today's editable bounds.
+                values[name] = column.number_input(
+                    PILOT_SETTING_LABELS[name], min_value=min(minimum, value),
+                    max_value=max(maximum, value) if maximum is not None else None,
+                    value=value, key=f"{state['form_id']}_{name}",
+                )
         if st.form_submit_button("儲存雲端配置"):
             state["pending"] = {"p_expected_revision": state["revision"],
                                 "p_operation_id": str(uuid4()), "p_settings": values}
@@ -262,7 +268,7 @@ def _submit_pilot_portfolio_operation(account, state, *, route="add_position"):
     st.rerun()
 
 
-def _pilot_position_fields(key_prefix, position=None):
+def _pilot_position_fields(key_prefix, position=None, *, name_column=None):
     stored = position or {}
     asset_types = ("股票", "債券", "現金")
     currencies = ("TWD", "USD", "JPY", "HKD", "EUR")
@@ -272,20 +278,24 @@ def _pilot_position_fields(key_prefix, position=None):
         asset_types += (asset,)
     if currency not in currencies:
         currencies += (currency,)
+    name_column = name_column if name_column is not None else st
+    name = name_column.text_input("持倉名稱", value=stored.get("name", ""), key=f"{key_prefix}_name")
+    asset_column, currency_column = st.columns(2)
     values = {
-        "name": st.text_input("持倉名稱", value=stored.get("name", ""), key=f"{key_prefix}_name"),
-        "asset_type": st.selectbox("持倉類型", asset_types, index=asset_types.index(asset), key=f"{key_prefix}_asset"),
-        "currency": st.selectbox("持倉幣別", currencies, index=currencies.index(currency), key=f"{key_prefix}_currency"),
+        "name": name,
+        "asset_type": asset_column.selectbox("持倉類型", asset_types, index=asset_types.index(asset), key=f"{key_prefix}_asset"),
+        "currency": currency_column.selectbox("持倉幣別", currencies, index=currencies.index(currency), key=f"{key_prefix}_currency"),
     }
-    for field, label, minimum in (
+    numeric_columns = [*st.columns(2), *st.columns(2)]
+    for column, (field, label, minimum) in zip(numeric_columns, (
         ("quantity", "持倉數量", 0.0),
         ("price", "持倉單價", 0.0),
         ("fx_to_twd", "兌台幣匯率", 0.000001),
         ("cost_basis_twd", "持倉總成本（台幣）", 0.0),
-    ):
+    )):
         value = float(stored[field]) if position is not None else None
         help_text = "每一單位持倉幣別可兌換的台幣金額。TWD 請填 1。" if field == "fx_to_twd" else None
-        edited = st.number_input(label, min_value=min(minimum, value) if value is not None else minimum,
+        edited = column.number_input(label, min_value=min(minimum, value) if value is not None else minimum,
                                  value=value, format="%.6f", help=help_text, key=f"{key_prefix}_{field}")
         values[field] = stored[field] if position is not None and edited == value else edited
     return values
@@ -369,8 +379,9 @@ def _render_pilot_position_form(account, data):
         return
 
     with st.form("pilot_position_" + state["form_id"]):
-        symbol = st.text_input("持倉代碼")
-        values = _pilot_position_fields(state["form_id"])
+        symbol_column, name_column = st.columns((1, 2))
+        symbol = symbol_column.text_input("持倉代碼")
+        values = _pilot_position_fields(state["form_id"], name_column=name_column)
         if st.form_submit_button("儲存新增持倉"):
             if not symbol.strip() or any(value is None for value in values.values()) or values["quantity"] <= 0:
                 st.error("請填寫持倉代碼、正數數量、單價、匯率及總成本。")
@@ -568,12 +579,14 @@ def _render_pilot_income(account):
     if "pending" in state:
         return
     with st.form("pilot_income_" + state["form_id"], clear_on_submit=False):
-        kind = st.selectbox("收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get)
-        booked_on = st.date_input("實際入帳日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
+        kind_col, date_col, currency_col = st.columns(3)
+        amount_col, reference_col = st.columns(2)
+        kind = kind_col.selectbox("收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get)
+        booked_on = date_col.date_input("實際入帳日", value=None, min_value=pd.Timestamp("1900-01-01").date(),
                                   max_value=pd.Timestamp.now(tz="Asia/Taipei").date())
-        currency = st.selectbox("收入幣別", PILOT_ENTRY_CURRENCIES)
-        amount = st.text_input("實收金額（原幣）", help="請輸入實際入帳金額，最多可填 12 位小數。").strip()
-        reference = st.text_input("標的或帳戶（選填）", max_chars=100).strip()
+        currency = currency_col.selectbox("收入幣別", PILOT_ENTRY_CURRENCIES)
+        amount = amount_col.text_input("實收金額（原幣）", help="請輸入實際入帳金額，最多可填 12 位小數。").strip()
+        reference = reference_col.text_input("標的或帳戶（選填）", max_chars=100).strip()
         note = st.text_area("收入備註（選填）", max_chars=500).strip()
         if st.form_submit_button("儲存投資收入"):
             if booked_on is None or not PILOT_ENTRY_DECIMAL.fullmatch(amount) or not any(c in "123456789" for c in amount):
@@ -652,21 +665,24 @@ def _pilot_trade_display(row):
 def _pilot_trade_form_fields(initial=None):
     values = initial or {}
     prefix = "更正後" if initial is not None else ""
-    side = st.selectbox(f"{prefix}成交方向", tuple(PILOT_TRADE_SIDES), format_func=PILOT_TRADE_SIDES.get,
+    side_col, symbol_col, date_col = st.columns((1, 1, 1.3))
+    currency_col, quantity_col, price_col = st.columns(3)
+    side = side_col.selectbox(f"{prefix}成交方向", tuple(PILOT_TRADE_SIDES), format_func=PILOT_TRADE_SIDES.get,
                         index=tuple(PILOT_TRADE_SIDES).index(values.get("side", "buy")))
-    symbol = st.text_input(f"{prefix}成交標的", value=values.get("symbol", ""), max_chars=40).strip()
+    symbol = symbol_col.text_input(f"{prefix}成交標的", value=values.get("symbol", ""), max_chars=40).strip()
     current_date = pd.Timestamp.now(tz="Asia/Taipei").date()
     initial_date = date.fromisoformat(values["executed_on"]) if values.get("executed_on") else None
     first_date = date(1900, 1, 1)
-    executed_on = st.date_input(f"{prefix}實際成交日", value=initial_date, min_value=min(first_date, initial_date or first_date),
+    executed_on = date_col.date_input(f"{prefix}實際成交日", value=initial_date, min_value=min(first_date, initial_date or first_date),
                                 max_value=current_date)
-    currency = st.selectbox(f"{prefix}成交幣別", PILOT_ENTRY_CURRENCIES,
+    currency = currency_col.selectbox(f"{prefix}成交幣別", PILOT_ENTRY_CURRENCIES,
                             index=PILOT_ENTRY_CURRENCIES.index(values.get("currency", "TWD")))
-    quantity = st.text_input(f"{prefix}成交數量", value=values.get("quantity", "")).strip()
-    price = st.text_input(f"{prefix}成交單價（原幣）", value=values.get("unit_price", "")).strip()
+    quantity = quantity_col.text_input(f"{prefix}成交數量", value=values.get("quantity", "")).strip()
+    price = price_col.text_input(f"{prefix}成交單價（原幣）", value=values.get("unit_price", "")).strip()
     st.caption("數量與金額最多可填 12 位小數。費用使用成交幣別，空白代表未填，無費用請輸入 0。")
-    fee = st.text_input(f"{prefix}手續費（選填）", value=values.get("fee") or "").strip()
-    tax = st.text_input(f"{prefix}交易稅（選填）", value=values.get("tax") or "").strip()
+    fee_col, tax_col = st.columns(2)
+    fee = fee_col.text_input(f"{prefix}手續費（選填）", value=values.get("fee") or "").strip()
+    tax = tax_col.text_input(f"{prefix}交易稅（選填）", value=values.get("tax") or "").strip()
     note = st.text_area(f"{prefix}成交備註（選填）", value=values.get("note") or "", max_chars=500).strip()
     return {"side": side, "symbol": symbol, "executed_on": executed_on.isoformat() if executed_on else None,
             "currency": currency, "quantity": quantity, "unit_price": price,
@@ -688,15 +704,17 @@ def _pilot_income_display(row):
 
 
 def _pilot_income_correction_fields(initial):
-    kind = st.selectbox("更正後收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get,
+    kind_col, date_col, currency_col = st.columns(3)
+    amount_col, reference_col = st.columns(2)
+    kind = kind_col.selectbox("更正後收入類型", tuple(PILOT_INCOME_TYPES), format_func=PILOT_INCOME_TYPES.get,
                         index=tuple(PILOT_INCOME_TYPES).index(initial["income_type"]))
     original_date = date.fromisoformat(initial["booked_on"])
-    booked_on = st.date_input("更正後實際入帳日", value=original_date, min_value=min(date(1900, 1, 1), original_date),
+    booked_on = date_col.date_input("更正後實際入帳日", value=original_date, min_value=min(date(1900, 1, 1), original_date),
                               max_value=max(original_date, pd.Timestamp.now(tz="Asia/Taipei").date()))
-    currency = st.selectbox("更正後收入幣別", PILOT_ENTRY_CURRENCIES,
+    currency = currency_col.selectbox("更正後收入幣別", PILOT_ENTRY_CURRENCIES,
                             index=PILOT_ENTRY_CURRENCIES.index(initial["currency"]))
-    amount = st.text_input("更正後實收金額（原幣）", value=initial["net_amount"]).strip()
-    reference = st.text_input("更正後標的或帳戶（選填）", value=initial["reference"] or "", max_chars=100).strip()
+    amount = amount_col.text_input("更正後實收金額（原幣）", value=initial["net_amount"]).strip()
+    reference = reference_col.text_input("更正後標的或帳戶（選填）", value=initial["reference"] or "", max_chars=100).strip()
     note = st.text_area("更正後收入備註（選填）", value=initial["note"] or "", max_chars=500).strip()
     return {"income_type": kind, "booked_on": booked_on.isoformat() if booked_on else None,
             "currency": currency, "net_amount": amount, "reference": reference or None, "note": note or None}
