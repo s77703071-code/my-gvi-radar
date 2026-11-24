@@ -2,8 +2,6 @@
 
 from base64 import b64encode
 from contextlib import closing
-from math import fsum
-from math import isfinite
 from pathlib import Path
 from plotly.subplots import make_subplots
 import numpy as np
@@ -15,6 +13,7 @@ import requests
 import sqlite3
 import streamlit as st
 
+from .asset_state import build_asset_state
 from .chart_view import render_chart_workspace
 from .market_data import (
     WORKBENCH_INDEXES,
@@ -37,6 +36,7 @@ from .portfolio import (
     _read_pilot_trade_entries,
     _read_portfolio_pilot,
 )
+from .portfolio_research import format_twd, render_cash_valuation, valuation_total_label
 from .storage import (
     DB_FILE,
     _read_legacy_positions,
@@ -198,21 +198,6 @@ def _render_workbench_market_trend(account):
     render_chart_workspace(plot, account["id"], f"index:{symbol}", f"{label} K 線與技術指標")
 
 
-def _workbench_position_total(positions):
-    values = []
-    for row in positions:
-        quantity, price, fx = (row[field] for field in ("quantity", "price", "fx_to_twd"))
-        if (not all(type(number) in (int, float) and isfinite(number)
-                    for number in (quantity, price, fx))
-                or quantity <= 0 or price < 0 or fx <= 0):
-            raise ValueError("Invalid position valuation input")
-        values.append(quantity * price * fx)
-    total = fsum(values)
-    if not isfinite(total):
-        raise ValueError("Invalid portfolio total")
-    return total
-
-
 def _render_workbench_portfolio_summary(account, cloud):
     st.subheader("個人資產摘要")
     st.caption("資料來源為雲端投資組合。" if cloud else "資料來源為原有投資組合。")
@@ -230,18 +215,21 @@ def _render_workbench_portfolio_summary(account, cloud):
     if not positions:
         st.info("目前尚無持倉。")
         return
-    total_card, count_card, stock_card, cash_card = st.columns(4)
-    count_card.metric("持倉筆數", len(positions))
-    try:
-        total = _workbench_position_total(positions)
-    except (KeyError, ValueError, OverflowError):
-        st.warning("持倉價格、數量或匯率資料缺失或異常，暫無法估算總市值。")
-        return
-    total_card.metric("組合估算市值（台幣）", f"NT${total:,.0f}")
-    if total > 0:
-        for column, kind in ((stock_card, "股票"), (cash_card, "現金")):
-            subtotal = _workbench_position_total(row for row in positions if row.get("asset_type") == kind)
-            column.metric(f"{kind}市值占比", f"{subtotal / total:.1%}")
+    assets = build_asset_state(positions)
+    total = assets.total
+    total_card, coverage_card, stock_card, cash_card = st.columns(4)
+    total_card.metric(valuation_total_label(total), format_twd(total.subtotal))
+    coverage_card.metric("可估值持倉", f"{total.priced}／{total.count} 筆")
+    stock_share = "—"
+    cash_share = None
+    if not total.incomplete and total.subtotal:
+        stock_share = (f"{assets.stock.subtotal / total.subtotal:.2%}"
+                       if assets.stock.subtotal is not None else "0.00%")
+        cash_share = (assets.cash.subtotal or 0) / total.subtotal
+    stock_card.metric("股票市值占比", stock_share)
+    render_cash_valuation(cash_card, assets.cash, share=cash_share)
+    if total.incomplete:
+        st.warning("部分持倉無法估值。暫以可估值部分顯示小計，完整占比待資料補齊。")
     st.caption("依帳本保存的持倉數量、價格與匯率估算。")
 
 
