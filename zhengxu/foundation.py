@@ -92,5 +92,14 @@ def record_module_event(session, scope, target, status="已開啟"):
     ]
 
 
+def record_module_action(session, scope, label, status):
+    state = _activity(session, scope)
+    current = state["current"]
+    state["events"] = [
+        ModuleEvent(datetime.now(timezone.utc), current[0] if current else None, label, status),
+        *state["events"][:ACTIVITY_LIMIT - 1],
+    ]
+
+
 def module_events(session, scope):
     return tuple(_activity(session, scope)["events"])

@@ -8,6 +8,7 @@ import streamlit as st
 
 from .asset_exposure import build_asset_exposure
 from .asset_state import build_asset_state, ledger_number
+from .risk_review import DEMO_SETTINGS, DEMO_SNAPSHOTS, render_risk_budget
 
 
 DEMO_POSITIONS = (
@@ -123,8 +124,7 @@ def _exposure_table(column, groups, exposure, *, label, incomplete, allow_weight
     } for item in groups], hide_index=True, width="stretch")
 
 
-def _render_asset_exposure(rows, assets):
-    exposure = build_asset_exposure(rows, assets)
+def _render_asset_exposure(assets, exposure):
     classes, positions = st.columns(2)
     classes.markdown("##### 資產類別分布")
     _exposure_table(classes, exposure.classes, exposure, label="資產類別", incomplete=assets.total.incomplete)
@@ -148,7 +148,7 @@ def _render_asset_exposure(rows, assets):
         st.info("總市值為零，無法計算占比。")
 
 
-def render_portfolio_research(positions, *, scope, source, open_chart):
+def render_portfolio_research(positions, *, scope, source, open_chart, settings=None, snapshots=()):
     key = f"portfolio_research_{scope}"
     with st.expander("持倉研究（唯讀）", expanded=True):
         use_demo = st.toggle("使用示範資料", key=f"{key}_demo")
@@ -157,16 +157,22 @@ def render_portfolio_research(positions, *, scope, source, open_chart):
             st.info("目前使用固定示範資料。示範金額與行情無關，也不會寫入帳本。")
         else:
             st.caption(f"資料來源為{source}。估值使用帳本已儲存的數量、價格及匯率。")
-        if not rows:
-            st.info("目前沒有持倉。可開啟上方示範資料試用。")
-            return
-
         assets = build_asset_state(rows)
-        valuation_tab, exposure_tab = st.tabs(("估值與成本", "分布與集中度"))
+        valuation_tab, exposure_tab, risk_tab = st.tabs(("估值與成本", "分布與集中度", "風險與資金預算"))
         with valuation_tab:
-            _render_position_valuation(rows, assets, key=key, use_demo=use_demo, open_chart=open_chart)
+            if rows:
+                _render_position_valuation(rows, assets, key=key, use_demo=use_demo, open_chart=open_chart)
+            else:
+                st.info("目前沒有持倉。可開啟上方示範資料試用。")
+        exposure = build_asset_exposure(rows, assets)
         with exposure_tab:
-            _render_asset_exposure(rows, assets)
+            if rows:
+                _render_asset_exposure(assets, exposure)
+            else:
+                st.info("目前沒有持倉可分析。")
+        with risk_tab:
+            render_risk_budget(assets, exposure, DEMO_SETTINGS if use_demo else settings or {},
+                               DEMO_SNAPSHOTS if use_demo else snapshots, key=key, demo=use_demo)
 
 
 def _render_position_valuation(rows, assets, *, key, use_demo, open_chart):
