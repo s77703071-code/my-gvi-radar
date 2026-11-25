@@ -37,6 +37,7 @@ from .portfolio import (
     _read_portfolio_pilot,
 )
 from .portfolio_research import format_twd, render_cash_valuation, valuation_total_label
+from .research_workflow_view import render_research_workflow
 from .storage import (
     DB_FILE,
     _read_legacy_positions,
@@ -297,6 +298,25 @@ def _render_module_activity(account):
     } for item in events], hide_index=True, width="stretch")
 
 
+def _read_research_workflow_ledger(account, cloud):
+    if cloud:
+        data = _read_portfolio_pilot(account)
+        return data["positions"], data["settings"], "雲端投資組合"
+    try:
+        uri = Path(DB_FILE).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            owner = AccountScope.from_session(account).local_id
+            positions = _read_legacy_positions(conn, owner)
+            settings = dict(conn.execute(
+                "SELECT setting_key, setting_value FROM portfolio_user_settings WHERE user_id=?",
+                (owner,),
+            ).fetchall())
+    except sqlite3.Error as error:
+        raise RuntimeError("Ledger temporarily unavailable") from error
+    return positions, settings, "原有投資組合"
+
+
 def _render_investment_workbench(account, explanation_style):
     backdrop = Path(__file__).resolve().parents[1] / "assets" / "workbench-dawn.webp"
     if backdrop.is_file():
@@ -390,6 +410,9 @@ def _render_investment_workbench(account, explanation_style):
         labels = ["總覽", "自選股與回測"]
         if show_trades:
             labels.append("最近成交")
+        show_workflow = feature_enabled("GVI_RESEARCH_WORKFLOW_PREVIEW")
+        if show_workflow:
+            labels.append("研究工作流")
         labels.append("本次操作紀錄")
         pages = st.tabs(labels)
         with pages[0]:
@@ -413,5 +436,8 @@ def _render_investment_workbench(account, explanation_style):
         if show_trades:
             with pages[2], st.container(border=True, key="workbench_card_trades"):
                 _render_workbench_recent_trades(account)
+        if show_workflow:
+            with pages[-2]:
+                render_research_workflow(account, lambda: _read_research_workflow_ledger(account, cloud))
         with pages[-1]:
             _render_module_activity(account)
