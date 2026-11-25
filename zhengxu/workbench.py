@@ -4,6 +4,8 @@ from base64 import b64encode
 from contextlib import closing
 from pathlib import Path
 from plotly.subplots import make_subplots
+import os
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -410,7 +412,7 @@ def _render_investment_workbench(account, explanation_style):
         labels = ["總覽", "自選股與回測"]
         if show_trades:
             labels.append("最近成交")
-        show_workflow = feature_enabled("GVI_RESEARCH_WORKFLOW_PREVIEW")
+        show_workflow = os.environ.get("GVI_RESEARCH_WORKFLOW_PREVIEW", "1") == "1"
         if show_workflow:
             labels.append("研究工作流")
         labels.append("本次操作紀錄")
