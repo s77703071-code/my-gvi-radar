@@ -1009,7 +1009,8 @@ def _render_pilot_holdings(account, data, *, scope, open_chart):
 
     positions = data["positions"]
     render_portfolio_research(positions, scope=f"cloud_{account['id']}",
-                              source="雲端投資組合", open_chart=open_chart)
+                              source="雲端投資組合", open_chart=open_chart,
+                              settings=data["settings"], snapshots=data["snapshots"])
     if data["revision"] == 0:
         st.info("目前沒有雲端投資組合資料。")
     if positions:

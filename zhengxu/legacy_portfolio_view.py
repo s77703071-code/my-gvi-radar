@@ -1,5 +1,7 @@
 """Legacy portfolio settings, holdings and allocation workflows."""
 
+from contextlib import closing
+
 import numpy as np
 import pandas as pd
 import sqlite3
@@ -75,6 +77,17 @@ def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
                 "FROM portfolio_positions WHERE user_id=? ORDER BY id DESC",
                 _conn, params=(portfolio_user_id,)
             )
+
+    def _portfolio_snapshots():
+        try:
+            with closing(sqlite3.connect(DB_FILE)) as conn:
+                conn.row_factory = sqlite3.Row
+                return [dict(row) for row in conn.execute(
+                    "SELECT snapshot_date, total_value_twd FROM portfolio_snapshots WHERE user_id=? ORDER BY id",
+                    (portfolio_user_id,),
+                ).fetchall()]
+        except (sqlite3.Error, TypeError, ValueError):
+            return None
 
     settings = _portfolio_load_settings()
     with config_tab:
@@ -152,7 +165,8 @@ def render_legacy_portfolio(_render_stock_actions, auth_user, *, open_chart):
     }).to_dict("records")
     with holdings_view_tab:
         render_portfolio_research(research_rows, scope=f"local_{portfolio_user_id}",
-                                  source="原有投資組合", open_chart=open_chart)
+                                  source="原有投資組合", open_chart=open_chart,
+                                  settings=settings, snapshots=_portfolio_snapshots())
         st.markdown("#### 持倉明細與配置計算")
     if positions.empty:
         with holdings_view_tab:
